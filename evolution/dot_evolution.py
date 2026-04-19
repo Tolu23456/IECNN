@@ -62,12 +62,14 @@ class DotEvolution:
         if n == 0:
             return dots
 
-        eff = memory.all_effectivenesses()
+        dot_ids = [d.dot_id for d in dots]
+        eff = memory.all_effectivenesses(dot_ids)
         cfg = self.config
 
         # Minimum runs before evolution kicks in
-        total_runs = float(np.sum(memory.total_count))
-        if total_runs < cfg.min_generations * n:
+        # We check the mean total count of the current dots
+        avg_total_count = np.mean([memory._total_counts.get(did, 0.0) for did in dot_ids])
+        if avg_total_count < cfg.min_generations:
             self._generation += 1
             return dots  # too early — not enough data yet
 
@@ -77,24 +79,24 @@ class DotEvolution:
         n_cross    = max(1, int(n * cfg.crossover_fraction))
         n_random   = n - n_keep - n_clone - n_cross
 
-        # Sort dots by effectiveness
+        # Sort indices by effectiveness
         order = np.argsort(eff)[::-1]
-        elite_ids   = list(order[:n_keep])
-        replace_ids = list(order[n_keep:])
+        elite_indices   = list(order[:n_keep])
+        replace_indices = list(order[n_keep:])
 
         new_pool = [None] * n
 
         # 1. Elites — keep unchanged
-        for i, did in enumerate(elite_ids):
-            new_pool[did] = dots[did]
+        for i, idx in enumerate(elite_indices):
+            new_pool[idx] = dots[idx]
 
         # Slot the offspring into replaced positions
-        slots = iter(replace_ids)
+        slots = iter(replace_indices)
 
         # 2. Clones with mutation
         for _ in range(n_clone):
-            parent_id = self._tournament_select(elite_ids, eff, cfg.tournament_size)
-            parent    = dots[parent_id]
+            parent_idx = self._tournament_select(elite_indices, eff, cfg.tournament_size)
+            parent    = dots[parent_idx]
             child     = self._mutate(parent, cfg)
             try:
                 slot = next(slots)
@@ -104,9 +106,9 @@ class DotEvolution:
 
         # 3. Crossover offspring
         for _ in range(n_cross):
-            p1_id = self._tournament_select(elite_ids, eff, cfg.tournament_size)
-            p2_id = self._tournament_select(elite_ids, eff, cfg.tournament_size)
-            child = self._crossover(dots[p1_id], dots[p2_id])
+            p1_idx = self._tournament_select(elite_indices, eff, cfg.tournament_size)
+            p2_idx = self._tournament_select(elite_indices, eff, cfg.tournament_size)
+            child = self._crossover(dots[p1_idx], dots[p2_idx])
             try:
                 slot = next(slots)
                 new_pool[slot] = child
@@ -117,9 +119,8 @@ class DotEvolution:
         for _ in range(max(0, n_random)):
             try:
                 slot = next(slots)
-                dot_id = slot
                 new_dot = NeuralDot(
-                    dot_id=dot_id,
+                    dot_id=None, # New unique ID
                     feature_dim=dots[0].feature_dim,
                     bias=BiasVector.random(self._rng),
                     dot_type=DotType(self._rng.randint(0, len(DotType.__members__))),
@@ -129,7 +130,7 @@ class DotEvolution:
             except StopIteration:
                 break
 
-        # Fill any remaining None slots (shouldn't happen, but be safe)
+        # Fill any remaining None slots
         for i in range(n):
             if new_pool[i] is None:
                 new_pool[i] = dots[i]
@@ -137,13 +138,21 @@ class DotEvolution:
         self._generation += 1
         return new_pool
 
-    def _tournament_select(self, candidates: List[int], eff: np.ndarray, k: int) -> int:
-        """k-tournament selection among candidate dot IDs."""
-        if len(candidates) <= 1:
-            return candidates[0] if candidates else 0
-        k = min(k, len(candidates))
-        contestants = self._rng.choice(candidates, size=k, replace=False)
-        return int(contestants[np.argmax(eff[contestants])])
+    def _tournament_select(self, candidates_indices: List[int], eff: np.ndarray, k: int) -> int:
+        """k-tournament selection among candidate dot indices."""
+        if len(candidates_indices) <= 1:
+            return candidates_indices[0] if candidates_indices else 0
+        k = min(k, len(candidates_indices))
+        subset_indices = self._rng.choice(len(candidates_indices), size=k, replace=False)
+        contestant_indices = [candidates_indices[i] for i in subset_indices]
+
+        best_idx = contestant_indices[0]
+        best_eff = eff[best_idx]
+        for idx in contestant_indices[1:]:
+            if eff[idx] > best_eff:
+                best_eff = eff[idx]
+                best_idx = idx
+        return best_idx
 
     def _mutate(self, dot, cfg: EvolutionConfig):
         """Clone a dot with Gaussian noise added to its bias and weights."""
@@ -156,7 +165,7 @@ class DotEvolution:
         new_b[-1] = max(new_b[-1], 0.05)  # temperature must be positive
 
         child = NeuralDot(
-            dot_id=dot.dot_id,
+            dot_id=dot.dot_id, # Keep ID for elites/clones
             feature_dim=dot.feature_dim,
             bias=BiasVector.from_array(new_b),
             dot_type=dot.dot_type,
@@ -175,7 +184,7 @@ class DotEvolution:
         b_arr = (p1.bias.to_array() + p2.bias.to_array()) / 2.0
 
         child = NeuralDot(
-            dot_id=p1.dot_id,
+            dot_id=p1.dot_id, # Use one of the parent IDs
             feature_dim=p1.feature_dim,
             bias=BiasVector.from_array(b_arr),
             dot_type=p1.dot_type,
@@ -190,23 +199,13 @@ class DotEvolution:
     def mutate_weak_dots(self, dots: list, effectivenesses: np.ndarray,
                           threshold: float = 0.10,
                           mutation_std: float = 0.05) -> list:
-        """
-        Inline (within-call) mutation of dots whose effectiveness is below `threshold`.
-
-        Unlike the between-call `evolve()` which replaces dots entirely, this
-        method transforms them in-place: adds Gaussian noise to weights and bias,
-        and with 20% probability switches the dot to a randomly chosen type.
-
-        `mutation_std` is adaptive — the pipeline passes a higher value when EUG
-        is stagnant (|U| < 0.01) to increase exploration breadth.
-
-        Returns the same dot list (mutated in-place where applicable).
-        """
+        """Inline (within-call) mutation."""
         from neural_dot.neural_dot import NeuralDot, BiasVector, DotType
 
         n_types = len(DotType.__members__)
-        for dot in dots:
-            eff = float(effectivenesses[dot.dot_id])
+        # effectivenesses matches the dots list order here
+        for i, dot in enumerate(dots):
+            eff = float(effectivenesses[i])
             if eff < threshold:
                 # Weight mutation
                 dot.W = dot.W + self._rng.randn(*dot.W.shape).astype(np.float32) * mutation_std
@@ -219,17 +218,17 @@ class DotEvolution:
                 b_arr = np.clip(b_arr + noise, 0.0, 2.0)
                 b_arr[-1] = max(float(b_arr[-1]), 0.05)
                 dot.bias = BiasVector.from_array(b_arr)
-                # Optional type switch (20% chance — creates new specialisation)
+                # Optional type switch (20% chance)
                 if self._rng.rand() < 0.20:
                     new_type = DotType(self._rng.randint(0, n_types))
                     dot.dot_type = new_type
         return dots
 
-    def stats(self, memory: DotMemory) -> dict:
-        eff = memory.all_effectivenesses()
+    def stats(self, memory: DotMemory, dot_ids: Optional[List[int]] = None) -> dict:
+        eff = memory.all_effectivenesses(dot_ids)
         return {
             "generation":   self._generation,
-            "top_dot_eff":  float(np.max(eff)),
-            "mean_eff":     float(np.mean(eff)),
-            "bottom_eff":   float(np.min(eff)),
+            "top_dot_eff":  float(np.max(eff)) if len(eff) > 0 else 0.5,
+            "mean_eff":     float(np.mean(eff)) if len(eff) > 0 else 0.5,
+            "bottom_eff":   float(np.min(eff)) if len(eff) > 0 else 0.5,
         }

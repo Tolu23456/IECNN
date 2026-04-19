@@ -231,17 +231,17 @@ def _invert_relational(p: np.ndarray) -> np.ndarray:
 
 def _invert_temporal(p: np.ndarray) -> np.ndarray:
     """
-    Temporal Inversion: treats the position-encoded segment [96:104]
+    Temporal Inversion: treats the position-encoded segment [224:232]
     as a sequence and reverses its temporal order; also applies a
-    causal reversal to the semantic dims [0:96] by splitting into 8
+    causal reversal to the semantic dims [0:224] by splitting into 8
     time steps and reversing.
     """
     out = p.copy()
     # Reverse position encoding dims (8 dims, 4 sin-cos pairs)
-    if len(out) >= 104:
-        out[96:104] = out[96:104][::-1]
-    # Reverse the 8 semantic "time steps" of 12 dims each (96/8 = 12)
-    n_sem = 96; step = n_sem // 8
+    if len(out) >= 232:
+        out[224:232] = out[224:232][::-1]
+    # Reverse the 8 semantic "time steps" of 28 dims each (224/8 = 28)
+    n_sem = 224; step = n_sem // 8
     steps = [out[i*step:(i+1)*step].copy() for i in range(8)]
     steps.reverse()
     for i, s in enumerate(steps):
