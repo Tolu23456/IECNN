@@ -45,6 +45,7 @@ class DotType(IntEnum):
     RELATIONAL = 3  # cross-token relations
     TEMPORAL   = 4  # sequential, position-weighted
     GLOBAL     = 5  # uniform broad overview
+    LOGIC      = 6  # structural/logical patterns (if-then, because)
 
 
 _TYPE_NAMES = {
@@ -54,15 +55,17 @@ _TYPE_NAMES = {
     DotType.RELATIONAL: "relational",
     DotType.TEMPORAL:   "temporal",
     DotType.GLOBAL:     "global",
+    DotType.LOGIC:      "logic",
 }
 
 _TYPE_DIM_RANGES = {
-    DotType.SEMANTIC:   (0,  64),
-    DotType.STRUCTURAL: (64, 128),
-    DotType.CONTEXTUAL: (0,  128),
-    DotType.RELATIONAL: (0,  128),
-    DotType.TEMPORAL:   (0,  128),
-    DotType.GLOBAL:     (0,  128),
+    DotType.SEMANTIC:   (0,   128),
+    DotType.STRUCTURAL: (128, 256),
+    DotType.CONTEXTUAL: (0,   256),
+    DotType.RELATIONAL: (0,   256),
+    DotType.TEMPORAL:   (0,   256),
+    DotType.GLOBAL:     (0,   256),
+    DotType.LOGIC:      (128, 256),  # focus on structure/flags
 }
 
 # Default bias presets per type (attention, granularity, abstraction, inversion, temperature)
@@ -73,9 +76,22 @@ _TYPE_BIAS_PRESETS: Dict[DotType, Tuple[float, ...]] = {
     DotType.RELATIONAL: (0.8, 0.4, 0.6, 0.5, 1.0),
     DotType.TEMPORAL:   (0.5, 0.6, 0.4, 0.3, 0.9),
     DotType.GLOBAL:     (0.3, 0.9, 0.7, 0.2, 0.7),
+    DotType.LOGIC:      (0.9, 0.6, 0.7, 0.1, 0.5), # high attention, low temperature
 }
 
-N_HEADS = 3  # number of prediction heads per dot
+N_HEADS = 4  # number of prediction heads per dot
+
+_NEXT_DOT_ID = 1000
+
+def set_next_dot_id(val: int):
+    global _NEXT_DOT_ID
+    _NEXT_DOT_ID = val
+
+def get_next_dot_id() -> int:
+    global _NEXT_DOT_ID
+    res = _NEXT_DOT_ID
+    _NEXT_DOT_ID += 1
+    return res
 
 
 # ── Bias Vector ───────────────────────────────────────────────────────
@@ -161,12 +177,12 @@ class NeuralDot:
       5. Returns a list of (prediction, confidence, info) tuples
     """
 
-    def __init__(self, dot_id: int, feature_dim: int = 128,
+    def __init__(self, dot_id: Optional[int] = None, feature_dim: int = 256,
                  bias: Optional[BiasVector] = None,
                  dot_type: DotType = DotType.SEMANTIC,
                  n_heads: int = N_HEADS,
                  seed: Optional[int] = None):
-        self.dot_id      = dot_id
+        self.dot_id      = dot_id if dot_id is not None else get_next_dot_id()
         self.feature_dim = feature_dim
         self.bias        = bias or BiasVector.from_dot_type(dot_type)
         self.dot_type    = dot_type
@@ -238,6 +254,8 @@ class NeuralDot:
             return self._temporal_pool(mat)
         if self.dot_type == DotType.RELATIONAL:
             return self._relational_pool(mat)
+        if self.dot_type == DotType.LOGIC:
+            return self._logic_pool(mat)
         if self.dot_type == DotType.GLOBAL:
             return np.mean(mat, axis=0)
 
@@ -275,6 +293,21 @@ class NeuralDot:
                 diff = mat[i] - mat[j]
                 diffs.append(diff)
         return np.mean(np.stack(diffs), axis=0)
+
+    def _logic_pool(self, mat: np.ndarray) -> np.ndarray:
+        """
+        Logic pooling: focus on structural transitions and conditional patterns.
+        Computes second-order differences (gradients of differences) to
+        detect shifts in logical flow.
+        """
+        n = mat.shape[0]
+        if n < 3: return np.mean(mat, axis=0)
+
+        diffs = np.diff(mat, axis=0)
+        accel = np.diff(diffs, axis=0)
+
+        # Combine mean state with structural acceleration
+        return 0.7 * np.mean(mat, axis=0) + 0.3 * np.mean(accel, axis=0)
 
     # ── Abstraction transform ─────────────────────────────────────────
 
@@ -349,15 +382,16 @@ class DotGenerator:
     """
 
     DEFAULT_TYPE_WEIGHTS = {
-        DotType.SEMANTIC:   0.25,
-        DotType.STRUCTURAL: 0.15,
-        DotType.CONTEXTUAL: 0.20,
+        DotType.SEMANTIC:   0.20,
+        DotType.STRUCTURAL: 0.10,
+        DotType.CONTEXTUAL: 0.15,
         DotType.RELATIONAL: 0.15,
         DotType.TEMPORAL:   0.10,
-        DotType.GLOBAL:     0.15,
+        DotType.GLOBAL:     0.10,
+        DotType.LOGIC:      0.20,
     }
 
-    def __init__(self, num_dots: int = 64, feature_dim: int = 128,
+    def __init__(self, num_dots: int = 128, feature_dim: int = 256,
                  base_bias: Optional[BiasVector] = None,
                  type_weights: Optional[Dict[DotType, float]] = None,
                  n_heads: int = N_HEADS,
@@ -381,7 +415,8 @@ class DotGenerator:
             dot_type = DotType(self._rng.choice(types, p=weights))
             bias     = BiasVector.from_dot_type(dot_type, self._rng)
             dots.append(NeuralDot(
-                dot_id=i, feature_dim=self.feature_dim,
+                dot_id=None, # will get unique ID
+                feature_dim=self.feature_dim,
                 bias=bias, dot_type=dot_type,
                 n_heads=self.n_heads,
                 seed=self.seed + i * 31 + int(dot_type) * 7,

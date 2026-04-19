@@ -29,7 +29,7 @@ void invert_context(const float *p, int n, float *out) {
     int *idx = (int *)malloc(n * sizeof(int));
     for (int i = 0; i < n; i++) idx[i] = i;
 
-    /* Bubble sort by absolute value (n is small, ~128) */
+    /* Bubble sort by absolute value (n is small, ~256) */
     for (int i = 0; i < n - 1; i++) {
         for (int j = i + 1; j < n; j++) {
             if (fabsf(p[idx[j]]) < fabsf(p[idx[i]])) {
@@ -144,8 +144,8 @@ void invert_noise(const float *p, int n, unsigned int seed, float *out) {
     for (int i = 0; i < n; i++) abs_vals[i] = fabsf(p[i]);
 
     /* Partial sort to find 75th percentile (simple approach for small n) */
-    float sorted[128];
-    int nn = n < 128 ? n : 128;
+    float sorted[256];
+    int nn = n < 256 ? n : 256;
     memcpy(sorted, abs_vals, nn * sizeof(float));
     /* Insertion sort */
     for (int i = 1; i < nn; i++) {

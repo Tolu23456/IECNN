@@ -37,6 +37,7 @@ import re
 import math
 import ctypes
 import os
+import pickle
 from collections import Counter
 from typing import List, Dict, Tuple, Optional
 
@@ -67,12 +68,12 @@ _PRIMITIVES = list("abcdefghijklmnopqrstuvwxyz0123456789") + [
     ".", ",", "!", "?", "'", "-", "_", "/", "(", ")",
 ]
 
-EMBED_DIM   = 96
+EMBED_DIM   = 224
 POS_DIM     = 8
 FREQ_DIM    = 4
 FLAG_DIM    = 16
 CTX_DIM     = 4
-FEATURE_DIM = EMBED_DIM + POS_DIM + FREQ_DIM + FLAG_DIM + CTX_DIM  # = 128
+FEATURE_DIM = EMBED_DIM + POS_DIM + FREQ_DIM + FLAG_DIM + CTX_DIM  # = 256
 
 # Morphological suffix sets for flag dims 14 and 15
 _VERB_SUFFIXES = ("ing", "ed", "ize", "ise", "ify", "ate")
@@ -201,6 +202,36 @@ class BaseMapper:
 
         self._embed_cache: Dict[str, np.ndarray] = {}
         self.is_fitted = False
+        self.persistence_path: Optional[str] = None
+
+    # ── Persistence ──────────────────────────────────────────────────
+
+    def save(self, filepath: str):
+        """Save mapper state to a pickle file."""
+        state = {
+            "word_freq":  self._word_freq,
+            "ngram_freq": self._ngram_freq,
+            "base_vocab": self._base_vocab,
+            "base_types": self._base_types,
+            "cooc":       self._cooc,
+            "is_fitted":  self.is_fitted,
+        }
+        with open(filepath, "wb") as f:
+            pickle.dump(state, f)
+
+    def load(self, filepath: str):
+        """Load mapper state from a pickle file."""
+        if not os.path.exists(filepath):
+            return
+        with open(filepath, "rb") as f:
+            state = pickle.load(f)
+        self._word_freq  = state.get("word_freq", Counter())
+        self._ngram_freq = state.get("ngram_freq", Counter())
+        self._base_vocab = state.get("base_vocab", {})
+        self._base_types = state.get("base_types", {})
+        self._cooc       = state.get("cooc", {})
+        self.is_fitted   = state.get("is_fitted", False)
+        self._embed_cache.clear()
 
     # ── Fitting ──────────────────────────────────────────────────────
 

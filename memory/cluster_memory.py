@@ -52,7 +52,7 @@ class ClusterMemory:
     multiple calls (persistent pattern library for long-running sessions).
     """
 
-    def __init__(self, feature_dim: int = 128, max_patterns: int = 64,
+    def __init__(self, feature_dim: int = 256, max_patterns: int = 128,
                  window_rounds: int = 10):
         self.feature_dim   = feature_dim
         self.max_patterns  = max_patterns

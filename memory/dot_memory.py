@@ -32,25 +32,31 @@ class DotMemory:
         self.num_dots    = num_dots
         self.window_size = window_size
 
-        self.success_count = np.zeros(num_dots, dtype=np.float32)
-        self.total_count   = np.zeros(num_dots, dtype=np.float32)
+        self._success_counts: Dict[int, float] = {}
+        self._total_counts:   Dict[int, float] = {}
 
         # Rolling window of recent predictions per dot
-        self._windows: Dict[int, deque] = {
-            i: deque(maxlen=window_size) for i in range(num_dots)
-        }
+        self._windows: Dict[int, deque] = {}
 
         # Per-dot prediction variance (measures specialization)
         self._var_sums: Dict[int, np.ndarray] = {}
-        self._var_counts: Dict[int, int] = {i: 0 for i in range(num_dots)}
+        self._var_counts: Dict[int, int] = {}
+
+    def _ensure_id(self, dot_id: int):
+        if dot_id not in self._windows:
+            self._windows[dot_id] = deque(maxlen=self.window_size)
+            self._var_counts[dot_id] = 0
+            self._success_counts[dot_id] = 0.0
+            self._total_counts[dot_id] = 0.0
 
     def record(self, dot_id: int, prediction: np.ndarray, in_winner: bool):
         """Record whether a dot's prediction ended in the winning cluster."""
-        if dot_id < 0 or dot_id >= self.num_dots:
-            return
-        self.total_count[dot_id] += 1
+        self._ensure_id(dot_id)
+
+        self._total_counts[dot_id] += 1.0
         if in_winner:
-            self.success_count[dot_id] += 1
+            self._success_counts[dot_id] += 1.0
+
         self._windows[dot_id].append(prediction.copy())
         # Update rolling variance for specialization score
         d = len(self._windows[dot_id])
@@ -61,17 +67,19 @@ class DotMemory:
 
     def effectiveness(self, dot_id: int) -> float:
         """Fraction of predictions that entered the winning cluster (0.5 prior)."""
-        total = self.total_count[dot_id]
+        total = self._total_counts.get(dot_id, 0.0)
         if total < 1:
             return 0.5  # uninformed prior
-        return float(self.success_count[dot_id] / total)
+        return float(self._success_counts.get(dot_id, 0.0) / total)
 
-    def all_effectivenesses(self) -> np.ndarray:
-        """Return effectiveness scores for all dots."""
-        totals = self.total_count.copy()
-        mask = totals >= 1
-        eff = np.full(self.num_dots, 0.5, dtype=np.float32)
-        eff[mask] = self.success_count[mask] / totals[mask]
+    def all_effectivenesses(self, dot_ids: Optional[List[int]] = None) -> np.ndarray:
+        """Return effectiveness scores for given dots or all known dots."""
+        if dot_ids is None:
+            dot_ids = list(self._total_counts.keys())
+
+        eff = np.zeros(len(dot_ids), dtype=np.float32)
+        for i, did in enumerate(dot_ids):
+            eff[i] = self.effectiveness(did)
         return eff
 
     def specialization_score(self, dot_id: int) -> float:
@@ -88,32 +96,36 @@ class DotMemory:
 
     def recent_centroid(self, dot_id: int) -> Optional[np.ndarray]:
         """Return the mean of the dot's recent predictions as a guidance signal."""
+        if dot_id not in self._windows:
+            return None
         w = self._windows[dot_id]
         if len(w) == 0:
             return None
         return np.mean(np.stack(list(w)), axis=0).astype(np.float32)
 
-    def rankings(self) -> List[Tuple[int, float]]:
+    def rankings(self, dot_ids: Optional[List[int]] = None) -> List[Tuple[int, float]]:
         """Return list of (dot_id, effectiveness) sorted highest first."""
-        eff = self.all_effectivenesses()
+        if dot_ids is None:
+            dot_ids = list(self._total_counts.keys())
+        eff = self.all_effectivenesses(dot_ids)
         order = np.argsort(eff)[::-1]
-        return [(int(i), float(eff[i])) for i in order]
+        return [(int(dot_ids[i]), float(eff[i])) for i in order]
 
     # ── Dot Reinforcement Pressure (F17) ─────────────────────────────
 
-    def drp_scores(self, eug: float, delta_u: float) -> np.ndarray:
+    def drp_scores(self, dot_ids: List[int], eug: float, delta_u: float) -> np.ndarray:
         """
         Compute F17 Dot Reinforcement Pressure scores for every dot.
 
         R_d = λ1·effectiveness + λ2·specialization + λ3·U_norm·(1+β·ΔU_norm) − λ4·failure_rate
 
-        Returns an array of shape (num_dots,) with a pressure score per dot.
+        Returns an array of shape (len(dot_ids),) with a pressure score per dot.
         """
         from formulas.formulas import dot_reinforcement_pressure
-        eff    = self.all_effectivenesses()
-        scores = np.zeros(self.num_dots, dtype=np.float32)
-        for i in range(self.num_dots):
-            spec         = self.specialization_score(i)
+        eff    = self.all_effectivenesses(dot_ids)
+        scores = np.zeros(len(dot_ids), dtype=np.float32)
+        for i, did in enumerate(dot_ids):
+            spec         = self.specialization_score(did)
             failure_rate = 1.0 - float(eff[i])
             scores[i]    = dot_reinforcement_pressure(
                 convergence_contrib = float(eff[i]),
@@ -124,49 +136,43 @@ class DotMemory:
             )
         return scores
 
-    def apply_floor_pressure(self, drp: np.ndarray, floor: float = 0.05,
+    def apply_floor_pressure(self, dot_ids: List[int], drp: np.ndarray, floor: float = 0.05,
                               decay: float = 0.90):
         """
         Apply pressure floor: dots whose DRP score falls below `floor`
         have their success_count decayed by `decay`, reducing future effectiveness.
         """
-        for i in range(self.num_dots):
+        for i, did in enumerate(dot_ids):
             if float(drp[i]) < floor:
-                self.success_count[i] = max(0.0, self.success_count[i] * decay)
+                self._success_counts[did] = max(0.0, self._success_counts.get(did, 0.0) * decay)
 
-    def hard_selection(self, drp: np.ndarray, keep_frac: float = 0.60,
+    def hard_selection(self, dot_ids: List[int], drp: np.ndarray, keep_frac: float = 0.60,
                         penalty: float = 0.50):
         """
         Hard elimination pressure: the bottom (1 - keep_frac) of dots by DRP
         score receive a 50% effectiveness penalty.
-
-        Unlike competition_decay (which nudges via 0.90×), this cuts weak dots
-        in half — forcing real structural change rather than gentle degradation.
-
-        keep_frac = 0.60 means the bottom 40% are penalised.
         """
-        n     = self.num_dots
+        n     = len(dot_ids)
         top_k = max(1, int(n * keep_frac))
         order = np.argsort(drp)[::-1]
         losers = order[top_k:]
-        for i in losers:
-            self.success_count[i] = max(0.0, self.success_count[i] * penalty)
+        for idx in losers:
+            did = dot_ids[idx]
+            self._success_counts[did] = max(0.0, self._success_counts.get(did, 0.0) * penalty)
 
-    def competition_decay(self, drp: np.ndarray, top_k_frac: float = 0.70,
+    def competition_decay(self, dot_ids: List[int], drp: np.ndarray, top_k_frac: float = 0.70,
                            decay: float = 0.90):
         """
         Top-k competition: rank dots by their DRP score, keep the top
         `top_k_frac` fraction intact, and decay the rest.
-
-        This creates genuine selection pressure within a call, not just
-        between calls (which is handled by DotEvolution).
         """
-        n     = self.num_dots
+        n     = len(dot_ids)
         top_k = max(1, int(n * top_k_frac))
         order = np.argsort(drp)[::-1]   # highest DRP first
         losers = order[top_k:]           # bottom 30%
-        for i in losers:
-            self.success_count[i] = max(0.0, self.success_count[i] * decay)
+        for idx in losers:
+            did = dot_ids[idx]
+            self._success_counts[did] = max(0.0, self._success_counts.get(did, 0.0) * decay)
 
     def reset_round(self):
         """Call between iterations — does NOT erase long-term history."""
@@ -174,23 +180,22 @@ class DotMemory:
 
     def reset_all(self):
         """Full reset — wipe all history."""
-        self.success_count[:] = 0.0
-        self.total_count[:] = 0.0
-        for i in range(self.num_dots):
-            self._windows[i].clear()
+        self._success_counts.clear()
+        self._total_counts.clear()
+        self._windows.clear()
         self._var_sums.clear()
-        self._var_counts = {i: 0 for i in range(self.num_dots)}
+        self._var_counts.clear()
 
-    def summary(self) -> dict:
-        eff = self.all_effectivenesses()
-        active = int(np.sum(self.total_count >= 1))
+    def summary(self, current_dot_ids: Optional[List[int]] = None) -> dict:
+        eff = self.all_effectivenesses(current_dot_ids)
+        active = len(self._total_counts)
         return {
             "num_dots":        self.num_dots,
             "active_dots":     active,
-            "mean_eff":        float(np.mean(eff)),
-            "max_eff":         float(np.max(eff)),
-            "min_eff":         float(np.min(eff)),
-            "top5":            self.rankings()[:5],
+            "mean_eff":        float(np.mean(eff)) if len(eff) > 0 else 0.5,
+            "max_eff":         float(np.max(eff)) if len(eff) > 0 else 0.5,
+            "min_eff":         float(np.min(eff)) if len(eff) > 0 else 0.5,
+            "top5":            self.rankings(current_dot_ids)[:5],
         }
 
     def __repr__(self):

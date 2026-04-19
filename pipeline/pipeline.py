@@ -70,8 +70,8 @@ class IECNN:
     """
 
     def __init__(self,
-                 feature_dim:           int   = 128,
-                 num_dots:              int   = 64,
+                 feature_dim:           int   = 256,
+                 num_dots:              int   = 128,
                  n_heads:               int   = N_HEADS,
                  max_iterations:        int   = 12,
                  micro_threshold:       float = 0.60,
@@ -85,6 +85,7 @@ class IECNN:
                  max_aim_variants:      int   = 4,
                  base_lr:               float = 0.10,
                  evolve:                bool  = True,
+                 persistence_path:      Optional[str] = None,
                  seed:                  int   = 42):
         self.feature_dim = feature_dim
         self.num_dots    = num_dots
@@ -95,6 +96,10 @@ class IECNN:
 
         # Core components
         self.base_mapper = BaseMapper(feature_dim=feature_dim)
+        if persistence_path:
+            self.base_mapper.load(persistence_path)
+            self.base_mapper.persistence_path = persistence_path
+
         self.base_bias   = BiasVector(0.5, 0.5, 0.5, 0.3, 1.0)
         self.dot_gen     = DotGenerator(num_dots, feature_dim, self.base_bias,
                                         n_heads=n_heads, seed=seed)
@@ -138,8 +143,20 @@ class IECNN:
 
     # ── Main run ─────────────────────────────────────────────────────
 
-    def run(self, text: str, verbose: bool = False) -> IECNNResult:
-        """Run the full 10-layer IECNN pipeline on a text input."""
+    def run(self, text: str, verbose: bool = False, update_brain: bool = False) -> IECNNResult:
+        """
+        Run the full 10-layer IECNN pipeline on a text input.
+
+        Args:
+          text         — input text
+          verbose      — print round-by-round progress
+          update_brain — if True, the text enriches the global BaseMapping knowledge
+        """
+        if update_brain:
+            self.base_mapper.fit([text])
+            if self.base_mapper.persistence_path:
+                self.base_mapper.save(self.base_mapper.persistence_path)
+
         self.iter_ctrl.reset()
         self.cluster_memory.reset_call()
 
@@ -159,10 +176,14 @@ class IECNN:
             rnd = self.iter_ctrl.current_round
 
             # ── Memory hints for adaptive attention ──────────────────
-            memory_hints = {
-                dot.dot_id: self.dot_memory.recent_centroid(dot.dot_id)
-                for dot in dots
-            }
+            memory_hints = {}
+            for dot in dots:
+                hint = self.dot_memory.recent_centroid(dot.dot_id)
+                if hint is None and rnd == 0:
+                    # Seed round 0 with cluster pattern library hints
+                    # if dot memory is empty
+                    hint = self.cluster_memory.closest_pattern(basemap.pool("mean"), self.alpha)
+                memory_hints[dot.dot_id] = hint
 
             # ── Layers 3+4: Dot Prediction ───────────────────────────
             dot_preds = self.dot_gen.run_all(
@@ -254,24 +275,25 @@ class IECNN:
 
             # ── F17 Dot Reinforcement Pressure ───────────────────────────
             delta_u = self.iter_ctrl.utility_acceleration()
-            drp     = self.dot_memory.drp_scores(eug_val, delta_u)
+            dot_ids = [d.dot_id for d in dots]
+            drp     = self.dot_memory.drp_scores(dot_ids, eug_val, delta_u)
 
             # Step 1 — floor pressure on raw scores (gentle, catches near-zero)
-            self.dot_memory.apply_floor_pressure(drp)
+            self.dot_memory.apply_floor_pressure(dot_ids, drp)
 
             # Step 2 — nonlinear amplification: sign(R) × |R|^1.5
             # Monotone, so ranking is preserved; extremes are stretched further apart.
             drp_amp = (np.sign(drp) * np.abs(drp) ** 1.5).astype(np.float32)
 
             # Step 3 — competition decay on amplified scores (bottom 30%)
-            self.dot_memory.competition_decay(drp_amp)
+            self.dot_memory.competition_decay(dot_ids, drp_amp)
 
             # Step 4 — hard selection: bottom 40% cut in half (not just nudged)
-            self.dot_memory.hard_selection(drp_amp)
+            self.dot_memory.hard_selection(dot_ids, drp_amp)
 
             # Step 5 — inline mutation: weak dots transform structurally
             # Use a wider std when EUG is stagnant (more exploration needed)
-            eff          = self.dot_memory.all_effectivenesses()
+            eff          = self.dot_memory.all_effectivenesses(dot_ids)
             mutation_std = 0.10 if abs(eug_val) < 0.01 else 0.05
             dots         = self.evolution.mutate_weak_dots(dots, eff,
                                                            mutation_std=mutation_std)
@@ -282,6 +304,12 @@ class IECNN:
                 self._boost_underrepresented(dots)
 
             self._learn_bias(surv, candidates, assign)
+
+        # ── Layer 11: Reflection & Self-Correction ────────────────────
+        # Winning cluster is vetted by specialized dots to ensure it
+        # doesn't violate learned constraints.
+        if top_cluster:
+            final_out = self._reflect(final_out, dots, basemap)
 
         # ── Rollback if last round was worse ─────────────────────────
         best = self.iter_ctrl.best_clusters()
@@ -316,9 +344,19 @@ class IECNN:
         """Encode text to a 128-dim vector."""
         return self.run(text).output
 
-    def similarity(self, a: str, b: str) -> float:
+    def similarity(self, a: str, b: str, update_brain: bool = False) -> float:
         """Similarity between two texts (F1)."""
-        return float(similarity_score(self.encode(a), self.encode(b), self.alpha))
+        # If we update brain, we do it for both first to ensure mutual knowledge
+        if update_brain:
+            self.base_mapper.fit([a, b])
+            if self.base_mapper.persistence_path:
+                self.base_mapper.save(self.base_mapper.persistence_path)
+
+        return float(similarity_score(
+            self.run(a, update_brain=False).output,
+            self.run(b, update_brain=False).output,
+            self.alpha
+        ))
 
     def compare(self, texts: List[str]) -> np.ndarray:
         """Return n×n similarity matrix for a list of texts."""
@@ -333,14 +371,50 @@ class IECNN:
 
     def memory_status(self) -> Dict:
         """Summary of dot memory and cluster memory state."""
+        dots = self._ensure_dots()
+        dot_ids = [d.dot_id for d in dots]
         return {
-            "dot_memory":     self.dot_memory.summary(),
+            "dot_memory":     self.dot_memory.summary(dot_ids),
             "cluster_memory": self.cluster_memory.summary(),
             "evolution":      self.evolution.stats(self.dot_memory),
             "call_count":     self._call_count,
         }
 
     # ── Internal helpers ─────────────────────────────────────────────
+
+    def _reflect(self, output: np.ndarray, dots: list, basemap: BaseMap) -> np.ndarray:
+        """
+        Self-Correction: Veto/Refine output based on logical consistency.
+        Uses LOGIC and SEMANTIC dots to 're-predict' from the final output.
+        """
+        # Select specialized dots for reflection
+        veto_dots = [d for d in dots if d.dot_type in (DotType.LOGIC, DotType.SEMANTIC)]
+        if not veto_dots:
+            return output
+
+        # Sample a few dots
+        sample_size = min(10, len(veto_dots))
+        idx = self._rng.choice(len(veto_dots), sample_size, replace=False)
+        selected = [veto_dots[i] for i in idx]
+
+        # Each selected dot 'critiques' the output by measuring its
+        # consistency with the original basemap.
+        corrections = []
+        for dot in selected:
+            # We treat the final output as a 'prediction' and see if the dot agrees
+            preds = dot.predict(basemap, memory_hint=output, context_entropy=0.1)
+            for p, conf, _ in preds:
+                sim = similarity_score(output, p, self.alpha)
+                if sim < 0.4: # Potential contradiction
+                    # Add a correction nudge toward the dot's perspective
+                    corrections.append(conf * (p - output))
+
+        if corrections:
+            # Apply weighted corrections
+            nudge = np.mean(np.stack(corrections), axis=0)
+            return output + 0.2 * nudge
+
+        return output
 
     def _blend(self, original: BaseMap, refined: np.ndarray) -> BaseMap:
         """Blend the refined vector back into the basemap for the next round."""
