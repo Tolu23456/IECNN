@@ -81,6 +81,12 @@ _NOUN_SUFFIXES = ("tion", "sion", "ness", "ity", "ment", "er", "or", "ist", "ism
 _ADJ_SUFFIXES  = ("ful", "ous", "ive", "able", "ible", "al", "ic", "ent", "ant")
 _ADV_SUFFIX    = "ly"
 
+_PREFIXES = (
+    "un", "re", "in", "im", "dis", "pre", "post", "anti", "mis", "non",
+    "pro", "over", "under", "trans", "inter", "sub", "ex", "de"
+)
+_SUFFIXES = _VERB_SUFFIXES + _NOUN_SUFFIXES + _ADJ_SUFFIXES + (_ADV_SUFFIX,)
+
 
 def _stable_embedding(token: str, dim: int) -> np.ndarray:
     """Stable hash-based unit-sphere embedding for a token string."""
@@ -422,13 +428,13 @@ class BaseMapper:
         n = np.linalg.norm(v)
         return v / n if n > 1e-10 else v
 
-    def _compose_word_embedding(self, word: str) -> np.ndarray:
+    def _compose_word_embedding(self, word: str, depth: int = 0) -> np.ndarray:
         """
         Compose a word's embedding from its constituent character primitives,
-        using both character unigrams and consecutive character bigrams.
+        using both character unigrams, bigrams, and morpheme decomposition.
 
         Unigrams capture the overall letter distribution; bigrams capture
-        local subword structure (common prefixes, suffixes, letter patterns).
+        local subword structure; morphemes capture semantic chunks.
 
         Returns a single unit-norm EMBED_DIM vector — ONE representation.
         """
@@ -439,14 +445,24 @@ class BaseMapper:
         char_embeds: List[np.ndarray] = []
         weights: List[float] = []
 
-        # Character unigrams (primary signal)
+        # 1. Morpheme Decomposition (Semantic chunks)
+        # Only decompose if we are at the top level to avoid infinite recursion
+        if depth == 0 and len(word) > 5:
+            morphemes = self._split_morphemes(word.lower())
+            if len(morphemes) > 1:
+                for m in morphemes:
+                    # Recursively get embedding for morpheme (at depth 1)
+                    m_emb = self._compose_word_embedding(m, depth=1)
+                    char_embeds.append(m_emb)
+                    weights.append(2.0) # High weight for semantic chunks
+
+        # 2. Character unigrams (primary signal)
         for k, ch in enumerate(chars):
             if ch in self._primitive_embeddings:
                 char_embeds.append(self._primitive_embeddings[ch])
                 weights.append(1.0 / (1.0 + k * 0.1))
 
-        # Character bigrams (secondary signal, lower weight)
-        # Each bigram embedding is the average of its two component chars.
+        # 3. Character bigrams (secondary signal, lower weight)
         for k in range(len(chars) - 1):
             c1, c2 = chars[k], chars[k+1]
             if c1 in self._primitive_embeddings and c2 in self._primitive_embeddings:
@@ -457,7 +473,7 @@ class BaseMapper:
 
         if not char_embeds:
             v = _stable_embedding(word, EMBED_DIM)
-            self._embed_cache[word] = v
+            if depth == 0: self._embed_cache[word] = v
             return v
 
         lib   = _load_lib()
@@ -481,8 +497,30 @@ class BaseMapper:
             if n > 1e-10:
                 out /= n
 
-        self._embed_cache[word] = out
+        if depth == 0: self._embed_cache[word] = out
         return out
+
+    def _split_morphemes(self, word: str) -> List[str]:
+        """Heuristic to split word into known prefix, root, and suffix."""
+        prefix = ""
+        for p in _PREFIXES:
+            if word.startswith(p) and len(word) > len(p) + 2:
+                prefix = p
+                word = word[len(p):]
+                break
+
+        suffix = ""
+        for s in sorted(_SUFFIXES, key=len, reverse=True):
+            if word.endswith(s) and len(word) > len(s) + 2:
+                suffix = s
+                word = word[:-len(s)]
+                break
+
+        res = []
+        if prefix: res.append(prefix)
+        if word:   res.append(word)
+        if suffix: res.append(suffix)
+        return res
 
     def _token_embedding(self, token: str, token_type: str) -> np.ndarray:
         """Return the EMBED_DIM embedding for a token based on its type."""

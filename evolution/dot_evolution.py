@@ -87,7 +87,7 @@ class DotEvolution:
         new_pool = [None] * n
 
         # 1. Elites — keep unchanged
-        for i, idx in enumerate(elite_indices):
+        for idx in elite_indices:
             new_pool[idx] = dots[idx]
 
         # Slot the offspring into replaced positions
@@ -155,7 +155,7 @@ class DotEvolution:
         return best_idx
 
     def _mutate(self, dot, cfg: EvolutionConfig):
-        """Clone a dot with Gaussian noise added to its bias and weights."""
+        """Clone a dot with Gaussian noise added to its bias and weights. Gets a new unique ID."""
         from neural_dot.neural_dot import NeuralDot, BiasVector
 
         # Mutate bias
@@ -165,7 +165,7 @@ class DotEvolution:
         new_b[-1] = max(new_b[-1], 0.05)  # temperature must be positive
 
         child = NeuralDot(
-            dot_id=dot.dot_id, # Keep ID for elites/clones
+            dot_id=None, # New unique ID for the mutant child
             feature_dim=dot.feature_dim,
             bias=BiasVector.from_array(new_b),
             dot_type=dot.dot_type,
@@ -177,14 +177,14 @@ class DotEvolution:
         return child
 
     def _crossover(self, p1, p2):
-        """Blend two parent dots: average bias, uniform-crossover on weight rows."""
+        """Blend two parent dots: average bias, uniform-crossover on weight rows. Gets a new unique ID."""
         from neural_dot.neural_dot import NeuralDot, BiasVector
 
         # Average the bias vectors
         b_arr = (p1.bias.to_array() + p2.bias.to_array()) / 2.0
 
         child = NeuralDot(
-            dot_id=p1.dot_id, # Use one of the parent IDs
+            dot_id=None, # New unique ID for the crossover child
             feature_dim=p1.feature_dim,
             bias=BiasVector.from_array(b_arr),
             dot_type=p1.dot_type,
@@ -199,7 +199,7 @@ class DotEvolution:
     def mutate_weak_dots(self, dots: list, effectivenesses: np.ndarray,
                           threshold: float = 0.10,
                           mutation_std: float = 0.05) -> list:
-        """Inline (within-call) mutation."""
+        """Inline (within-call) mutation. Keeps the same dot_id as it is a transformation."""
         from neural_dot.neural_dot import NeuralDot, BiasVector, DotType
 
         n_types = len(DotType.__members__)
