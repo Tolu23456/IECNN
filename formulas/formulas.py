@@ -1,7 +1,7 @@
 """
 IECNN Formulas — Python layer with C acceleration via ctypes.
 
-Sixteen custom formulas, F1–F16:
+Seventeen custom formulas, F1–F17:
   F1  Similarity Score            F2  Convergence Score
   F3  Attention                   F4  AIM Transform
   F5  Pruning Threshold           F6  Prediction Confidence
@@ -11,6 +11,7 @@ Sixteen custom formulas, F1–F16:
   F13 Cross-Type Agreement        F14 Adaptive Learning Rate
   F15 Hierarchical Convergence Score
   F16 Emergent Utility Gradient
+  F17 Dot Reinforcement Pressure
 """
 
 import numpy as np
@@ -387,3 +388,40 @@ def emergent_utility_gradient(score_history: List[float]) -> float:
         delta2 = score_history[-2] - score_history[-3]
         delta = 0.7 * delta + 0.3 * delta2
     return float(delta)
+
+
+# ── Formula 17: Dot Reinforcement Pressure ───────────────────────────
+
+def dot_reinforcement_pressure(
+    convergence_contrib: float,
+    specialization:      float,
+    eug:                 float,
+    delta_u:             float,
+    failure_rate:        float,
+    lambda1: float = 0.40,
+    lambda2: float = 0.20,
+    lambda3: float = 0.30,
+    beta:    float = 0.50,
+    lambda4: float = 0.10,
+) -> float:
+    """
+    F17: R_d(t) = λ1·C_d + λ2·S_d + λ3·U_norm·(1 + β·ΔU_norm) − λ4·N_d
+
+    C_d       = convergence contribution (effectiveness score of dot d)
+    S_d       = specialization score (consistency of predictions)
+    U_norm    = tanh(eug × 5)  — normalized Emergent Utility Gradient (F16)
+    ΔU_norm   = tanh(delta_u × 5) — normalized utility acceleration
+    N_d       = failure_rate = 1 − effectiveness (penalty for low-quality dots)
+
+    Positive pressure → dot is rewarded (kept, reproduced)
+    Low pressure → dot decays toward removal or mutation
+    """
+    u_norm  = float(np.tanh(eug     * 5.0))
+    du_norm = float(np.tanh(delta_u * 5.0))
+    utility_term = u_norm * (1.0 + beta * du_norm)
+    return float(
+        lambda1 * convergence_contrib
+        + lambda2 * specialization
+        + lambda3 * utility_term
+        - lambda4 * failure_rate
+    )

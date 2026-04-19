@@ -77,6 +77,7 @@ class IterationController:
         self._round:            int = 0
         self._centroid_history: List[Optional[np.ndarray]] = []
         self._score_history:    List[float] = []
+        self._eug_history:      List[float] = []
         self._stop_reason:      Optional[str] = None
         self._history:          List[Dict] = []
 
@@ -89,6 +90,7 @@ class IterationController:
         self._round = 0
         self._centroid_history.clear()
         self._score_history.clear()
+        self._eug_history.clear()
         self._stop_reason = None
         self._history.clear()
         self._best_round = 0
@@ -113,6 +115,12 @@ class IterationController:
     def current_eug(self) -> float:
         """Formula 16: Emergent Utility Gradient from current score history."""
         return emergent_utility_gradient(self._score_history)
+
+    def utility_acceleration(self) -> float:
+        """ΔU = U(t) - U(t-1): rate of change of EUG across the last two rounds."""
+        if len(self._eug_history) < 2:
+            return 0.0
+        return float(self._eug_history[-1] - self._eug_history[-2])
 
     # ── Stopping conditions ──────────────────────────────────────────
 
@@ -184,6 +192,7 @@ class IterationController:
         total  = sum(scores)
         dom    = scores[0] / total if total > 1e-10 and scores else 0.0
         eug    = emergent_utility_gradient(self._score_history)
+        self._eug_history.append(eug)
         lr     = self.current_lr()
 
         self._history.append({
@@ -192,6 +201,7 @@ class IterationController:
             "top_score": float(clusters[0].score) if clusters else 0.0,
             "dominance": float(dom),
             "eug":       float(eug),
+            "delta_u":   float(self.utility_acceleration()),
             "lr":        float(lr),
         })
         self._round += 1

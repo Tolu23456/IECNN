@@ -10,11 +10,14 @@ This allows the system to:
   1. Rank dots by effectiveness (for evolution selection)
   2. Bias dot attention toward historically successful patterns
   3. Detect dots that are specializing vs generalizing
+  4. Apply Dot Reinforcement Pressure (F17) within-call to decay weak dots
 """
 
 import numpy as np
 from collections import deque
 from typing import Dict, List, Optional, Tuple
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 class DotMemory:
@@ -95,6 +98,57 @@ class DotMemory:
         eff = self.all_effectivenesses()
         order = np.argsort(eff)[::-1]
         return [(int(i), float(eff[i])) for i in order]
+
+    # ── Dot Reinforcement Pressure (F17) ─────────────────────────────
+
+    def drp_scores(self, eug: float, delta_u: float) -> np.ndarray:
+        """
+        Compute F17 Dot Reinforcement Pressure scores for every dot.
+
+        R_d = λ1·effectiveness + λ2·specialization + λ3·U_norm·(1+β·ΔU_norm) − λ4·failure_rate
+
+        Returns an array of shape (num_dots,) with a pressure score per dot.
+        """
+        from formulas.formulas import dot_reinforcement_pressure
+        eff    = self.all_effectivenesses()
+        scores = np.zeros(self.num_dots, dtype=np.float32)
+        for i in range(self.num_dots):
+            spec         = self.specialization_score(i)
+            failure_rate = 1.0 - float(eff[i])
+            scores[i]    = dot_reinforcement_pressure(
+                convergence_contrib = float(eff[i]),
+                specialization      = spec,
+                eug                 = eug,
+                delta_u             = delta_u,
+                failure_rate        = failure_rate,
+            )
+        return scores
+
+    def apply_floor_pressure(self, drp: np.ndarray, floor: float = 0.05,
+                              decay: float = 0.90):
+        """
+        Apply pressure floor: dots whose DRP score falls below `floor`
+        have their success_count decayed by `decay`, reducing future effectiveness.
+        """
+        for i in range(self.num_dots):
+            if float(drp[i]) < floor:
+                self.success_count[i] = max(0.0, self.success_count[i] * decay)
+
+    def competition_decay(self, drp: np.ndarray, top_k_frac: float = 0.70,
+                           decay: float = 0.90):
+        """
+        Top-k competition: rank dots by their DRP score, keep the top
+        `top_k_frac` fraction intact, and decay the rest.
+
+        This creates genuine selection pressure within a call, not just
+        between calls (which is handled by DotEvolution).
+        """
+        n     = self.num_dots
+        top_k = max(1, int(n * top_k_frac))
+        order = np.argsort(drp)[::-1]   # highest DRP first
+        losers = order[top_k:]           # bottom 30%
+        for i in losers:
+            self.success_count[i] = max(0.0, self.success_count[i] * decay)
 
     def reset_round(self):
         """Call between iterations — does NOT erase long-term history."""

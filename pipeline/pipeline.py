@@ -121,6 +121,7 @@ class IECNN:
         # Dot pool (generated lazily on first use; evolved across calls)
         self._dots: Optional[list] = None
         self._call_count: int = 0
+        self._rng = np.random.RandomState(seed)
 
     # ── Setup ────────────────────────────────────────────────────────
 
@@ -215,6 +216,7 @@ class IECNN:
                 "stability":   float(conv_sum.get("stability", 0.0)),
                 "lr":          float(self.iter_ctrl.current_lr()),
                 "eug":         float(self.iter_ctrl.current_eug()),
+                "delta_u":     float(self.iter_ctrl.utility_acceleration()),
                 "centroid":    surv[0].centroid.copy() if surv and surv[0].centroid is not None else None,
             }
             all_rounds.append(rnd_info)
@@ -234,9 +236,24 @@ class IECNN:
                 break
 
             # ── Update state for next round ───────────────────────────
-            refined  = self.iter_ctrl.advance(surv, final_out)
+            refined = self.iter_ctrl.advance(surv, final_out)
+
+            # Instability injection (F16-driven): when EUG is stagnant,
+            # perturb the refined vector to push the system out of a flat basin.
+            eug_val = self.iter_ctrl.current_eug()
+            if abs(eug_val) < 0.01:
+                noise   = self._rng.randn(len(refined)).astype(np.float32) * 0.05
+                refined = refined + noise
+
             cur_bmap = self._blend(basemap, refined)
             self._record_dot_outcomes(surv, candidates, assign, dots)
+
+            # DRP: apply within-call selection pressure (F17)
+            delta_u = self.iter_ctrl.utility_acceleration()
+            drp     = self.dot_memory.drp_scores(eug_val, delta_u)
+            self.dot_memory.apply_floor_pressure(drp)
+            self.dot_memory.competition_decay(drp)
+
             self._learn_bias(surv, candidates, assign)
 
         # ── Rollback if last round was worse ─────────────────────────

@@ -150,11 +150,13 @@ Current: **v0.4.0** — see CHANGELOG.md for full history.
 
 ---
 
-## F16: Emergent Utility Gradient (EUG)
+## F16 + F17: EUG and Dot Reinforcement Pressure
 
-Added in v0.4.0. Replaces the broken cluster-ID-based `novelty_gain` stopping condition.
+Added in v0.4.0 (EUG) and v0.5.0 (DRP).
 
-**Formula:** `U(t) = E[C_{t+1}(p)] - C_t(p)`
+### F16: Emergent Utility Gradient
+
+`U(t) = E[C_{t+1}(p)] - C_t(p)`
 
 Estimated via recency-weighted score delta:
 - 2 rounds: `U = C_t - C_{t-1}`
@@ -162,4 +164,22 @@ Estimated via recency-weighted score delta:
 
 **Stopping:** if `U ≤ eug_threshold (0.001)` after ≥ 3 rounds, the system stops.
 
-**Why the old novelty check was broken:** cluster IDs (`cluster_id`) reset to `0, 1, 2, …` each round, so `cur - prev` was always empty and `novelty_gain` was always `0.0`, triggering a stop at round 2 every time.
+**Instability injection:** when `|U| < 0.01`, Gaussian noise (σ=0.05) is added to the refined vector before blending, pushing the system out of flat convergence basins.
+
+### F17: Dot Reinforcement Pressure (DRP)
+
+`R_d(t) = λ1·C_d + λ2·S_d + λ3·U_norm·(1 + β·ΔU_norm) − λ4·N_d`
+
+- `C_d` = effectiveness (hit rate in winning cluster)
+- `S_d` = specialization score (prediction consistency)
+- `U_norm` = `tanh(U × 5)` — normalized EUG
+- `ΔU_norm` = `tanh(ΔU × 5)` — normalized utility acceleration
+- `N_d` = failure rate = `1 − effectiveness`
+
+Applied within each call after `_record_dot_outcomes`:
+1. **Floor pressure:** dots with `R_d < 0.05` have `success_count` decayed by 0.90
+2. **Competition decay:** bottom 30% of dots by DRP score are decayed by 0.90
+
+This creates within-call selection pressure that amplifies high-performing dots before `DotEvolution` runs between calls.
+
+**Why the old novelty check was broken:** cluster IDs reset to `0, 1, 2, …` each round, so `cur - prev` was always empty and `novelty_gain` was always `0.0`, triggering a stop at round 2 every time.
