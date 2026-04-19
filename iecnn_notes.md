@@ -141,6 +141,10 @@ Dot generation is controlled by a structured bias vector — not randomness. Eac
 
 Learning adjusts this vector over time — winning inversion patterns shift the bias toward the strategies that produced them.
 
+## Custom Formulas
+
+IECNN will use its own custom formulas — purpose-built for the architecture rather than borrowed from existing frameworks. This includes formulas for convergence scoring, similarity measurement, bias vector updates, AIM transformations, and stability conditions.
+
 ## Goal
 
 To serve as a potential foundation for Artificial General Intelligence (AGI).
