@@ -134,6 +134,24 @@ class DotMemory:
             if float(drp[i]) < floor:
                 self.success_count[i] = max(0.0, self.success_count[i] * decay)
 
+    def hard_selection(self, drp: np.ndarray, keep_frac: float = 0.60,
+                        penalty: float = 0.50):
+        """
+        Hard elimination pressure: the bottom (1 - keep_frac) of dots by DRP
+        score receive a 50% effectiveness penalty.
+
+        Unlike competition_decay (which nudges via 0.90×), this cuts weak dots
+        in half — forcing real structural change rather than gentle degradation.
+
+        keep_frac = 0.60 means the bottom 40% are penalised.
+        """
+        n     = self.num_dots
+        top_k = max(1, int(n * keep_frac))
+        order = np.argsort(drp)[::-1]
+        losers = order[top_k:]
+        for i in losers:
+            self.success_count[i] = max(0.0, self.success_count[i] * penalty)
+
     def competition_decay(self, drp: np.ndarray, top_k_frac: float = 0.70,
                            decay: float = 0.90):
         """

@@ -38,7 +38,8 @@ from memory.cluster_memory   import ClusterMemory
 from evolution.dot_evolution import DotEvolution, EvolutionConfig
 from evaluation.metrics      import IECNNMetrics, RunMetrics
 from formulas.formulas       import (
-    similarity_score, cluster_entropy, adaptive_learning_rate, dominance_score
+    similarity_score, cluster_entropy, adaptive_learning_rate, dominance_score,
+    amplify_pressure,
 )
 
 
@@ -238,21 +239,47 @@ class IECNN:
             # ── Update state for next round ───────────────────────────
             refined = self.iter_ctrl.advance(surv, final_out)
 
-            # Instability injection (F16-driven): when EUG is stagnant,
-            # perturb the refined vector to push the system out of a flat basin.
+            # ── Adaptive exploration (F16-driven stagnation response) ────
+            # When EUG is near-zero the system is in a flat basin: inject
+            # noise into the refined vector AND raise context_entropy so
+            # dots explore broader temperature / inversion settings next round.
             eug_val = self.iter_ctrl.current_eug()
             if abs(eug_val) < 0.01:
                 noise   = self._rng.randn(len(refined)).astype(np.float32) * 0.05
                 refined = refined + noise
+                cur_entropy = min(1.0, cur_entropy + 0.30)
 
             cur_bmap = self._blend(basemap, refined)
             self._record_dot_outcomes(surv, candidates, assign, dots)
 
-            # DRP: apply within-call selection pressure (F17)
+            # ── F17 Dot Reinforcement Pressure ───────────────────────────
             delta_u = self.iter_ctrl.utility_acceleration()
             drp     = self.dot_memory.drp_scores(eug_val, delta_u)
+
+            # Step 1 — floor pressure on raw scores (gentle, catches near-zero)
             self.dot_memory.apply_floor_pressure(drp)
-            self.dot_memory.competition_decay(drp)
+
+            # Step 2 — nonlinear amplification: sign(R) × |R|^1.5
+            # Monotone, so ranking is preserved; extremes are stretched further apart.
+            drp_amp = (np.sign(drp) * np.abs(drp) ** 1.5).astype(np.float32)
+
+            # Step 3 — competition decay on amplified scores (bottom 30%)
+            self.dot_memory.competition_decay(drp_amp)
+
+            # Step 4 — hard selection: bottom 40% cut in half (not just nudged)
+            self.dot_memory.hard_selection(drp_amp)
+
+            # Step 5 — inline mutation: weak dots transform structurally
+            # Use a wider std when EUG is stagnant (more exploration needed)
+            eff          = self.dot_memory.all_effectivenesses()
+            mutation_std = 0.10 if abs(eug_val) < 0.01 else 0.05
+            dots         = self.evolution.mutate_weak_dots(dots, eff,
+                                                           mutation_std=mutation_std)
+
+            # Step 6 — diversity constraint: if type distribution is too skewed,
+            # raise temperature of underrepresented dot types
+            if self._compute_diversity(dots) < 0.60:
+                self._boost_underrepresented(dots)
 
             self._learn_bias(surv, candidates, assign)
 
@@ -368,6 +395,47 @@ class IECNN:
             arr[3] = float(np.clip(arr[3] + ratio * lr * 0.5, 0.05, 0.95))
             self.base_bias = BiasVector.from_array(arr)
         self.dot_gen.base_bias = self.base_bias
+
+    def _compute_diversity(self, dots: list) -> float:
+        """
+        Compute type diversity using the Simpson index:
+            Diversity = 1 - Σ p(type)²
+        where p(type) is the fraction of dots of each type.
+
+        Returns 1.0 (fully diverse) for a uniform distribution across all 6
+        types, and 0.0 if all dots share the same type.
+        """
+        if not dots:
+            return 1.0
+        counts: dict = {}
+        for d in dots:
+            t = d.dot_type
+            counts[t] = counts.get(t, 0) + 1
+        n = len(dots)
+        return float(1.0 - sum((c / n) ** 2 for c in counts.values()))
+
+    def _boost_underrepresented(self, dots: list) -> None:
+        """
+        Raise the temperature in the bias vector of underrepresented dot types
+        so they explore more aggressively and can re-establish their niche.
+
+        A type is considered underrepresented when its count is less than half
+        the expected count for a perfectly uniform distribution across all types.
+        """
+        if not dots:
+            return
+        counts: dict = {}
+        for d in dots:
+            t = d.dot_type
+            counts[t] = counts.get(t, 0) + 1
+        n       = len(dots)
+        n_types = len(DotType.__members__)
+        expected = n / n_types
+        for dot in dots:
+            if counts.get(dot.dot_type, 0) < expected * 0.50:
+                arr    = dot.bias.to_array()
+                arr[4] = float(np.clip(arr[4] * 1.5, 0.30, 2.0))  # index 4 = temperature
+                dot.bias = BiasVector.from_array(arr)
 
     # ── Verbose output ────────────────────────────────────────────────
 

@@ -392,6 +392,18 @@ def emergent_utility_gradient(score_history: List[float]) -> float:
 
 # ── Formula 17: Dot Reinforcement Pressure ───────────────────────────
 
+def amplify_pressure(pressure: float) -> float:
+    """
+    Sign-preserving power amplification for DRP scores.
+
+    amplify(R) = sign(R) × |R|^1.5
+
+    Makes strong dots significantly stronger and weak dots drop faster —
+    sharper differentiation than the raw linear score alone.
+    """
+    return float(np.sign(pressure) * (abs(pressure) ** 1.5))
+
+
 def dot_reinforcement_pressure(
     convergence_contrib: float,
     specialization:      float,

@@ -187,6 +187,44 @@ class DotEvolution:
         child.b_offset = (p1.b_offset + p2.b_offset) / 2.0
         return child
 
+    def mutate_weak_dots(self, dots: list, effectivenesses: np.ndarray,
+                          threshold: float = 0.10,
+                          mutation_std: float = 0.05) -> list:
+        """
+        Inline (within-call) mutation of dots whose effectiveness is below `threshold`.
+
+        Unlike the between-call `evolve()` which replaces dots entirely, this
+        method transforms them in-place: adds Gaussian noise to weights and bias,
+        and with 20% probability switches the dot to a randomly chosen type.
+
+        `mutation_std` is adaptive — the pipeline passes a higher value when EUG
+        is stagnant (|U| < 0.01) to increase exploration breadth.
+
+        Returns the same dot list (mutated in-place where applicable).
+        """
+        from neural_dot.neural_dot import NeuralDot, BiasVector, DotType
+
+        n_types = len(DotType.__members__)
+        for dot in dots:
+            eff = float(effectivenesses[dot.dot_id])
+            if eff < threshold:
+                # Weight mutation
+                dot.W = dot.W + self._rng.randn(*dot.W.shape).astype(np.float32) * mutation_std
+                dot.b_offset = (dot.b_offset
+                                + self._rng.randn(*dot.b_offset.shape).astype(np.float32)
+                                * mutation_std * 0.1)
+                # Bias mutation
+                b_arr = dot.bias.to_array()
+                noise = self._rng.randn(len(b_arr)).astype(np.float32) * mutation_std
+                b_arr = np.clip(b_arr + noise, 0.0, 2.0)
+                b_arr[-1] = max(float(b_arr[-1]), 0.05)
+                dot.bias = BiasVector.from_array(b_arr)
+                # Optional type switch (20% chance — creates new specialisation)
+                if self._rng.rand() < 0.20:
+                    new_type = DotType(self._rng.randint(0, n_types))
+                    dot.dot_type = new_type
+        return dots
+
     def stats(self, memory: DotMemory) -> dict:
         eff = memory.all_effectivenesses()
         return {

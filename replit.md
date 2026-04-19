@@ -146,7 +146,7 @@ C .so files use `_c.so` suffix to avoid colliding with Python module names.
 
 ## Version
 
-Current: **v0.4.0** — see CHANGELOG.md for full history.
+Current: **v0.6.0** — see CHANGELOG.md for full history.
 
 ---
 
