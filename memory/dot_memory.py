@@ -32,6 +32,13 @@ class DotMemory:
         self.num_dots    = num_dots
         self.window_size = window_size
 
+        # F17 Reinforcement Weights (Meta-learnable)
+        self.lambda1 = 0.40  # convergence contribution
+        self.lambda2 = 0.20  # specialization
+        self.lambda3 = 0.30  # utility (EUG)
+        self.lambda4 = 0.10  # failure penalty
+        self.beta    = 0.50  # utility acceleration
+
         self._success_counts: Dict[int, float] = {}
         self._total_counts:   Dict[int, float] = {}
 
@@ -133,6 +140,11 @@ class DotMemory:
                 eug                 = eug,
                 delta_u             = delta_u,
                 failure_rate        = failure_rate,
+                lambda1             = self.lambda1,
+                lambda2             = self.lambda2,
+                lambda3             = self.lambda3,
+                beta                = self.beta,
+                lambda4             = self.lambda4,
             )
         return scores
 

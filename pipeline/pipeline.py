@@ -23,6 +23,7 @@ Memory guidance:
 """
 
 import numpy as np
+import re
 from typing import List, Dict, Optional, Tuple
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -39,7 +40,7 @@ from evolution.dot_evolution import DotEvolution, EvolutionConfig
 from evaluation.metrics      import IECNNMetrics, RunMetrics
 from formulas.formulas       import (
     similarity_score, cluster_entropy, adaptive_learning_rate, dominance_score,
-    amplify_pressure,
+    amplify_pressure, hierarchical_convergence_score
 )
 
 
@@ -305,6 +306,12 @@ class IECNN:
 
             self._learn_bias(surv, candidates, assign)
 
+            # ── Meta-Learning: Auto-tune DRP and LR ──────────────────────
+            # Adjust meta-parameters based on EUG history.
+            # If EUG is consistently low, we increase failure penalty (lambda4)
+            # and potentially base_lr to escape the local basin.
+            self._optimize_meta_params(eug_val)
+
         # ── Layer 11: Reflection & Self-Correction ────────────────────
         # Winning cluster is vetted by specialized dots to ensure it
         # doesn't violate learned constraints.
@@ -340,9 +347,49 @@ class IECNN:
 
     # ── Public API ───────────────────────────────────────────────────
 
-    def encode(self, text: str) -> np.ndarray:
-        """Encode text to a 128-dim vector."""
-        return self.run(text).output
+    def encode(self, text: str, verbose: bool = False) -> np.ndarray:
+        """Encode text to a 256-dim vector (hierarchical for multi-sentence)."""
+        sentences = self._split_sentences(text)
+        if len(sentences) > 1:
+            if verbose: print(f"[IECNN] Processing {len(sentences)} sentences hierarchically...")
+            return self.run_hierarchical(sentences, verbose=verbose)
+        return self.run(text, verbose=verbose).output
+
+    def run_hierarchical(self, sentences: List[str], verbose: bool = False) -> np.ndarray:
+        """
+        Document-level processing: process each sentence independently,
+        then perform a final 'Master Convergence' on their centroids.
+        """
+        centroids = []
+        scores = []
+        for sent in sentences:
+            res = self.run(sent, verbose=verbose)
+            if res.top_cluster:
+                centroids.append(res.top_cluster.centroid)
+                scores.append(res.top_cluster.score)
+
+        if not centroids:
+            return np.zeros(self.feature_dim, dtype=np.float32)
+
+        # Final centroid: confidence-weighted average of sentence centroids
+        # weighted by their individual convergence scores.
+        stack = np.stack(centroids)
+        weights = np.array(scores)
+        weights /= weights.sum() + 1e-10
+        master_centroid = (stack * weights[:, None]).sum(axis=0)
+
+        # Re-normalize
+        n = np.linalg.norm(master_centroid)
+        if n > 1e-10:
+            master_centroid = master_centroid / n * np.sqrt(self.feature_dim)
+
+        return master_centroid
+
+    def _split_sentences(self, text: str) -> List[str]:
+        """Simple heuristic sentence splitter."""
+        # Split on . ! ? followed by space or end of string
+        parts = re.split(r'(?<=[.!?])\s+', text)
+        return [p.strip() for p in parts if p.strip()]
 
     def similarity(self, a: str, b: str, update_brain: bool = False) -> float:
         """Similarity between two texts (F1)."""
@@ -353,8 +400,8 @@ class IECNN:
                 self.base_mapper.save(self.base_mapper.persistence_path)
 
         return float(similarity_score(
-            self.run(a, update_brain=False).output,
-            self.run(b, update_brain=False).output,
+            self.encode(a),
+            self.encode(b),
             self.alpha
         ))
 
@@ -415,6 +462,19 @@ class IECNN:
             return output + 0.2 * nudge
 
         return output
+
+    def _optimize_meta_params(self, current_eug: float):
+        """Adjust DRP weights and Base LR based on utility gradient."""
+        # Simple heuristic: if EUG is low, increase selection pressure
+        if abs(current_eug) < 0.005:
+            # Increase failure penalty to flush out weak dots
+            self.dot_memory.lambda4 = min(0.30, self.dot_memory.lambda4 + 0.01)
+            # Increase base learning rate to explore more
+            self.iter_ctrl.base_lr = min(0.20, self.iter_ctrl.base_lr + 0.005)
+        elif current_eug > 0.05:
+            # System is doing well, potentially reduce pressure to stabilize
+            self.dot_memory.lambda4 = max(0.05, self.dot_memory.lambda4 - 0.005)
+            self.iter_ctrl.base_lr = max(0.05, self.iter_ctrl.base_lr - 0.002)
 
     def _blend(self, original: BaseMap, refined: np.ndarray) -> BaseMap:
         """Blend the refined vector back into the basemap for the next round."""
