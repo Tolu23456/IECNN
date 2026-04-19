@@ -214,6 +214,7 @@ class IECNN:
                 "entropy":     float(ent),
                 "stability":   float(conv_sum.get("stability", 0.0)),
                 "lr":          float(self.iter_ctrl.current_lr()),
+                "eug":         float(self.iter_ctrl.current_eug()),
                 "centroid":    surv[0].centroid.copy() if surv and surv[0].centroid is not None else None,
             }
             all_rounds.append(rnd_info)
@@ -357,17 +358,19 @@ class IECNN:
         trunc = text[:55] + ("..." if len(text) > 55 else "")
         type_dist = self.dot_gen.type_distribution(dots)
         type_str  = " ".join(f"{k[:3]}={v}" for k, v in sorted(type_dist.items()))
-        print(f"\n{'═'*66}")
+        print(f"\n{'═'*74}")
         print(f"  IECNN  │  input: '{trunc}'")
         print(f"  {basemap}  │  dots: {len(dots)} ({type_str})")
-        print(f"{'═'*66}")
+        print(f"{'═'*74}")
         print(f"  {'Rnd':>3}  {'cands':>5}  {'kept':>5}  {'cls':>4}  {'mic':>4}  "
-              f"{'dom':>6}  {'top':>7}  {'ent':>6}  {'stab':>6}  {'lr':>6}")
-        print(f"  {'─'*63}")
+              f"{'dom':>6}  {'top':>7}  {'ent':>6}  {'stab':>6}  {'lr':>6}  {'eug':>7}")
+        print(f"  {'─'*71}")
 
     def _print_round(self, r: Dict):
+        eug = r.get("eug", float("nan"))
+        eug_str = f"{eug:>+7.4f}" if eug == eug else "    n/a"
         print(f"  {r['round']:>3}  {r['candidates']:>5}  {r['filtered']:>5}  "
               f"{r['clusters']:>4}  {r['micro']:>4}  "
               f"{r['dominance']:>6.3f}  {r['top_score']:>7.4f}  "
               f"{r['entropy']:>6.3f}  {r['stability']:>6.3f}  "
-              f"{r['lr']:>6.4f}")
+              f"{r['lr']:>6.4f}  {eug_str}")

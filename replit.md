@@ -146,4 +146,20 @@ C .so files use `_c.so` suffix to avoid colliding with Python module names.
 
 ## Version
 
-Current: **v0.3.0** — see CHANGELOG.md for full history.
+Current: **v0.4.0** — see CHANGELOG.md for full history.
+
+---
+
+## F16: Emergent Utility Gradient (EUG)
+
+Added in v0.4.0. Replaces the broken cluster-ID-based `novelty_gain` stopping condition.
+
+**Formula:** `U(t) = E[C_{t+1}(p)] - C_t(p)`
+
+Estimated via recency-weighted score delta:
+- 2 rounds: `U = C_t - C_{t-1}`
+- 3+ rounds: `U = 0.7*(C_t - C_{t-1}) + 0.3*(C_{t-1} - C_{t-2})`
+
+**Stopping:** if `U ≤ eug_threshold (0.001)` after ≥ 3 rounds, the system stops.
+
+**Why the old novelty check was broken:** cluster IDs (`cluster_id`) reset to `0, 1, 2, …` each round, so `cur - prev` was always empty and `novelty_gain` was always `0.0`, triggering a stop at round 2 every time.

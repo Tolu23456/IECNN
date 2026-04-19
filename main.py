@@ -275,7 +275,7 @@ def cmd_demo():
     print("  ‣ Feature vector: [96 embed | 8 pos | 4 freq | 16 flags | 4 ctx]")
 
     print(f"\n{BAR}")
-    print("  Formula Summary (F1–F15)")
+    print("  Formula Summary (F1–F16)")
     print(BAR)
     formulas = [
         ("F1",  "Similarity Score",            "S(p,q) = α·cos(p,q) + (1-α)·A(p,q)"),
@@ -293,6 +293,7 @@ def cmd_demo():
         ("F13", "Cross-Type Agreement",        "CDA = mean S(centroid_a, centroid_b)"),
         ("F14", "Adaptive Learning Rate",      "η(t) = η_0 · (1 - 0.8·dom²)"),
         ("F15", "Hierarchical Conv. Score",    "HC(K) = mean_score · (1+γ·cross_sim)"),
+        ("F16", "Emergent Utility Gradient",   "U(t) = E[C_{t+1}(p)] - C_t(p)"),
     ]
     for fid, name, formula in formulas:
         print(f"  {fid:<4} {name:<28} {formula}")

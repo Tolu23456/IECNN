@@ -1,7 +1,7 @@
 """
 IECNN Formulas — Python layer with C acceleration via ctypes.
 
-Fifteen custom formulas, F1–F15:
+Sixteen custom formulas, F1–F16:
   F1  Similarity Score            F2  Convergence Score
   F3  Attention                   F4  AIM Transform
   F5  Pruning Threshold           F6  Prediction Confidence
@@ -10,6 +10,7 @@ Fifteen custom formulas, F1–F15:
   F11 Cluster Entropy             F12 Temporal Stability
   F13 Cross-Type Agreement        F14 Adaptive Learning Rate
   F15 Hierarchical Convergence Score
+  F16 Emergent Utility Gradient
 """
 
 import numpy as np
@@ -360,3 +361,29 @@ def hierarchical_convergence_score(centroids: List[np.ndarray], scores: List[flo
                 for i in range(n) for j in range(i+1, n))
     pairs = n * (n-1) / 2
     return float(mean_s * (1.0 + gamma * (cross / pairs if pairs > 0 else 0.0)))
+
+
+# ── Formula 16: Emergent Utility Gradient ────────────────────────────
+
+def emergent_utility_gradient(score_history: List[float]) -> float:
+    """
+    F16: U(t) = E[C_{t+1}(p)] - C_t(p)
+
+    Estimates the expected convergence gain in the next round by
+    extrapolating the recent trend in top-cluster scores.
+
+    Positive  → structure still improving; keep iterating.
+    Near-zero / negative → no future utility gain expected; can stop.
+
+    With 2 rounds: U = C_t - C_{t-1}  (simple delta)
+    With 3+ rounds: U = 0.7*(C_t-C_{t-1}) + 0.3*(C_{t-1}-C_{t-2})
+                    (recency-weighted to dampen transient spikes)
+    """
+    n = len(score_history)
+    if n < 2:
+        return 1.0  # insufficient history — assume gain is still possible
+    delta = score_history[-1] - score_history[-2]
+    if n >= 3:
+        delta2 = score_history[-2] - score_history[-3]
+        delta = 0.7 * delta + 0.3 * delta2
+    return float(delta)
