@@ -110,6 +110,23 @@ Designed to handle multiple data types:
 - Video
 - Other data formats
 
+## Learning Mechanism
+
+IECNN does not use gradient descent. Learning emerges from two aligned processes:
+
+**Evolution-style Selection**
+- Dots generate predictions each round
+- Convergence acts as selection pressure — winners survive, losers are pruned
+- Winning patterns reinforce their generation pathways over time
+- Weak patterns fade out
+- Closer to iterative survival-of-the-fittest than backpropagation
+
+**AIM-assisted Learning Signal**
+- AIM inversions serve as "what else could this have been?" exploration
+- Contradictions between originals and inversions produce a training signal
+- If an inversion consistently wins over the original → the system adjusts dot generation bias toward that inversion's pattern
+- Turns AIM from a pure inference tool into a feedback mechanism for learning
+
 ## Goal
 
 To serve as a potential foundation for Artificial General Intelligence (AGI).
