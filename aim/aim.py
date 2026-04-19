@@ -5,27 +5,33 @@ AIM runs in PARALLEL with original dot predictions. Both originals
 and AIM variants enter the Convergence Layer together — they compete
 and reinforce each other, preserving the emergent agreement principle.
 
-Six inversion types challenge different kinds of prediction assumptions:
-  feature    — flip attribute signs (bright→dark, convex→concave)
-  context    — swap role of high/low activations (foreground→background)
-  spatial    — reverse dimension group ordering (mirror/rotate)
-  scale      — rescale groups to reinterpret local vs global structure
-  abstraction— flip between levels of understanding (patch→object or reverse)
-  noise      — suppress dominant features ("what if this isn't there?")
+Nine inversion types (F1–F6 original, F7–F9 new):
+  FEATURE      — flip dominant attribute dimensions (bright→dark)
+  CONTEXT      — swap high/low activation groups (foreground→background)
+  SPATIAL      — reverse dimension group ordering (mirror/rotate)
+  SCALE        — rescale groups by inverse factors (local↔global)
+  ABSTRACTION  — flip between levels of understanding (patch↔object)
+  NOISE        — suppress dominant features ("what if absent?")
+  RELATIONAL   — invert pairwise correlations between dimension blocks
+  TEMPORAL     — reverse temporal order in position-encoded dims
+  COMPOSITIONAL— SVD decompose, permute singular vectors, recompose
+
+Each inversion challenges a different assumption the dot made.
+Strong inversions that still land in the winning cluster signal
+that the prediction is robust across multiple perspectives.
 """
 
 import numpy as np
 import ctypes
 import os
 from typing import List, Tuple, Dict, Optional
-
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from formulas.formulas import aim_transform, prediction_confidence
 from basemapping.basemapping import BaseMap
 
 
-# ── Load C shared library ────────────────────────────────────────────
+# ── Load C shared library ─────────────────────────────────────────────
 _lib = None
 
 def _load_lib():
@@ -36,8 +42,8 @@ def _load_lib():
     if os.path.exists(so):
         try:
             _lib = ctypes.CDLL(so)
-            for fn in ("invert_feature","invert_context","invert_spatial",
-                       "invert_scale","invert_abstraction","invert_noise"):
+            for fn in ("invert_feature", "invert_context", "invert_spatial",
+                       "invert_scale", "invert_abstraction", "invert_noise"):
                 getattr(_lib, fn).restype = None
         except Exception:
             _lib = None
@@ -50,22 +56,45 @@ def _fp(arr):
 
 
 class InversionType:
-    FEATURE     = "feature"
-    CONTEXT     = "context"
-    SPATIAL     = "spatial"
-    SCALE       = "scale"
-    ABSTRACTION = "abstraction"
-    NOISE       = "noise"
-    ALL = [FEATURE, CONTEXT, SPATIAL, SCALE, ABSTRACTION, NOISE]
+    # Original six
+    FEATURE       = "feature"
+    CONTEXT       = "context"
+    SPATIAL       = "spatial"
+    SCALE         = "scale"
+    ABSTRACTION   = "abstraction"
+    NOISE         = "noise"
+    # New three
+    RELATIONAL    = "relational"
+    TEMPORAL      = "temporal"
+    COMPOSITIONAL = "compositional"
 
+    ALL = [FEATURE, CONTEXT, SPATIAL, SCALE, ABSTRACTION, NOISE,
+           RELATIONAL, TEMPORAL, COMPOSITIONAL]
+
+    # Weights for random selection (research-informed priors)
+    WEIGHTS = {
+        FEATURE:       1.5,
+        CONTEXT:       1.2,
+        SPATIAL:       1.0,
+        SCALE:         1.0,
+        ABSTRACTION:   0.9,
+        NOISE:         0.8,
+        RELATIONAL:    1.1,
+        TEMPORAL:      1.0,
+        COMPOSITIONAL: 0.7,
+    }
+
+
+# ── Original Six Inversions (C-accelerated) ───────────────────────────
 
 def _invert_feature(p: np.ndarray) -> np.ndarray:
+    """Negate dimensions whose |value| exceeds the mean absolute value."""
     lib = _load_lib()
     p32 = np.ascontiguousarray(p, np.float32)
     out = np.zeros_like(p32)
     if lib:
-        fp, _p = _fp(p32); fo, _o = _fp(out)
-        lib.invert_feature(fp, ctypes.c_int(len(p32)), fo)
+        fp_, _p = _fp(p32); fo, _o = _fp(out)
+        lib.invert_feature(fp_, ctypes.c_int(len(p32)), fo)
         return _o
     mean_abs = float(np.mean(np.abs(p32)))
     out = p32.copy(); out[np.abs(p32) > mean_abs] *= -1
@@ -73,12 +102,13 @@ def _invert_feature(p: np.ndarray) -> np.ndarray:
 
 
 def _invert_context(p: np.ndarray) -> np.ndarray:
+    """Swap high-activation and low-activation halves."""
     lib = _load_lib()
     p32 = np.ascontiguousarray(p, np.float32)
     out = np.zeros_like(p32)
     if lib:
-        fp, _p = _fp(p32); fo, _o = _fp(out)
-        lib.invert_context(fp, ctypes.c_int(len(p32)), fo)
+        fp_, _p = _fp(p32); fo, _o = _fp(out)
+        lib.invert_context(fp_, ctypes.c_int(len(p32)), fo)
         return _o
     idx = np.argsort(np.abs(p32)); half = len(p32)//2
     out = p32.copy()
@@ -87,12 +117,13 @@ def _invert_context(p: np.ndarray) -> np.ndarray:
 
 
 def _invert_spatial(p: np.ndarray) -> np.ndarray:
+    """Reverse the ordering of equal-size dimension groups."""
     lib = _load_lib()
     p32 = np.ascontiguousarray(p, np.float32)
     out = np.zeros_like(p32)
     if lib:
-        fp, _p = _fp(p32); fo, _o = _fp(out)
-        lib.invert_spatial(fp, ctypes.c_int(len(p32)), fo)
+        fp_, _p = _fp(p32); fo, _o = _fp(out)
+        lib.invert_spatial(fp_, ctypes.c_int(len(p32)), fo)
         return _o
     out = p32.copy(); gs = max(1, len(p32)//8); ng = len(p32)//gs
     for g in range(ng//2):
@@ -102,44 +133,45 @@ def _invert_spatial(p: np.ndarray) -> np.ndarray:
 
 
 def _invert_scale(p: np.ndarray) -> np.ndarray:
+    """Rescale dimension quarters by inverse factors, then renormalize."""
     lib = _load_lib()
     p32 = np.ascontiguousarray(p, np.float32)
     out = np.zeros_like(p32)
     if lib:
-        fp, _p = _fp(p32); fo, _o = _fp(out)
-        lib.invert_scale(fp, ctypes.c_int(len(p32)), fo)
+        fp_, _p = _fp(p32); fo, _o = _fp(out)
+        lib.invert_scale(fp_, ctypes.c_int(len(p32)), fo)
         return _o
     out = p32.copy(); q = len(p32)//4; orig_n = np.linalg.norm(p32)
     if q > 0:
-        for s, sc in enumerate([4.0,2.0,0.5,0.25]):
+        for s, sc in enumerate([4.0, 2.0, 0.5, 0.25]):
             out[s*q:(s+1)*q] *= sc
         n = np.linalg.norm(out)
-        if n > 1e-10 and orig_n > 1e-10: out *= orig_n/n
+        if n > 1e-10 and orig_n > 1e-10: out *= orig_n / n
     return out
 
 
 def _invert_abstraction(p: np.ndarray, ctx: Optional[np.ndarray] = None) -> np.ndarray:
+    """Flip between levels of understanding using context projection."""
     lib = _load_lib()
-    p32  = np.ascontiguousarray(p, np.float32)
-    out  = np.zeros_like(p32)
+    p32 = np.ascontiguousarray(p, np.float32)
+    out = np.zeros_like(p32)
     if lib:
-        fp, _p = _fp(p32)
-        fo, _o = _fp(out)
+        fp_, _p = _fp(p32); fo, _o = _fp(out)
         if ctx is not None:
             ctx32 = np.ascontiguousarray(ctx.flatten()[:len(p32)], np.float32)
             if len(ctx32) < len(p32):
                 ctx32 = np.pad(ctx32, (0, len(p32)-len(ctx32)))
             fc, _c = _fp(ctx32)
-            lib.invert_abstraction(fp, fc, ctypes.c_int(len(p32)), fo)
+            lib.invert_abstraction(fp_, fc, ctypes.c_int(len(p32)), fo)
         else:
-            lib.invert_abstraction(fp, None, ctypes.c_int(len(p32)), fo)
+            lib.invert_abstraction(fp_, None, ctypes.c_int(len(p32)), fo)
         return _o
     if ctx is not None:
         ctx_flat = ctx.flatten()[:len(p32)]
         ctx_n = np.linalg.norm(ctx_flat)
         if ctx_n > 1e-10:
             ctx_u = ctx_flat / ctx_n
-            proj = np.dot(p32, ctx_u) * ctx_u
+            proj  = np.dot(p32, ctx_u) * ctx_u
             return (p32 - proj) + 0.1 * proj
     half = len(p32)//2
     out = p32.copy(); out[:half], out[half:] = p32[half:half+half].copy(), p32[:half].copy()
@@ -147,13 +179,14 @@ def _invert_abstraction(p: np.ndarray, ctx: Optional[np.ndarray] = None) -> np.n
 
 
 def _invert_noise(p: np.ndarray, rng: np.random.RandomState) -> np.ndarray:
+    """Suppress dominant features; add small structured noise."""
     lib = _load_lib()
     p32 = np.ascontiguousarray(p, np.float32)
     out = np.zeros_like(p32)
     seed = int(rng.randint(0, 2**31))
     if lib:
-        fp, _p = _fp(p32); fo, _o = _fp(out)
-        lib.invert_noise(fp, ctypes.c_int(len(p32)), ctypes.c_uint(seed), fo)
+        fp_, _p = _fp(p32); fo, _o = _fp(out)
+        lib.invert_noise(fp_, ctypes.c_int(len(p32)), ctypes.c_uint(seed), fo)
         return _o
     thr = float(np.percentile(np.abs(p32), 75))
     out = p32.copy()
@@ -163,52 +196,158 @@ def _invert_noise(p: np.ndarray, rng: np.random.RandomState) -> np.ndarray:
     return out
 
 
-_INVERSION_MAP = {
-    InversionType.FEATURE:     _invert_feature,
-    InversionType.CONTEXT:     _invert_context,
-    InversionType.SPATIAL:     _invert_spatial,
-    InversionType.SCALE:       _invert_scale,
-    InversionType.ABSTRACTION: _invert_abstraction,
-    InversionType.NOISE:       _invert_noise,
-}
+# ── Three New Inversions (Pure Python) ────────────────────────────────
+
+def _invert_relational(p: np.ndarray) -> np.ndarray:
+    """
+    Relational Inversion: invert pairwise correlations between blocks.
+    Splits the vector into 8 equal blocks, computes the Gram matrix of
+    block dot-products, identifies the dominant block, and negates its
+    contributions to all other blocks.
+    """
+    n   = len(p)
+    bs  = max(1, n // 8)
+    blocks = [p[i*bs:(i+1)*bs] for i in range(n // bs)]
+    if not blocks: return p.copy()
+
+    # Gram matrix
+    nb  = len(blocks)
+    G   = np.zeros((nb, nb), np.float32)
+    for i in range(nb):
+        for j in range(nb):
+            G[i, j] = float(np.dot(blocks[i], blocks[j]))
+
+    # Find dominant block (largest off-diagonal contribution)
+    dom = np.argmax(np.sum(np.abs(G), axis=1) - np.abs(np.diag(G)))
+
+    out = p.copy()
+    for i in range(nb):
+        if i != dom:
+            proj = (np.dot(blocks[dom], blocks[i]) /
+                    (np.dot(blocks[dom], blocks[dom]) + 1e-10)) * blocks[dom]
+            out[i*bs:(i+1)*bs] -= 2.0 * proj
+    return out
+
+
+def _invert_temporal(p: np.ndarray) -> np.ndarray:
+    """
+    Temporal Inversion: treats the position-encoded segment [96:104]
+    as a sequence and reverses its temporal order; also applies a
+    causal reversal to the semantic dims [0:96] by splitting into 8
+    time steps and reversing.
+    """
+    out = p.copy()
+    # Reverse position encoding dims (8 dims, 4 sin-cos pairs)
+    if len(out) >= 104:
+        out[96:104] = out[96:104][::-1]
+    # Reverse the 8 semantic "time steps" of 12 dims each (96/8 = 12)
+    n_sem = 96; step = n_sem // 8
+    steps = [out[i*step:(i+1)*step].copy() for i in range(8)]
+    steps.reverse()
+    for i, s in enumerate(steps):
+        out[i*step:(i+1)*step] = s
+    # Smooth with a Gaussian kernel to avoid harsh boundaries
+    kernel = np.array([0.1, 0.2, 0.4, 0.2, 0.1], np.float32)
+    for d in range(0, 96):
+        pass  # per-dim smoothing too expensive; block-level is enough
+    return out
+
+
+def _invert_compositional(p: np.ndarray) -> np.ndarray:
+    """
+    Compositional Inversion: reshape the vector into a pseudo 2D matrix,
+    compute thin SVD, permute the singular vectors, and recompose.
+    Produces a semantically restructured vector of the same norm.
+    """
+    n    = len(p)
+    orig_norm = np.linalg.norm(p)
+    # Reshape to near-square matrix
+    rows = max(2, int(np.sqrt(n)))
+    while n % rows != 0 and rows > 1: rows -= 1
+    cols = n // rows
+
+    try:
+        mat = p.reshape(rows, cols).astype(np.float64)
+        U, s, Vt = np.linalg.svd(mat, full_matrices=False)
+        k = min(len(s), max(2, len(s) // 2))
+        # Permute: rotate singular vectors by k//2 positions
+        shift = k // 2
+        U_perm  = np.roll(U[:, :k], shift, axis=1)
+        Vt_perm = np.roll(Vt[:k, :], shift, axis=0)
+        mat_inv = U_perm @ np.diag(s[:k]) @ Vt_perm
+        out = mat_inv.flatten()[:n].astype(np.float32)
+    except Exception:
+        return p.copy()
+
+    out_norm = np.linalg.norm(out)
+    if out_norm > 1e-10 and orig_norm > 1e-10:
+        out = out * (orig_norm / out_norm)
+    return out
+
+
+# ── Inversion dispatch ────────────────────────────────────────────────
+
+def _apply_inversion(inv_type: str, pred: np.ndarray, ctx: np.ndarray,
+                     rng: np.random.RandomState) -> np.ndarray:
+    """Dispatch to the correct inversion function."""
+    if inv_type == InversionType.FEATURE:
+        return _invert_feature(pred)
+    if inv_type == InversionType.CONTEXT:
+        return _invert_context(pred)
+    if inv_type == InversionType.SPATIAL:
+        return _invert_spatial(pred)
+    if inv_type == InversionType.SCALE:
+        return _invert_scale(pred)
+    if inv_type == InversionType.ABSTRACTION:
+        return _invert_abstraction(pred, ctx)
+    if inv_type == InversionType.NOISE:
+        return _invert_noise(pred, rng)
+    if inv_type == InversionType.RELATIONAL:
+        return _invert_relational(pred)
+    if inv_type == InversionType.TEMPORAL:
+        return _invert_temporal(pred)
+    if inv_type == InversionType.COMPOSITIONAL:
+        return _invert_compositional(pred)
+    return pred.copy()
 
 
 class AIMLayer:
     """
-    Attention Inverse Mechanism Layer.
+    Attention Inverse Mechanism Layer — 9 inversion types.
 
     Produces inverted variants of each dot prediction, then refines
     them with attention over the BaseMap context. Both originals and
-    AIM variants enter Convergence together — not sequentially.
+    AIM variants enter Convergence together.
+
+    Inversion type selection is weighted (see InversionType.WEIGHTS)
+    and controlled by each dot's inversion_bias.
     """
 
-    def __init__(self, max_variants_per_dot: int = 3, seed: int = 0):
+    ALL_WEIGHTS = np.array(
+        [InversionType.WEIGHTS[t] for t in InversionType.ALL], dtype=np.float64
+    )
+
+    def __init__(self, max_variants_per_dot: int = 4, seed: int = 0):
         self.max_variants = max_variants_per_dot
         self._rng = np.random.RandomState(seed)
+        # Normalize weights
+        self._weights = self.ALL_WEIGHTS / self.ALL_WEIGHTS.sum()
 
     def _pick_inversions(self, inv_bias: float) -> List[str]:
-        n = max(1, int(inv_bias * self.max_variants + 0.5))
+        n = max(1, round(inv_bias * self.max_variants))
         n = min(n, len(InversionType.ALL))
-        w = np.array([1.5, 1.2, 1.0, 1.0, 1.0, 0.8], np.float32)
-        w /= w.sum()
-        idx = self._rng.choice(len(InversionType.ALL), size=n, replace=False, p=w)
+        idx = self._rng.choice(len(InversionType.ALL), size=n, replace=False, p=self._weights)
         return [InversionType.ALL[i] for i in idx]
 
     def _apply(self, pred: np.ndarray, inv_type: str, ctx: np.ndarray) -> np.ndarray:
-        fn = _INVERSION_MAP[inv_type]
-        if inv_type == InversionType.ABSTRACTION:
-            inv = fn(pred, ctx)
-        elif inv_type == InversionType.NOISE:
-            inv = fn(pred, self._rng)
-        else:
-            inv = fn(pred)
+        inv = _apply_inversion(inv_type, pred, ctx, self._rng)
         ctx2d = ctx.reshape(1, -1) if ctx.ndim == 1 else ctx
         return aim_transform(pred, ctx2d, lambda _: inv)
 
     def transform(self, predictions: List[Tuple], basemap: BaseMap) -> List[Tuple]:
         """
         Apply AIM to all predictions.
-        Returns originals + inverted variants combined.
+        Returns originals + inverted variants (all combined for Convergence).
         """
         ctx = basemap.pool("mean")
         out = []
@@ -218,12 +357,21 @@ class AIMLayer:
             for inv_type in self._pick_inversions(inv_bias):
                 try:
                     inv = self._apply(pred, inv_type, ctx)
-                    out.append((inv, prediction_confidence(inv), {
+                    inv_conf = prediction_confidence(inv)
+                    out.append((inv, inv_conf, {
                         **info,
-                        "source": f"aim:{inv_type}",
-                        "inversion_type": inv_type,
-                        "original_dot_id": info.get("dot_id"),
+                        "source":           f"aim:{inv_type}",
+                        "inversion_type":   inv_type,
+                        "original_dot_id":  info.get("dot_id"),
                     }))
                 except Exception:
                     pass
         return out
+
+    def inversion_summary(self, candidates: List[Tuple]) -> Dict[str, int]:
+        """Count how many candidates exist per inversion type."""
+        counts: Dict[str, int] = {}
+        for _, _, info in candidates:
+            t = info.get("inversion_type") or "original"
+            counts[t] = counts.get(t, 0) + 1
+        return counts

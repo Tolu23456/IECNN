@@ -1,25 +1,28 @@
 """
-Pruning Layer — Three-stage candidate and cluster pruning.
+Pruning Layer — three-stage candidate and cluster pruning.
 
-Stage 1 — Early / Soft Filtering  (before full convergence)
-  Goal: prevent the candidate pool from exploding.
-  - Drop low-confidence predictions
-  - Remove near-duplicates (sim > tight threshold)
-  - Cap AIM variants per dot at max_variants
+Stage 1 — Soft Filter (before full convergence):
+  - Drop low-confidence predictions (below soft_conf threshold)
+  - Remove near-duplicates (similarity > near_dup threshold)
+  - Cap AIM variants per original dot (max_aim)
+  - Keep at least min_survivors regardless of thresholds
 
-Stage 2 — Mid-stage / Cluster Compression  (as grouping begins)
-  Goal: reduce redundancy before final scoring.
-  - Merge clusters whose centroids are very similar
-  - Represent each merged group with a combined centroid
+Stage 2 — Cluster Compression (after micro-clustering):
+  - Merge macro-clusters whose centroids are very similar (merge_thresh)
+  - Represent merged group with a combined consensus centroid
 
-Stage 3 — Final / Hard Selection  (after convergence scoring)
-  Goal: enforce clear convergence.
-  - Keep only clusters above the dynamic score threshold
+Stage 3 — Hard Selection (after scoring):
+  - Dynamic threshold: max(hard_thresh, top_score * floor_fraction)
   - Always keep at least min_keep clusters
+  - Track which pruned clusters were close (for feedback)
+
+Dynamic threshold adaptation:
+  The hard threshold rises as convergence progresses (when dominance is
+  high, keep fewer clusters; when exploratory, keep more diversity).
 """
 
 import numpy as np
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, Optional
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from formulas.formulas import similarity_score
@@ -27,26 +30,40 @@ from convergence.convergence import Cluster
 
 
 class PruningLayer:
-    def __init__(self, soft_conf: float = 0.08, near_dup: float = 0.95,
-                 max_aim_per_dot: int = 3, merge_thresh: float = 0.80,
-                 hard_thresh: float = 0.05, min_keep: int = 1, alpha: float = 0.7):
+    def __init__(self,
+                 soft_conf: float        = 0.06,
+                 near_dup: float         = 0.92,
+                 max_aim_per_dot: int    = 4,
+                 merge_thresh: float     = 0.80,
+                 hard_thresh: float      = 0.04,
+                 floor_fraction: float   = 0.08,
+                 min_keep: int           = 1,
+                 min_survivors: int      = 30,
+                 alpha: float            = 0.7):
         self.soft_conf    = soft_conf
         self.near_dup     = near_dup
         self.max_aim      = max_aim_per_dot
         self.merge_thresh = merge_thresh
         self.hard_thresh  = hard_thresh
+        self.floor_frac   = floor_fraction
         self.min_keep     = min_keep
+        self.min_survivors = min_survivors
         self.alpha        = alpha
 
-    # ── Stage 1 ──────────────────────────────────────────────────────
+    # ── Stage 1: Soft Filtering ──────────────────────────────────────
 
-    def stage1(self, candidates: List[Tuple]) -> Tuple[List[Tuple], Dict]:
+    def stage1(self, candidates: List[Tuple],
+               dominance: float = 0.0) -> Tuple[List[Tuple], Dict]:
         if not candidates: return [], {}
+
+        # Adaptive confidence threshold: relax when convergence is weak
+        conf_thresh = self.soft_conf * (1.0 + 0.5 * dominance)
+
         # Confidence filter
-        kept = [(p,c,i) for p,c,i in candidates if c >= self.soft_conf]
+        kept = [(p, c, i) for p, c, i in candidates if c >= conf_thresh]
         dropped_conf = len(candidates) - len(kept)
 
-        # AIM cap per dot
+        # AIM cap per original dot
         aim_counts: Dict[int, int] = {}
         capped = []
         dropped_aim = 0
@@ -63,22 +80,38 @@ class PruningLayer:
                 else:
                     dropped_aim += 1
 
-        # Near-duplicate removal
+        # Near-duplicate removal (sequential, O(n²) but n is bounded)
         deduped = []
         dropped_dup = 0
         for p, c, info in capped:
-            if not any(similarity_score(p, q, self.alpha) > self.near_dup for q, _, _ in deduped):
-                deduped.append((p, c, info))
-            else:
+            is_dup = any(
+                similarity_score(p, q, self.alpha) > self.near_dup
+                for q, _, _ in deduped
+            )
+            if is_dup:
                 dropped_dup += 1
+            else:
+                deduped.append((p, c, info))
 
-        return deduped, {"dropped_conf": dropped_conf, "dropped_aim": dropped_aim,
-                          "dropped_dup": dropped_dup, "out": len(deduped)}
+        # Safety net: never drop below min_survivors (relax conf requirement)
+        if len(deduped) < self.min_survivors:
+            extras = [(p, c, i) for p, c, i in candidates if (p, c, i) not in deduped]
+            extras.sort(key=lambda x: x[1], reverse=True)
+            need = self.min_survivors - len(deduped)
+            deduped.extend(extras[:need])
 
-    # ── Stage 2 ──────────────────────────────────────────────────────
+        return deduped, {
+            "in":           len(candidates),
+            "dropped_conf": dropped_conf,
+            "dropped_aim":  dropped_aim,
+            "dropped_dup":  dropped_dup,
+            "out":          len(deduped),
+        }
+
+    # ── Stage 2: Cluster Compression ────────────────────────────────
 
     def stage2(self, clusters: List[Cluster]) -> Tuple[List[Cluster], Dict]:
-        if len(clusters) <= 1: return clusters, {"merged": 0}
+        if len(clusters) <= 1: return clusters, {"merged": 0, "out": len(clusters)}
         merged_flags = [False] * len(clusters)
         result = []
         merge_count = 0
@@ -94,31 +127,43 @@ class PruningLayer:
             if len(group) == 1:
                 result.append(ci)
             else:
-                nc = Cluster(ci.cluster_id)
+                # Create merged cluster
+                from convergence.convergence import Cluster as CL
+                nc = CL(ci.cluster_id)
                 for idx in group:
-                    for p,c,info in zip(clusters[idx].predictions, clusters[idx].confidences, clusters[idx].infos):
-                        nc.add(p, c, info)
+                    for mc in clusters[idx]._micro_clusters:
+                        nc.add_micro(mc)
                 nc.compute_score(self.alpha)
                 result.append(nc)
                 merge_count += len(group) - 1
         result.sort(key=lambda c: c.score, reverse=True)
         return result, {"merged": merge_count, "out": len(result)}
 
-    # ── Stage 3 ──────────────────────────────────────────────────────
+    # ── Stage 3: Hard Selection ──────────────────────────────────────
 
-    def stage3(self, clusters: List[Cluster]) -> Tuple[List[Cluster], Dict]:
+    def stage3(self, clusters: List[Cluster],
+               dominance: float = 0.0) -> Tuple[List[Cluster], Dict]:
         if not clusters: return [], {}
         max_s = max(c.score for c in clusters)
-        thr   = max(self.hard_thresh, max_s * 0.1)
-        kept  = [c for c in clusters if c.score >= thr]
-        if len(kept) < self.min_keep: kept = clusters[:self.min_keep]
-        return kept, {"threshold": float(thr), "kept": len(kept),
-                      "discarded": len(clusters) - len(kept)}
+        # Dynamic threshold: rises with dominance (keep fewer when converging)
+        dyn_hard = self.hard_thresh * (1.0 + 2.0 * dominance)
+        thr = max(dyn_hard, max_s * self.floor_frac)
+        kept = [c for c in clusters if c.score >= thr]
+        if len(kept) < self.min_keep:
+            kept = clusters[:self.min_keep]
+        discarded_scores = [c.score for c in clusters if c not in kept]
+        return kept, {
+            "threshold":  float(thr),
+            "kept":       len(kept),
+            "discarded":  len(clusters) - len(kept),
+            "near_miss":  sum(1 for s in discarded_scores if s >= thr * 0.8),
+        }
 
     # ── Full pipeline ─────────────────────────────────────────────────
 
-    def run(self, candidates: List[Tuple], clusters: List[Cluster]) -> Tuple[List[Tuple], List[Cluster], Dict]:
-        filt, s1 = self.stage1(candidates)
+    def run(self, candidates: List[Tuple], clusters: List[Cluster],
+            dominance: float = 0.0) -> Tuple[List[Tuple], List[Cluster], Dict]:
+        filt, s1 = self.stage1(candidates, dominance)
         comp, s2 = self.stage2(clusters)
-        surv, s3 = self.stage3(comp)
+        surv, s3 = self.stage3(comp, dominance)
         return filt, surv, {"s1": s1, "s2": s2, "s3": s3}

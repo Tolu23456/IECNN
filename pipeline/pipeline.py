@@ -3,162 +3,371 @@ IECNN Pipeline — full 10-layer architecture.
 
 Layers:
   1.  Input              — receives raw data
-  2.  BaseMapping        — converts to structured token maps
-  3.  Dot Generation     — creates diverse neural dot pool
-  4.  Prediction         — each dot independently predicts
-  5.  AIM                — generates inverted variants (parallel with originals)
-  6.  Convergence        — clusters all candidates by similarity + agreement
-  7.  Merge              — centroid of winning cluster
-  8.  Pruning            — 3-stage removal of weak candidates/clusters
-  9.  Iteration Control  — checks 3 stopping conditions, loops back if needed
-  10. Output             — returns final stable vector
+  2.  BaseMapping        — converts to structured token maps (one row per token)
+  3.  Dot Generation     — creates diverse pool (6 types, multi-head)
+  4.  Prediction         — each dot independently predicts (N_HEADS each)
+  5.  AIM                — 9 inversions run in parallel with originals
+  6.  Pruning Stage 1    — soft filter (conf, duplicates, AIM cap)
+  7.  Convergence        — two-level hierarchical clustering (F2, F13, F15)
+  8.  Pruning Stage 2+3  — cluster compression + dynamic hard selection
+  9.  Iteration Control  — 5 stopping conditions + rollback + adaptive LR (F14)
+  10. Output             — normalized final vector
+
+Evolution (across calls):
+  After each run(), DotMemory records which dots contributed to the winner.
+  DotEvolution evolves the pool between runs (mutation, crossover, selection).
+
+Memory guidance:
+  Memory hints (recent centroids) are passed to dots for attention guidance.
+  ClusterMemory records temporal stability across rounds (F12).
 """
 
 import numpy as np
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from basemapping.basemapping import BaseMapper, BaseMap
-from neural_dot.neural_dot   import BiasVector, DotGenerator
+from neural_dot.neural_dot   import BiasVector, DotGenerator, DotType, N_HEADS
 from aim.aim                 import AIMLayer
 from convergence.convergence import ConvergenceLayer, Cluster
 from pruning.pruning         import PruningLayer
 from iteration.iteration     import IterationController, StopReason
-from formulas.formulas       import similarity_score
+from memory.dot_memory       import DotMemory
+from memory.cluster_memory   import ClusterMemory
+from evolution.dot_evolution import DotEvolution, EvolutionConfig
+from evaluation.metrics      import IECNNMetrics, RunMetrics
+from formulas.formulas       import (
+    similarity_score, cluster_entropy, adaptive_learning_rate, dominance_score
+)
 
 
 class IECNNResult:
-    def __init__(self, output, basemap, top_cluster, summary, stop_reason, rounds):
+    """Complete result from one IECNN run."""
+    def __init__(self, output, basemap, top_cluster, summary, stop_reason,
+                 rounds, metrics=None):
         self.output       = output
         self.basemap      = basemap
         self.top_cluster  = top_cluster
         self.summary      = summary
         self.stop_reason  = stop_reason
         self.rounds       = rounds
+        self.metrics: Optional[RunMetrics] = metrics
 
     def __repr__(self):
-        return (f"IECNNResult(rounds={self.summary.get('rounds',0)}, "
-                f"stop='{self.stop_reason}', norm={np.linalg.norm(self.output):.3f})")
+        n_rnd = self.summary.get("rounds", 0)
+        return (f"IECNNResult(rounds={n_rnd}, stop='{self.stop_reason}', "
+                f"norm={np.linalg.norm(self.output):.3f})")
 
 
 class IECNN:
-    def __init__(self, feature_dim=128, num_dots=64, max_iterations=10,
-                 similarity_threshold=0.45, dominance_threshold=0.70,
-                 novelty_threshold=0.05, alpha=0.7, max_aim_variants=3,
-                 soft_conf=0.08, seed=42):
+    """
+    Iterative Emergent Convergent Neural Network.
+
+    Instantiate once, call fit() on a corpus, then run()/encode()/similarity().
+    The dot pool evolves across calls via DotEvolution.
+    """
+
+    def __init__(self,
+                 feature_dim:           int   = 128,
+                 num_dots:              int   = 64,
+                 n_heads:               int   = N_HEADS,
+                 max_iterations:        int   = 12,
+                 micro_threshold:       float = 0.60,
+                 macro_threshold:       float = 0.40,
+                 dominance_threshold:   float = 0.70,
+                 novelty_threshold:     float = 0.05,
+                 stability_threshold:   float = 0.99,
+                 alpha:                 float = 0.70,
+                 gamma:                 float = 0.30,
+                 soft_conf:             float = 0.06,
+                 max_aim_variants:      int   = 4,
+                 base_lr:               float = 0.10,
+                 evolve:                bool  = True,
+                 seed:                  int   = 42):
         self.feature_dim = feature_dim
         self.num_dots    = num_dots
+        self.n_heads     = n_heads
+        self.alpha       = alpha
         self.seed        = seed
+        self.do_evolve   = evolve
 
-        self.base_mapper  = BaseMapper(feature_dim=feature_dim)
-        self.base_bias    = BiasVector(0.5, 0.5, 0.5, 0.3, 1.0)
-        self.dot_gen      = DotGenerator(num_dots, feature_dim, self.base_bias, seed)
-        self.aim          = AIMLayer(max_aim_variants, seed)
-        self.convergence  = ConvergenceLayer(similarity_threshold, alpha, dominance_threshold)
-        self.pruning      = PruningLayer(soft_conf=soft_conf, max_aim_per_dot=max_aim_variants, alpha=alpha)
-        self.iter_ctrl    = IterationController(max_iterations, dominance_threshold, novelty_threshold)
+        # Core components
+        self.base_mapper = BaseMapper(feature_dim=feature_dim)
+        self.base_bias   = BiasVector(0.5, 0.5, 0.5, 0.3, 1.0)
+        self.dot_gen     = DotGenerator(num_dots, feature_dim, self.base_bias,
+                                        n_heads=n_heads, seed=seed)
+        self.aim         = AIMLayer(max_aim_variants, seed)
+        self.convergence = ConvergenceLayer(
+            micro_threshold=micro_threshold, macro_threshold=macro_threshold,
+            alpha=alpha, gamma=gamma, dominance_threshold=dominance_threshold,
+            cross_type_bonus=0.15,
+        )
+        self.pruning     = PruningLayer(
+            soft_conf=soft_conf, max_aim_per_dot=max_aim_variants, alpha=alpha
+        )
+        self.iter_ctrl   = IterationController(
+            max_iterations=max_iterations, dominance_threshold=dominance_threshold,
+            novelty_threshold=novelty_threshold, stability_threshold=stability_threshold,
+            base_lr=base_lr, alpha=alpha,
+        )
+
+        # Memory and evolution
+        self.dot_memory      = DotMemory(num_dots)
+        self.cluster_memory  = ClusterMemory(feature_dim)
+        self.evolution       = DotEvolution(EvolutionConfig(), seed)
+        self.evaluator       = IECNNMetrics(alpha)
+
+        # Dot pool (generated lazily on first use; evolved across calls)
+        self._dots: Optional[list] = None
+        self._call_count: int = 0
+
+    # ── Setup ────────────────────────────────────────────────────────
 
     def fit(self, texts: List[str]) -> "IECNN":
+        """Discover word and phrase bases from a corpus."""
         self.base_mapper.fit(texts)
         return self
 
+    def _ensure_dots(self) -> list:
+        if self._dots is None:
+            self._dots = self.dot_gen.generate()
+        return self._dots
+
+    # ── Main run ─────────────────────────────────────────────────────
+
     def run(self, text: str, verbose: bool = False) -> IECNNResult:
+        """Run the full 10-layer IECNN pipeline on a text input."""
         self.iter_ctrl.reset()
+        self.cluster_memory.reset_call()
+
         basemap  = self.base_mapper.transform(text)
-        dots     = self.dot_gen.generate()
+        dots     = self._ensure_dots()
         cur_bmap = basemap
-        all_rounds = []
+        all_rounds: List[Dict] = []
         top_cluster: Optional[Cluster] = None
         final_out   = basemap.pool("mean")
+        prev_centroid: Optional[np.ndarray] = None
+        cur_entropy   = 0.5  # initial entropy (unknown)
 
         if verbose:
-            print(f"\n{'='*62}")
-            print(f"  IECNN | input: '{text[:55]}{'...' if len(text)>55 else ''}'")
-            print(f"  {basemap}  |  dots: {len(dots)}")
-            print(f"{'='*62}")
+            self._print_header(text, basemap, dots)
 
         while True:
             rnd = self.iter_ctrl.current_round
 
-            dot_preds   = self.dot_gen.run_all(cur_bmap, dots)
-            candidates  = self.aim.transform(dot_preds, cur_bmap)
-            filt, s1    = self.pruning.stage1(candidates)
+            # ── Memory hints for adaptive attention ──────────────────
+            memory_hints = {
+                dot.dot_id: self.dot_memory.recent_centroid(dot.dot_id)
+                for dot in dots
+            }
 
+            # ── Layers 3+4: Dot Prediction ───────────────────────────
+            dot_preds = self.dot_gen.run_all(
+                cur_bmap, dots,
+                memory_hints=memory_hints,
+                context_entropy=cur_entropy,
+            )
+
+            # ── Layer 5: AIM (9 inversions in parallel) ───────────────
+            candidates = self.aim.transform(dot_preds, cur_bmap)
+
+            # ── Pruning Stage 1 ───────────────────────────────────────
+            dom_prev = self.iter_ctrl.current_dominance()
+            filt, s1 = self.pruning.stage1(candidates, dom_prev)
             if not filt:
                 break
 
+            # ── Layer 6: Convergence (hierarchical, 2-level) ──────────
             clusters, assign = self.convergence.run(filt)
-            _, surv, pruning_stats = self.pruning.run(filt, clusters)
 
-            if not surv: surv = clusters[:1] if clusters else []
+            # ── Pruning Stages 2+3 ────────────────────────────────────
+            _, surv, pruning_stats = self.pruning.run(filt, clusters, dom_prev)
+            if not surv:
+                surv = clusters[:1] if clusters else []
 
+            # ── Compute metrics for this round ────────────────────────
+            scores = [c.score for c in surv]
+            dom    = dominance_score(scores[0], scores) if scores else 0.0
+            ent    = cluster_entropy(scores)
+            cur_entropy = ent  # feed forward to next round
+
+            conv_sum = self.convergence.summarize(surv, prev_centroid)
+            conv_sum["centroid"] = surv[0].centroid if surv else None
+
+            # ── Record round ──────────────────────────────────────────
             self.iter_ctrl.record_round(surv, pruning_stats)
-            conv_sum = self.convergence.summarize(surv)
-            dom, _   = self.convergence.dominance(surv)
+            self.cluster_memory.record_round(
+                rnd,
+                [c.centroid for c in surv if c.centroid is not None],
+                scores,
+            )
 
             rnd_info = {
-                "round": rnd, "candidates": len(candidates),
-                "filtered": len(filt), "clusters": len(surv),
-                "dominance": float(dom), "top_score": conv_sum.get("top_score", 0.0),
+                "round":       rnd,
+                "candidates":  len(candidates),
+                "filtered":    len(filt),
+                "clusters":    len(surv),
+                "micro":       conv_sum.get("num_micro", 0),
+                "dominance":   float(dom),
+                "top_score":   float(surv[0].score) if surv else 0.0,
+                "entropy":     float(ent),
+                "stability":   float(conv_sum.get("stability", 0.0)),
+                "lr":          float(self.iter_ctrl.current_lr()),
+                "centroid":    surv[0].centroid.copy() if surv and surv[0].centroid is not None else None,
             }
             all_rounds.append(rnd_info)
 
             if verbose:
-                print(f"  Round {rnd}: {len(candidates):>3} cands → "
-                      f"{len(filt):>3} kept → {len(surv):>2} clusters | "
-                      f"dom={dom:.3f}  top={conv_sum.get('top_score',0):.4f}")
+                self._print_round(rnd_info)
 
             if surv:
-                top_cluster = surv[0]
-                final_out   = top_cluster.centroid.copy()
+                top_cluster   = surv[0]
+                final_out     = top_cluster.centroid.copy()
+                prev_centroid = final_out.copy()
 
+            # ── Check stopping conditions ────────────────────────────
             stop, reason = self.iter_ctrl.should_stop(surv)
             if stop:
-                if verbose: print(f"\n  Stop: {reason}")
+                if verbose: print(f"\n  ⟹  Stop: [{reason}]")
                 break
 
+            # ── Update state for next round ───────────────────────────
             refined  = self.iter_ctrl.advance(surv, final_out)
             cur_bmap = self._blend(basemap, refined)
-            self._learn(surv, candidates, assign)
+            self._record_dot_outcomes(surv, candidates, assign, dots)
+            self._learn_bias(surv, candidates, assign)
 
+        # ── Rollback if last round was worse ─────────────────────────
+        best = self.iter_ctrl.best_clusters()
+        if (best and top_cluster and
+                best[0].score > top_cluster.score * 1.05):
+            top_cluster = best[0]
+            final_out   = best[0].centroid.copy()
+
+        # ── Normalize output vector ───────────────────────────────────
         n = np.linalg.norm(final_out)
         if n > 1e-10: final_out = final_out / n * np.sqrt(self.feature_dim)
 
-        return IECNNResult(
+        # ── Post-run: update memory + evolve dots ─────────────────────
+        if top_cluster:
+            self.cluster_memory.commit_pattern(final_out, top_cluster.score, self.alpha)
+        if self.do_evolve:
+            self._dots = self.evolution.evolve(dots, self.dot_memory)
+        self._call_count += 1
+
+        result = IECNNResult(
             output=final_out, basemap=basemap, top_cluster=top_cluster,
             summary=self.iter_ctrl.summary(),
             stop_reason=self.iter_ctrl.stop_reason or StopReason.BUDGET,
             rounds=all_rounds,
         )
+        result.metrics = self.evaluator.evaluate(result)
+        return result
+
+    # ── Public API ───────────────────────────────────────────────────
 
     def encode(self, text: str) -> np.ndarray:
+        """Encode text to a 128-dim vector."""
         return self.run(text).output
 
     def similarity(self, a: str, b: str) -> float:
-        return float(similarity_score(self.encode(a), self.encode(b)))
+        """Similarity between two texts (F1)."""
+        return float(similarity_score(self.encode(a), self.encode(b), self.alpha))
+
+    def compare(self, texts: List[str]) -> np.ndarray:
+        """Return n×n similarity matrix for a list of texts."""
+        vecs = [self.encode(t) for t in texts]
+        n = len(vecs)
+        mat = np.zeros((n, n), np.float32)
+        for i in range(n):
+            for j in range(i, n):
+                s = similarity_score(vecs[i], vecs[j], self.alpha)
+                mat[i, j] = mat[j, i] = s
+        return mat
+
+    def memory_status(self) -> Dict:
+        """Summary of dot memory and cluster memory state."""
+        return {
+            "dot_memory":     self.dot_memory.summary(),
+            "cluster_memory": self.cluster_memory.summary(),
+            "evolution":      self.evolution.stats(self.dot_memory),
+            "call_count":     self._call_count,
+        }
+
+    # ── Internal helpers ─────────────────────────────────────────────
 
     def _blend(self, original: BaseMap, refined: np.ndarray) -> BaseMap:
+        """Blend the refined vector back into the basemap for the next round."""
         mat = original.matrix.copy()
-        n   = np.linalg.norm(refined)
+        n = np.linalg.norm(refined)
         if n > 1e-10:
             r = refined / n
-            mat = 0.8 * mat + 0.2 * r[None, :]
+            mat = 0.85 * mat + 0.15 * r[None, :]
         from basemapping.basemapping import BaseMap as BM
         return BM(mat, original.tokens, original.token_types,
                   original.modifiers, {**original.metadata, "blended": True})
 
-    def _learn(self, surviving, candidates, assignments):
+    def _record_dot_outcomes(self, surviving: List[Cluster], candidates: List[Tuple],
+                             assignments: List[int], dots: list):
+        """Update DotMemory: which dots contributed to the winning cluster."""
         if not surviving: return
-        win_ids = {surviving[0].cluster_id}
+        win_cid = {surviving[0].cluster_id}
+        for i, (pred, conf, info) in enumerate(candidates):
+            in_winner = (i < len(assignments) and assignments[i] in win_cid)
+            dot_id = info.get("dot_id", -1)
+            if dot_id >= 0:
+                self.dot_memory.record(dot_id, pred, in_winner)
+
+    def _learn_bias(self, surviving: List[Cluster], candidates: List[Tuple],
+                    assignments: List[int]):
+        """Update global base_bias based on winning prediction characteristics."""
+        if not surviving: return
+        win_cid = {surviving[0].cluster_id}
+        win_biases = []
         aim_wins = total = 0
         for i, (_, _, info) in enumerate(candidates):
-            if i < len(assignments) and assignments[i] in win_ids:
+            if i < len(assignments) and assignments[i] in win_cid:
                 total += 1
-                if info.get("inversion_type") is not None: aim_wins += 1
+                if info.get("inversion_type") is not None:
+                    aim_wins += 1
+                b = info.get("bias")
+                if b is not None:
+                    win_biases.append(b.to_array())
+        if not win_biases: return
+
+        dom = self.iter_ctrl.current_dominance()
+        lr  = self.iter_ctrl.current_lr()
+
+        win_mean = np.mean(np.stack(win_biases), axis=0).astype(np.float32)
+        self.base_bias = BiasVector.from_array(
+            self.base_bias.to_array() + lr * (win_mean - self.base_bias.to_array())
+        )
+        # AIM feedback: if inversions won often, raise inversion_bias
         if total > 0:
             ratio = aim_wins / total
-            arr   = self.base_bias.to_array()
-            arr[3] = min(0.9, arr[3] + ratio * 0.1)
+            arr = self.base_bias.to_array()
+            arr[3] = float(np.clip(arr[3] + ratio * lr * 0.5, 0.05, 0.95))
             self.base_bias = BiasVector.from_array(arr)
-            self.dot_gen.base_bias = self.base_bias
+        self.dot_gen.base_bias = self.base_bias
+
+    # ── Verbose output ────────────────────────────────────────────────
+
+    def _print_header(self, text: str, basemap: BaseMap, dots: list):
+        trunc = text[:55] + ("..." if len(text) > 55 else "")
+        type_dist = self.dot_gen.type_distribution(dots)
+        type_str  = " ".join(f"{k[:3]}={v}" for k, v in sorted(type_dist.items()))
+        print(f"\n{'═'*66}")
+        print(f"  IECNN  │  input: '{trunc}'")
+        print(f"  {basemap}  │  dots: {len(dots)} ({type_str})")
+        print(f"{'═'*66}")
+        print(f"  {'Rnd':>3}  {'cands':>5}  {'kept':>5}  {'cls':>4}  {'mic':>4}  "
+              f"{'dom':>6}  {'top':>7}  {'ent':>6}  {'stab':>6}  {'lr':>6}")
+        print(f"  {'─'*63}")
+
+    def _print_round(self, r: Dict):
+        print(f"  {r['round']:>3}  {r['candidates']:>5}  {r['filtered']:>5}  "
+              f"{r['clusters']:>4}  {r['micro']:>4}  "
+              f"{r['dominance']:>6.3f}  {r['top_score']:>7.4f}  "
+              f"{r['entropy']:>6.3f}  {r['stability']:>6.3f}  "
+              f"{r['lr']:>6.4f}")
