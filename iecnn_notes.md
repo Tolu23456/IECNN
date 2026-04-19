@@ -91,6 +91,17 @@ To serve as a potential foundation for Artificial General Intelligence (AGI).
 - Attention is applied to focus on the most relevant parts of the prediction or context.
 - Generates novel, context-aware candidate solutions.
 
+#### Visual Inversion Types
+
+| Type | Description | Example |
+|---|---|---|
+| **Feature inversion** | Flip attributes, not pixels | "bright edge" → "dark edge"; "convex" → "concave" |
+| **Context inversion** | Reinterpret the role of a patch | "foreground object" → "background texture" |
+| **Spatial inversion** | Mirror, rotate, or flip inside↔outside relationships | Same content, different spatial meaning |
+| **Scale inversion** | Reinterpret local detail as global structure, or vice versa | Catches misclassification of local vs. global features |
+| **Abstraction inversion** | Flip between levels of understanding | Patches → object hypothesis ("face"), or object → decomposed patches |
+| **Noise/absence inversion** | "What if this feature isn't actually there?" | Suppress a dominant feature and generate alternative predictions |
+
 ### BaseMapping
 
 A dynamic AI input representation system. Converts input into maps representing:
