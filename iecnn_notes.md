@@ -48,13 +48,26 @@ Each neural dot receives data and independently produces a prediction. The syste
 ### 10. Output Layer
 - Produces the final stable result
 
+## Neural Dots vs. Neurons
+
+| | Neuron (ANN) | Neural Dot (IECNN) |
+|---|---|---|
+| Role | Tiny signal-passer in a fixed layered system | Complete mini-predictor on its own |
+| Scope | Part of a larger computation | Produces one full candidate answer |
+| Interaction | Passes signals forward to the next layer | Competes with other dots, then converges |
+| State | Stateless (activation only) | Stateless by default — input → prediction |
+
+The system's "memory" comes from the **iteration and convergence process**, not from individual dots carrying state. Each dot receives a slice or perspective of the input and independently produces a candidate answer.
+
 ## Key Characteristics
 
 - Neural dots instead of traditional neural networks
-- Each dot makes fully independent predictions
+- Each dot is a complete, stateless mini-predictor
+- Many dots run in parallel on the same input without interference
 - Convergence-based validation — only the most common results survive
 - Iterative refinement until stability is reached
 - Emergent behavior from many simple independent units
+- Memory emerges from iteration, not from individual dot state
 
 ## Capabilities
 
