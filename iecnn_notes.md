@@ -95,11 +95,21 @@ To serve as a potential foundation for Artificial General Intelligence (AGI).
 
 A dynamic AI input representation system. Converts input into maps representing:
 
-- **Bases** — characters, words, or multi-word phrases
-- **Modifiers**
+- **Bases** — the fundamental unit of any input type
+- **Modifiers** — contextual properties that describe or qualify each base
 - **Features:**
   - Compression of sequences
   - Phrase-level base handling
-  - Efficient handling of repeated words
+  - Efficient handling of repeated elements
   - Ability to discover new bases after deployment
 - **Output:** Compact, structured matrices for IECNN processing
+
+BaseMapping is **data-type-aware** — the base-discovery process adapts to the input type, but the output format remains consistent, allowing the Convergence Layer to apply a single similarity metric regardless of modality:
+
+| Data Type | Bases | Modifiers |
+|---|---|---|
+| Text | Characters, words, multi-word phrases | Grammatical role, position, frequency |
+| Images | Patches (small tiles of pixels) | Position, color distribution, edges, texture |
+| Video | Patches + frame index | Position, motion, temporal change |
+
+This treats images as "sentences of visual tokens" and video as "sentences of visual tokens over time" — consistent with the text-based design.
