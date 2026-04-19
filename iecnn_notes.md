@@ -60,8 +60,22 @@ Pruning happens in three stages across a round:
 - Goal: enforce clear convergence
 
 ### 9. Iteration Controller Layer
-- Feeds merged output back into the system
-- Repeats process until stability is reached
+
+Feeds merged output back into the system and repeats until one of three stability conditions is met:
+
+**Condition 1 — Iteration Budget**
+- Hard limit on the number of rounds
+- Safety cap to prevent infinite loops
+
+**Condition 2 — Convergence Dominance**
+- One cluster clearly dominates (holds most of the weight/confidence)
+- Competing clusters stop growing
+- Captures genuine agreement, not just lack of change
+
+**Condition 3 — Low Novelty Gain**
+- New iterations (including AIM outputs) stop producing meaningfully different candidates
+- Everything new maps back into existing clusters
+- Signals that exploration is exhausted
 
 ### 10. Output Layer
 - Produces the final stable result
