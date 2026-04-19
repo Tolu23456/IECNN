@@ -31,7 +31,8 @@ Each neural dot receives data and independently produces a prediction. The syste
 - Produces refined candidate predictions
 
 ### 6. Convergence Layer
-- Compares all predictions
+- Compares all predictions in the **unified BaseMapping representation space**
+- Uses a single similarity metric over structured maps — consistent across all data types
 - Detects common or dominant patterns using **similarity + agreement strength** (not purely frequency)
 - Identifies convergence points
 
