@@ -32,7 +32,7 @@ Each neural dot receives data and independently produces a prediction. The syste
 
 ### 6. Convergence Layer
 - Compares all predictions
-- Detects common or dominant patterns
+- Detects common or dominant patterns using **similarity + agreement strength** (not purely frequency)
 - Identifies convergence points
 
 ### 7. Merge Layer
