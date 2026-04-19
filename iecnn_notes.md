@@ -90,6 +90,11 @@ To serve as a potential foundation for Artificial General Intelligence (AGI).
 - Dot predictions are transformed or inverted.
 - Attention is applied to focus on the most relevant parts of the prediction or context.
 - Generates novel, context-aware candidate solutions.
+- AIM outputs enter the **Convergence Layer in parallel with the original dot predictions** — they compete and reinforce each other rather than replacing the originals.
+  - Convergence sees a richer "idea space"
+  - Useful inversions gain support and survive
+  - Unhelpful inversions are pruned naturally
+  - Preserves the principle of emergent agreement throughout
 
 #### Visual Inversion Types
 
