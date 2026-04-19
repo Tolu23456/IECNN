@@ -1,27 +1,60 @@
 # IECNN (Iterative Emergent Convergent Neural Network)
 
+## Overview
+
+IECNN is an AI architecture — similar in role to the Transformer, but fundamentally different in design. Instead of traditional neural networks, IECNN uses **neural dots**: independent units that each make their own prediction. The system then identifies the most common result, discards the rest, and repeats this process through a series of layers until a stable output emerges.
+
 ## Core Concept
 
-IECNN functions by generating many "neural dots". Each dot independently produces a prediction.
+Each neural dot receives data and independently produces a prediction. The system evaluates all predictions, finds convergence (the most common or dominant result), merges the agreeing predictions, and prunes the rest. This loop repeats until the output stabilises.
 
-## Process
+## IECNN Layers
 
-1. Neural dots are generated in large numbers.
-2. Each dot makes its own independent prediction.
-3. The system evaluates all predictions.
-4. The most common or convergent results are identified.
-5. Convergent results are merged.
-6. Non-convergent predictions are discarded.
-7. The process repeats iteratively.
-8. Iteration continues until a stable pattern emerges.
+### 1. Input Layer
+- Receives raw data (text, image, video, etc.)
+- Passes data into BaseMapping for structuring
+
+### 2. BaseMapping Layer
+- Converts input into maps of bases and modifiers
+- Produces compact structured representations
+
+### 3. Neural Dot Generation Layer
+- Splits mapped data into many neural dots
+- Each dot is assigned a portion or perspective of the data
+
+### 4. Prediction Layer
+- Each neural dot independently generates a prediction
+
+### 5. AIM Layer (Attention Inverse Mechanism)
+- Transforms/inverts predictions
+- Applies attention to focus on relevant parts
+- Produces refined candidate predictions
+
+### 6. Convergence Layer
+- Compares all predictions
+- Detects common or dominant patterns
+- Identifies convergence points
+
+### 7. Merge Layer
+- Merges convergent predictions into a unified output
+
+### 8. Pruning Layer
+- Discards non-converging or inconsistent predictions
+
+### 9. Iteration Controller Layer
+- Feeds merged output back into the system
+- Repeats process until stability is reached
+
+### 10. Output Layer
+- Produces the final stable result
 
 ## Key Characteristics
 
-- Iterative refinement process
-- Emergent behavior from multiple simple units
-- Convergence-based validation mechanism
-- Discarding of inconsistent outputs
-- Stability as the stopping condition
+- Neural dots instead of traditional neural networks
+- Each dot makes fully independent predictions
+- Convergence-based validation — only the most common results survive
+- Iterative refinement until stability is reached
+- Emergent behavior from many simple independent units
 
 ## Capabilities
 
@@ -46,7 +79,7 @@ To serve as a potential foundation for Artificial General Intelligence (AGI).
 
 ### BaseMapping
 
-A dynamic AI input representation system. Converts text into maps representing:
+A dynamic AI input representation system. Converts input into maps representing:
 
 - **Bases** — characters, words, or multi-word phrases
 - **Modifiers**
