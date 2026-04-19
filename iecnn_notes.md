@@ -127,6 +127,20 @@ IECNN does not use gradient descent. Learning emerges from two aligned processes
 - If an inversion consistently wins over the original → the system adjusts dot generation bias toward that inversion's pattern
 - Turns AIM from a pure inference tool into a feedback mechanism for learning
 
+**Dot Generation Bias Vector**
+
+Dot generation is controlled by a structured bias vector — not randomness. Each dimension targets a distinct aspect of how dots perceive and process input:
+
+| Dimension | Controls |
+|---|---|
+| **Attention bias** | What parts of the input a dot focuses on |
+| **Granularity bias** | Whether dots operate at patch, object, or global level |
+| **Abstraction bias** | Whether dots work with raw features or semantic concepts |
+| **Inversion bias** | How frequently AIM-style transformations are applied |
+| **Sampling temperature** | How diverse dot outputs are across the pool |
+
+Learning adjusts this vector over time — winning inversion patterns shift the bias toward the strategies that produced them.
+
 ## Goal
 
 To serve as a potential foundation for Artificial General Intelligence (AGI).
