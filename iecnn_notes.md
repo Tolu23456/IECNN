@@ -40,7 +40,24 @@ Each neural dot receives data and independently produces a prediction. The syste
 - Merges convergent predictions into a unified output
 
 ### 8. Pruning Layer
-- Discards non-converging or inconsistent predictions
+
+Pruning happens in three stages across a round:
+
+**Stage 1 — Early / Soft Filtering** *(before full convergence)*
+- Drop clearly low-quality or low-confidence candidates
+- Remove near-duplicates within a tight similarity threshold
+- Cap AIM expansions per dot (e.g., each dot spawns at most N variants)
+- Goal: prevent the candidate pool from exploding
+
+**Stage 2 — Mid-stage / Cluster Compression** *(as similarity grouping begins)*
+- Merge highly similar candidates early
+- Represent clusters with a centroid or representative candidate
+- Goal: reduce redundancy before final scoring
+
+**Stage 3 — Final / Hard Selection** *(after convergence scoring)*
+- Keep only dominant clusters
+- Discard weak or inconsistent predictions
+- Goal: enforce clear convergence
 
 ### 9. Iteration Controller Layer
 - Feeds merged output back into the system
