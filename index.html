@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>IECNN - Iterative Emergent Convergent Neural Network</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background: #0f1117;
+      color: #e2e8f0;
+      min-height: 100vh;
+      padding: 2rem;
+    }
+
+    .container {
+      max-width: 900px;
+      margin: 0 auto;
+    }
+
+    header {
+      text-align: center;
+      margin-bottom: 3rem;
+      padding: 2rem;
+      background: linear-gradient(135deg, #1a1d2e, #2d1b69);
+      border-radius: 16px;
+      border: 1px solid #4c1d95;
+    }
+
+    header h1 {
+      font-size: 2.5rem;
+      font-weight: 700;
+      background: linear-gradient(90deg, #a78bfa, #60a5fa);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      margin-bottom: 0.5rem;
+    }
+
+    header p {
+      color: #94a3b8;
+      font-size: 1.1rem;
+    }
+
+    .section {
+      background: #1e2130;
+      border-radius: 12px;
+      padding: 1.75rem;
+      margin-bottom: 1.5rem;
+      border: 1px solid #2d3148;
+    }
+
+    .section h2 {
+      font-size: 1.3rem;
+      font-weight: 600;
+      color: #a78bfa;
+      margin-bottom: 1rem;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .section h2::before {
+      content: '';
+      display: inline-block;
+      width: 4px;
+      height: 1.2em;
+      background: linear-gradient(180deg, #a78bfa, #60a5fa);
+      border-radius: 2px;
+    }
+
+    .section p {
+      color: #cbd5e1;
+      line-height: 1.7;
+      margin-bottom: 0.75rem;
+    }
+
+    .steps {
+      counter-reset: step;
+      list-style: none;
+    }
+
+    .steps li {
+      counter-increment: step;
+      display: flex;
+      align-items: flex-start;
+      gap: 1rem;
+      padding: 0.6rem 0;
+      color: #cbd5e1;
+      line-height: 1.6;
+    }
+
+    .steps li::before {
+      content: counter(step);
+      min-width: 28px;
+      height: 28px;
+      background: linear-gradient(135deg, #6d28d9, #2563eb);
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 0.8rem;
+      font-weight: 700;
+      color: #fff;
+      flex-shrink: 0;
+    }
+
+    .tags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      margin-top: 0.5rem;
+    }
+
+    .tag {
+      background: #2d1b69;
+      color: #c4b5fd;
+      border: 1px solid #4c1d95;
+      padding: 0.3rem 0.75rem;
+      border-radius: 20px;
+      font-size: 0.85rem;
+      font-weight: 500;
+    }
+
+    .tag.blue {
+      background: #1e3a5f;
+      color: #93c5fd;
+      border-color: #1d4ed8;
+    }
+
+    .mechanisms {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1rem;
+      margin-top: 0.5rem;
+    }
+
+    @media (max-width: 600px) {
+      .mechanisms {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .mechanism-card {
+      background: #131625;
+      border-radius: 10px;
+      padding: 1.25rem;
+      border: 1px solid #2d3148;
+    }
+
+    .mechanism-card h3 {
+      color: #60a5fa;
+      font-size: 1rem;
+      margin-bottom: 0.75rem;
+      font-weight: 600;
+    }
+
+    .mechanism-card ul {
+      list-style: none;
+      padding: 0;
+    }
+
+    .mechanism-card ul li {
+      color: #94a3b8;
+      font-size: 0.9rem;
+      padding: 0.3rem 0;
+      display: flex;
+      align-items: flex-start;
+      gap: 0.5rem;
+      line-height: 1.5;
+    }
+
+    .mechanism-card ul li::before {
+      content: '›';
+      color: #6d28d9;
+      font-weight: 700;
+      flex-shrink: 0;
+    }
+
+    .goal-box {
+      background: linear-gradient(135deg, #1a1d2e, #1e3a5f);
+      border: 1px solid #1d4ed8;
+      border-radius: 10px;
+      padding: 1.25rem 1.5rem;
+      color: #93c5fd;
+      font-size: 1.05rem;
+      line-height: 1.7;
+      text-align: center;
+    }
+
+    footer {
+      text-align: center;
+      color: #475569;
+      margin-top: 2rem;
+      font-size: 0.85rem;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>IECNN</h1>
+      <p>Iterative Emergent Convergent Neural Network</p>
+    </header>
+
+    <div class="section">
+      <h2>Core Concept</h2>
+      <p>
+        IECNN functions by generating many <strong style="color:#a78bfa">neural dots</strong>.
+        Each dot independently produces a prediction. Through iterative convergence,
+        stable and reliable outputs emerge from the collective agreement of many independent units.
+      </p>
+    </div>
+
+    <div class="section">
+      <h2>Process</h2>
+      <ol class="steps">
+        <li>Neural dots are generated in large numbers.</li>
+        <li>Each dot makes its own independent prediction.</li>
+        <li>The system evaluates all predictions.</li>
+        <li>The most common or convergent results are identified.</li>
+        <li>Convergent results are merged.</li>
+        <li>Non-convergent predictions are discarded.</li>
+        <li>The process repeats iteratively.</li>
+        <li>Iteration continues until a stable pattern emerges.</li>
+      </ol>
+    </div>
+
+    <div class="section">
+      <h2>Key Characteristics</h2>
+      <div class="tags">
+        <span class="tag">Iterative Refinement</span>
+        <span class="tag">Emergent Behavior</span>
+        <span class="tag">Convergence-based Validation</span>
+        <span class="tag">Inconsistency Pruning</span>
+        <span class="tag">Stability as Stopping Condition</span>
+      </div>
+    </div>
+
+    <div class="section">
+      <h2>Data Capabilities</h2>
+      <p>Designed to handle multiple data types:</p>
+      <div class="tags">
+        <span class="tag blue">Text</span>
+        <span class="tag blue">Images</span>
+        <span class="tag blue">Video</span>
+        <span class="tag blue">Other Data Formats</span>
+      </div>
+    </div>
+
+    <div class="section">
+      <h2>Associated Mechanisms</h2>
+      <div class="mechanisms">
+        <div class="mechanism-card">
+          <h3>AIM — Attention Inverse Mechanism</h3>
+          <ul>
+            <li>Dot predictions are transformed or inverted.</li>
+            <li>Attention is applied to focus on the most relevant parts of the prediction or context.</li>
+            <li>Generates novel, context-aware candidate solutions.</li>
+          </ul>
+        </div>
+        <div class="mechanism-card">
+          <h3>BaseMapping</h3>
+          <ul>
+            <li>A dynamic AI input representation system.</li>
+            <li>Converts text into maps of Bases, Modifiers, and Features.</li>
+            <li>Handles compression, phrase-level bases, and repeated words efficiently.</li>
+            <li>Outputs compact, structured matrices for IECNN processing.</li>
+            <li>Capable of discovering new bases after deployment.</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <h2>Goal</h2>
+      <div class="goal-box">
+        To serve as a potential foundation for <strong>Artificial General Intelligence (AGI)</strong>.
+      </div>
+    </div>
+
+    <footer>
+      <p>IECNN Research Notes</p>
+    </footer>
+  </div>
+</body>
+</html>
