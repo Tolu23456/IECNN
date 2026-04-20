@@ -24,7 +24,7 @@ Memory guidance:
 
 import numpy as np
 import re
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, Any
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -144,24 +144,26 @@ class IECNN:
 
     # ── Main run ─────────────────────────────────────────────────────
 
-    def run(self, text: str, verbose: bool = False, update_brain: bool = False) -> IECNNResult:
+    def run(self, input_data: Any, verbose: bool = False,
+            update_brain: bool = False, mode: str = "text") -> IECNNResult:
         """
-        Run the full 10-layer IECNN pipeline on a text input.
+        Run the full 10-layer IECNN pipeline.
 
         Args:
-          text         — input text
+          input_data   — input data (text, img_path, etc.)
           verbose      — print round-by-round progress
           update_brain — if True, the text enriches the global BaseMapping knowledge
+          mode         — 'text' | 'image' | 'audio' | 'video'
         """
-        if update_brain:
-            self.base_mapper.fit([text])
+        if update_brain and mode == "text":
+            self.base_mapper.fit([input_data])
             if self.base_mapper.persistence_path:
                 self.base_mapper.save(self.base_mapper.persistence_path)
 
         self.iter_ctrl.reset()
         self.cluster_memory.reset_call()
 
-        basemap  = self.base_mapper.transform(text)
+        basemap  = self.base_mapper.transform(input_data, mode=mode)
         dots     = self._ensure_dots()
         cur_bmap = basemap
         all_rounds: List[Dict] = []
@@ -171,7 +173,7 @@ class IECNN:
         cur_entropy   = 0.5  # initial entropy (unknown)
 
         if verbose:
-            self._print_header(text, basemap, dots)
+            self._print_header(str(input_data), basemap, dots)
 
         while True:
             rnd = self.iter_ctrl.current_round
@@ -303,6 +305,9 @@ class IECNN:
             # raise temperature of underrepresented dot types
             if self._compute_diversity(dots) < 0.60:
                 self._boost_underrepresented(dots)
+
+            # Step 7 — Dynamic Head Allocation: Grant extra heads to elites
+            self._allocate_heads(dots, eff)
 
             self._learn_bias(surv, candidates, assign)
 
@@ -547,6 +552,31 @@ class IECNN:
             counts[t] = counts.get(t, 0) + 1
         n = len(dots)
         return float(1.0 - sum((c / n) ** 2 for c in counts.values()))
+
+    def _allocate_heads(self, dots: list, effectivenesses: np.ndarray):
+        """
+        Dynamically allocate prediction heads based on effectiveness.
+        Top 20% get 6 heads, bottom 40% get 2 heads, others get default (4).
+        """
+        n = len(dots)
+        if n < 5: return
+
+        # effectivenesses corresponds to the dots list order
+        order = np.argsort(effectivenesses)[::-1]
+
+        top_k = max(1, int(n * 0.20))
+        bot_k = max(1, int(n * 0.40))
+
+        elites = set(order[:top_k])
+        weak   = set(order[-bot_k:])
+
+        for i, dot in enumerate(dots):
+            if i in elites:
+                dot.n_heads = 6
+            elif i in weak:
+                dot.n_heads = 2
+            else:
+                dot.n_heads = self.n_heads # Default (4)
 
     def _boost_underrepresented(self, dots: list) -> None:
         """
