@@ -132,6 +132,14 @@ class Cluster:
             counts[t] = counts.get(t, 0) + 1
         return counts
 
+    def modalities(self) -> Dict[str, int]:
+        """Distribution of modalities within this cluster."""
+        counts: Dict[str, int] = {}
+        for info in self.infos:
+            m = info.get("modality", "unknown")
+            counts[m] = counts.get(m, 0) + 1
+        return counts
+
     def __repr__(self):
         return (f"Cluster(id={self.cluster_id}, size={self.size}, "
                 f"score={self.score:.4f}, micro={self.num_micro})")
@@ -171,8 +179,13 @@ class ConvergenceLayer:
         confs = [c[1] for c in candidates]
         infos = [c[2] for c in candidates]
 
+        # Multi-modal boost: slightly lower threshold for cross-modal agreement
+        # to encourage the emergence of unified concepts.
+        is_mixed = len(set(info.get("modality", "unknown") for info in infos)) > 1
+        current_micro_thresh = self.micro_thresh * 0.9 if is_mixed else self.micro_thresh
+
         # Stage 1: micro-clustering
-        micro_clusters = self._micro_cluster(preds, confs, infos)
+        micro_clusters = self._micro_cluster(preds, confs, infos, current_micro_thresh)
         for mc in micro_clusters:
             mc.compute_score(self.alpha)
 
@@ -203,17 +216,18 @@ class ConvergenceLayer:
     # ── Stage 1: Micro-clustering ────────────────────────────────────
 
     def _micro_cluster(self, preds: List[np.ndarray], confs: List[float],
-                       infos: List[Dict]) -> List[MicroCluster]:
+                       infos: List[Dict], threshold: Optional[float] = None) -> List[MicroCluster]:
         """
         Sequential greedy micro-clustering.
         A prediction joins an existing micro-cluster if its similarity to
         the cluster centroid exceeds micro_threshold.
         """
+        if threshold is None: threshold = self.micro_thresh
         clusters: List[MicroCluster] = []
         centroids: List[np.ndarray]  = []
 
         for i, (p, c, info) in enumerate(zip(preds, confs, infos)):
-            best_cid, best_sim = -1, self.micro_thresh
+            best_cid, best_sim = -1, threshold
             for cid, cent in enumerate(centroids):
                 s = similarity_score(p, cent, self.alpha)
                 if s > best_sim:
