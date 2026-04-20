@@ -39,7 +39,13 @@ import ctypes
 import os
 import pickle
 from collections import Counter
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Tuple, Optional, Any
+try:
+    from PIL import Image
+    import librosa
+    import cv2
+except ImportError:
+    pass
 
 # ── Load C shared library ────────────────────────────────────────────
 _lib = None
@@ -316,8 +322,17 @@ class BaseMapper:
         for w, new_emb in updates.items():
             self._base_vocab[w] = new_emb
 
-    def transform(self, text: str) -> BaseMap:
-        """Convert text into a BaseMap (one row per token)."""
+    def transform(self, input_data: Any, mode: str = "text") -> BaseMap:
+        """Convert input data into a BaseMap (one row per token/patch)."""
+        if mode == "image":
+            return self._transform_image(input_data)
+        if mode == "audio":
+            return self._transform_audio(input_data)
+        if mode == "video":
+            return self._transform_video(input_data)
+
+        # Default text mode
+        text = str(input_data)
         raw_tokens = self._tokenize(text)
         if not raw_tokens:
             raw_tokens = ["[empty]"]
@@ -358,6 +373,85 @@ class BaseMapper:
         }
         return BaseMap(matrix=matrix, tokens=tokens, token_types=types,
                        modifiers=modifiers, metadata=metadata)
+
+    def _transform_image(self, img_path: str) -> BaseMap:
+        """Treat images as sentences of visual tokens (patches)."""
+        img = Image.open(img_path).convert("RGB")
+        img = img.resize((128, 128))
+        arr = np.array(img, dtype=np.float32) / 255.0
+
+        # Split into 8x8 patches (16x16 pixels each)
+        ps = 16
+        patches = []
+        for r in range(0, 128, ps):
+            for c in range(0, 128, ps):
+                patch = arr[r:r+ps, c:c+ps]
+                patches.append(patch.flatten())
+
+        n = len(patches)
+        matrix = np.zeros((n, self.feature_dim), dtype=np.float32)
+        for i, p in enumerate(patches):
+            # Fill embedding space with flattened patch features
+            # pad or trim to EMBED_DIM (224)
+            feat = p[:EMBED_DIM]
+            if len(feat) < EMBED_DIM:
+                feat = np.pad(feat, (0, EMBED_DIM - len(feat)))
+            matrix[i, :EMBED_DIM] = feat
+            matrix[i, EMBED_DIM:EMBED_DIM+POS_DIM] = self._position_enc(i, n)
+
+        return BaseMap(matrix, [f"patch_{i}" for i in range(n)],
+                       ["visual"] * n, {}, {"mode": "image"})
+
+    def _transform_audio(self, audio_path: str) -> BaseMap:
+        """Treat audio as sentences of spectral tokens."""
+        y, sr = librosa.load(audio_path, duration=5.0)
+        spec = np.abs(librosa.stft(y))
+        spec_db = librosa.amplitude_to_db(spec, ref=np.max)
+
+        # Mean pool time-steps into 32 tokens
+        n_tokens = 32
+        hop = spec_db.shape[1] // n_tokens
+        tokens = []
+        for i in range(n_tokens):
+            tokens.append(np.mean(spec_db[:, i*hop:(i+1)*hop], axis=1))
+
+        n = len(tokens)
+        matrix = np.zeros((n, self.feature_dim), dtype=np.float32)
+        for i, t in enumerate(tokens):
+            feat = t[:EMBED_DIM]
+            if len(feat) < EMBED_DIM:
+                feat = np.pad(feat, (0, EMBED_DIM - len(feat)))
+            # Normalize spectral feature
+            feat = (feat - np.mean(feat)) / (np.std(feat) + 1e-10)
+            matrix[i, :EMBED_DIM] = feat
+            matrix[i, EMBED_DIM:EMBED_DIM+POS_DIM] = self._position_enc(i, n)
+
+        return BaseMap(matrix, [f"spectral_{i}" for i in range(n)],
+                       ["spectral"] * n, {}, {"mode": "audio"})
+
+    def _transform_video(self, video_path: str) -> BaseMap:
+        """Treat video as temporal sequence of visual patches."""
+        cap = cv2.VideoCapture(video_path)
+        frames = []
+        while len(frames) < 16: # Sample 16 frames
+            ret, frame = cap.read()
+            if not ret: break
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            frame = cv2.resize(frame, (64, 64))
+            frames.append(frame.flatten() / 255.0)
+        cap.release()
+
+        n = len(frames)
+        matrix = np.zeros((n, self.feature_dim), dtype=np.float32)
+        for i, f in enumerate(frames):
+            feat = f[:EMBED_DIM]
+            if len(feat) < EMBED_DIM:
+                feat = np.pad(feat, (0, EMBED_DIM - len(feat)))
+            matrix[i, :EMBED_DIM] = feat
+            matrix[i, EMBED_DIM:EMBED_DIM+POS_DIM] = self._position_enc(i, n)
+
+        return BaseMap(matrix, [f"frame_{i}" for i in range(n)],
+                       ["temporal_visual"] * n, {}, {"mode": "video"})
 
     def fit_transform(self, texts: List[str], target: Optional[str] = None) -> BaseMap:
         self.fit(texts)

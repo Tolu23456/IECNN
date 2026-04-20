@@ -24,7 +24,7 @@ Memory guidance:
 
 import numpy as np
 import re
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, Any
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -144,24 +144,26 @@ class IECNN:
 
     # ── Main run ─────────────────────────────────────────────────────
 
-    def run(self, text: str, verbose: bool = False, update_brain: bool = False) -> IECNNResult:
+    def run(self, input_data: Any, verbose: bool = False,
+            update_brain: bool = False, mode: str = "text") -> IECNNResult:
         """
-        Run the full 10-layer IECNN pipeline on a text input.
+        Run the full 10-layer IECNN pipeline.
 
         Args:
-          text         — input text
+          input_data   — input data (text, img_path, etc.)
           verbose      — print round-by-round progress
           update_brain — if True, the text enriches the global BaseMapping knowledge
+          mode         — 'text' | 'image' | 'audio' | 'video'
         """
-        if update_brain:
-            self.base_mapper.fit([text])
+        if update_brain and mode == "text":
+            self.base_mapper.fit([input_data])
             if self.base_mapper.persistence_path:
                 self.base_mapper.save(self.base_mapper.persistence_path)
 
         self.iter_ctrl.reset()
         self.cluster_memory.reset_call()
 
-        basemap  = self.base_mapper.transform(text)
+        basemap  = self.base_mapper.transform(input_data, mode=mode)
         dots     = self._ensure_dots()
         cur_bmap = basemap
         all_rounds: List[Dict] = []
@@ -171,7 +173,7 @@ class IECNN:
         cur_entropy   = 0.5  # initial entropy (unknown)
 
         if verbose:
-            self._print_header(text, basemap, dots)
+            self._print_header(str(input_data), basemap, dots)
 
         while True:
             rnd = self.iter_ctrl.current_round
