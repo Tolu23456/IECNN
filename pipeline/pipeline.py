@@ -304,6 +304,9 @@ class IECNN:
             if self._compute_diversity(dots) < 0.60:
                 self._boost_underrepresented(dots)
 
+            # Step 7 — Dynamic Head Allocation: Grant extra heads to elites
+            self._allocate_heads(dots, eff)
+
             self._learn_bias(surv, candidates, assign)
 
             # ── Meta-Learning: Auto-tune DRP and LR ──────────────────────
@@ -547,6 +550,31 @@ class IECNN:
             counts[t] = counts.get(t, 0) + 1
         n = len(dots)
         return float(1.0 - sum((c / n) ** 2 for c in counts.values()))
+
+    def _allocate_heads(self, dots: list, effectivenesses: np.ndarray):
+        """
+        Dynamically allocate prediction heads based on effectiveness.
+        Top 20% get 6 heads, bottom 40% get 2 heads, others get default (4).
+        """
+        n = len(dots)
+        if n < 5: return
+
+        # effectivenesses corresponds to the dots list order
+        order = np.argsort(effectivenesses)[::-1]
+
+        top_k = max(1, int(n * 0.20))
+        bot_k = max(1, int(n * 0.40))
+
+        elites = set(order[:top_k])
+        weak   = set(order[-bot_k:])
+
+        for i, dot in enumerate(dots):
+            if i in elites:
+                dot.n_heads = 6
+            elif i in weak:
+                dot.n_heads = 2
+            else:
+                dot.n_heads = self.n_heads # Default (4)
 
     def _boost_underrepresented(self, dots: list) -> None:
         """
