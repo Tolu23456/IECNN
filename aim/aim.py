@@ -353,11 +353,31 @@ class AIMLayer:
         # Normalize weights
         self._weights = self.ALL_WEIGHTS / self.ALL_WEIGHTS.sum()
 
-    def _pick_inversions(self, inv_bias: float) -> List[str]:
+    def _pick_inversions(self, inv_bias: float, requested: Optional[str] = None) -> List[str]:
+        """Pick inversions, prioritizing requested hypotheses."""
         n = max(1, round(inv_bias * self.max_variants))
         n = min(n, len(InversionType.ALL))
-        idx = self._rng.choice(len(InversionType.ALL), size=n, replace=False, p=self._weights)
-        return [InversionType.ALL[i] for i in idx]
+
+        chosen = []
+        if requested and requested in InversionType.ALL:
+            chosen.append(requested)
+
+        remaining_n = n - len(chosen)
+        if remaining_n > 0:
+            # Mask out already chosen
+            weights = self._weights.copy()
+            if requested:
+                try:
+                    req_idx = InversionType.ALL.index(requested)
+                    weights[req_idx] = 0.0
+                    weights /= weights.sum()
+                except ValueError:
+                    pass
+
+            idx = self._rng.choice(len(InversionType.ALL), size=remaining_n, replace=False, p=weights)
+            chosen.extend([InversionType.ALL[i] for i in idx])
+
+        return chosen
 
     def _apply(self, pred: np.ndarray, inv_type: str, ctx: np.ndarray) -> np.ndarray:
         inv = _apply_inversion(inv_type, pred, ctx, self._rng)
@@ -374,7 +394,9 @@ class AIMLayer:
         for pred, conf, info in predictions:
             out.append((pred, conf, {**info, "source": "original", "inversion_type": None}))
             inv_bias = info.get("bias").inversion_bias if info.get("bias") else 0.3
-            for inv_type in self._pick_inversions(inv_bias):
+            requested = info.get("requested_inversion")
+
+            for inv_type in self._pick_inversions(inv_bias, requested=requested):
                 try:
                     inv = self._apply(pred, inv_type, ctx)
                     inv_conf = prediction_confidence(inv)

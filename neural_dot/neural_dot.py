@@ -388,16 +388,26 @@ class NeuralDot:
         noise = self._rng.randn(len(p)).astype(np.float32) * temperature * 0.05
         return p + noise
 
-    def _reason(self, v: np.ndarray, temperature: float) -> np.ndarray:
+    def _reason(self, v: np.ndarray, temperature: float,
+                consensus: Optional[np.ndarray] = None) -> np.ndarray:
         """
         Internal Reasoning (Inner Monologue):
         Perform a micro-iteration internally to refine the vector.
+        Incorporates 'Cognitive Peer Pressure' if a consensus hint is available.
         """
         refined = v
         # Perform 2 micro-steps of iterative refinement
         for _ in range(2):
             # Transform and gate
             delta = np.tanh(self.W @ refined + self.b_offset)
+
+            # Cognitive Peer Pressure: nudge toward hazy global summary
+            if consensus is not None:
+                # The dot self-corrects based on its attention bias
+                # (high attention dots resist peer pressure more)
+                pressure = 0.15 * (1.0 - self.bias.attention_bias)
+                refined = (1.0 - pressure) * refined + pressure * consensus
+
             # Add small noise per step based on temperature
             noise = self._rng.randn(len(v)).astype(np.float32) * temperature * 0.02
             refined = 0.8 * refined + 0.2 * delta + noise
@@ -406,7 +416,8 @@ class NeuralDot:
     # ── Main predict ──────────────────────────────────────────────────
 
     def predict(self, basemap, memory_hint: Optional[np.ndarray] = None,
-                context_entropy: float = 0.5) -> List[Tuple[np.ndarray, float, Dict]]:
+                context_entropy: float = 0.5,
+                consensus: Optional[np.ndarray] = None) -> List[Tuple[np.ndarray, float, Dict]]:
         """
         Generate N_HEADS candidate predictions from one basemap.
 
@@ -434,7 +445,17 @@ class NeuralDot:
 
         # Apply internal reasoning pass if abstraction bias is high enough
         if self.bias.abstraction_bias > 0.4:
-            abstract = self._reason(abstract, T)
+            abstract = self._reason(abstract, T, consensus=consensus)
+
+        # Active AIM Hypothesis: dots can request specific inversions
+        # based on their internal reasoning confidence.
+        requested_inversion = None
+        if self.bias.abstraction_bias > 0.6 and T > 1.2:
+            # If high abstraction and high uncertainty, request a relational check
+            requested_inversion = "relational"
+        elif modality == "image" and self.bias.granularity_bias < 0.3:
+            # Local visual uncertainty requests scale check
+            requested_inversion = "scale"
 
         results = []
         for h in range(self.n_heads):
@@ -451,6 +472,7 @@ class NeuralDot:
                 "source":    "original",
                 "inversion_type": None,
                 "modality":  modality,
+                "requested_inversion": requested_inversion,
             }
             results.append((pred, conf, info))
         return results
@@ -515,13 +537,16 @@ class DotGenerator:
 
     def run_all(self, basemap, dots: List[NeuralDot],
                 memory_hints: Optional[Dict[int, np.ndarray]] = None,
-                context_entropy: float = 0.5) -> List[Tuple]:
+                context_entropy: float = 0.5,
+                consensus: Optional[np.ndarray] = None) -> List[Tuple]:
         """Run all dots on the basemap; returns flat list of (pred, conf, info)."""
         all_results = []
         hints = memory_hints or {}
         for dot in dots:
             hint = hints.get(dot.dot_id)
-            preds = dot.predict(basemap, memory_hint=hint, context_entropy=context_entropy)
+            preds = dot.predict(basemap, memory_hint=hint,
+                                context_entropy=context_entropy,
+                                consensus=consensus)
             all_results.extend(preds)
         return all_results
 

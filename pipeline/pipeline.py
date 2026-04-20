@@ -125,6 +125,9 @@ class IECNN:
         self.evolution       = DotEvolution(EvolutionConfig(), seed)
         self.evaluator       = IECNNMetrics(alpha)
 
+        # Working Memory: stores result of previous run() for context
+        self.working_memory: Optional[np.ndarray] = None
+
         # Dot pool (generated lazily on first use; evolved across calls)
         self._dots: Optional[list] = None
         self._call_count: int = 0
@@ -164,6 +167,13 @@ class IECNN:
         self.cluster_memory.reset_call()
 
         basemap  = self.base_mapper.transform(input_data, mode=mode)
+
+        # ── Layer 2.5: Working Memory Injection ──────────────────
+        # If we have a working memory from the previous call, blend it
+        # into the initial basemap to provide narrative context.
+        # We use a 50/50 blend to ensure context survives the fresh input noise.
+        if self.working_memory is not None:
+            basemap = self._blend(basemap, self.working_memory, alpha=0.50)
         dots     = self._ensure_dots()
         cur_bmap = basemap
         all_rounds: List[Dict] = []
@@ -189,10 +199,14 @@ class IECNN:
                 memory_hints[dot.dot_id] = hint
 
             # ── Layers 3+4: Dot Prediction ───────────────────────────
+            # Provide hazy consensus (previous round centroid) for 'Social Interaction'
+            consensus = prev_centroid if prev_centroid is not None else None
+
             dot_preds = self.dot_gen.run_all(
                 cur_bmap, dots,
                 memory_hints=memory_hints,
                 context_entropy=cur_entropy,
+                consensus=consensus,
             )
 
             # ── Layer 5: AIM (9 inversions in parallel) ───────────────
@@ -335,6 +349,9 @@ class IECNN:
         if n > 1e-10: final_out = final_out / n * np.sqrt(self.feature_dim)
 
         # ── Post-run: update memory + evolve dots ─────────────────────
+        # Store output in working memory for next call
+        self.working_memory = final_out.copy()
+
         if top_cluster:
             self.cluster_memory.commit_pattern(final_out, top_cluster.score, self.alpha)
         if self.do_evolve:
@@ -481,13 +498,13 @@ class IECNN:
             self.dot_memory.lambda4 = max(0.05, self.dot_memory.lambda4 - 0.005)
             self.iter_ctrl.base_lr = max(0.05, self.iter_ctrl.base_lr - 0.002)
 
-    def _blend(self, original: BaseMap, refined: np.ndarray) -> BaseMap:
+    def _blend(self, original: BaseMap, refined: np.ndarray, alpha: float = 0.85) -> BaseMap:
         """Blend the refined vector back into the basemap for the next round."""
         mat = original.matrix.copy()
         n = np.linalg.norm(refined)
         if n > 1e-10:
             r = refined / n
-            mat = 0.85 * mat + 0.15 * r[None, :]
+            mat = alpha * mat + (1.0 - alpha) * r[None, :]
         from basemapping.basemapping import BaseMap as BM
         return BM(mat, original.tokens, original.token_types,
                   original.modifiers, {**original.metadata, "blended": True})

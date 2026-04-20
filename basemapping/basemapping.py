@@ -216,8 +216,9 @@ class BaseMapper:
         self._base_vocab: Dict[str, np.ndarray] = {}  # token → embedding
         self._base_types: Dict[str, str] = {}          # token → 'word'|'phrase'
 
-        # Cooccurrence: word → {neighbor_word: count}
-        self._cooc: Dict[str, Counter] = {}
+        # Cooccurrence: token → {neighbor_token: count}
+        # neighbor_token can be a word string or a specialized sensory key
+        self._cooc: Dict[Any, Counter] = {}
 
         self._embed_cache: Dict[str, np.ndarray] = {}
         self.is_fitted = False
@@ -296,28 +297,37 @@ class BaseMapper:
         self.is_fitted = True
         return self
 
-    def _apply_cooc_smoothing(self):
+    def _apply_cooc_smoothing(self, sensory_hints: Optional[Dict[str, np.ndarray]] = None):
         """
-        One-pass cooccurrence enrichment: for each known word, blend its
-        embedding toward the centroid of its top-5 corpus neighbors.
-
-        Operates only on known base-vocab words (not composed or primitives)
-        since those are the ones with cooccurrence data from the corpus.
+        One-pass cooccurrence enrichment with Sensory Grounding.
+        Blends word embeddings toward both textual neighbors AND sensory centroids.
         """
         updates: Dict[str, np.ndarray] = {}
         for w, emb in self._base_vocab.items():
             if self._base_types.get(w) == "phrase":
-                continue  # phrases are already a blend; skip
+                continue
             neighbors = self._cooc.get(w, Counter())
             if not neighbors:
                 continue
+
             total = float(sum(neighbors.values()))
             delta = np.zeros(EMBED_DIM, dtype=np.float32)
             count = 0
+
+            # Textual Grounding
             for other, cnt in neighbors.most_common(5):
-                if other in self._base_vocab:
+                if isinstance(other, str) and other in self._base_vocab:
                     delta += (cnt / total) * self._base_vocab[other]
                     count += 1
+
+            # Sensory Grounding (if hints provided for words like 'red', 'loud', etc.)
+            if sensory_hints and w in sensory_hints:
+                sensory_vec = sensory_hints[w][:EMBED_DIM]
+                if len(sensory_vec) < EMBED_DIM:
+                    sensory_vec = np.pad(sensory_vec, (0, EMBED_DIM - len(sensory_vec)))
+                delta += 2.0 * sensory_vec # Stronger weight for direct sensory proof
+                count += 2
+
             if count == 0:
                 continue
             dn = np.linalg.norm(delta)
@@ -428,12 +438,15 @@ class BaseMapper:
 
         n = len(patches)
         matrix = np.zeros((n, self.feature_dim), dtype=np.float32)
+        # 8x8 patches
+        grid_dim = int(np.sqrt(n))
         for i, p in enumerate(patches):
             feat = p[:EMBED_DIM]
             if len(feat) < EMBED_DIM:
                 feat = np.pad(feat, (0, EMBED_DIM - len(feat)))
             matrix[i, :EMBED_DIM] = feat
-            matrix[i, EMBED_DIM:EMBED_DIM+POS_DIM] = self._position_enc(i, n)
+            # Use 2D spatial encoding
+            matrix[i, EMBED_DIM:EMBED_DIM+POS_DIM] = self._position_enc(i, n, grid_dim=grid_dim)
             # Flag as Image
             matrix[i, EMBED_DIM+POS_DIM+FREQ_DIM+MOD_IMAGE] = 1.0
 
@@ -683,15 +696,35 @@ class BaseMapper:
 
     # ── Position encoding ────────────────────────────────────────────
 
-    def _position_enc(self, pos: int, total: int) -> np.ndarray:
+    def _position_enc(self, pos: int, total: int, grid_dim: Optional[int] = None) -> np.ndarray:
+        """
+        Enhanced Positional Encoding: supports linear and 2D relational grids.
+        If grid_dim provided, pos is interpreted as a 2D index (row * grid_dim + col).
+        """
         lib = _load_lib()
         out = np.zeros(POS_DIM, dtype=np.float32)
+
+        if grid_dim:
+            # 2D spatial encoding (for image patches)
+            r = pos // grid_dim
+            c = pos % grid_dim
+            rel_r = r / max(grid_dim - 1, 1)
+            rel_c = c / max(grid_dim - 1, 1)
+            # Use half for row, half for col
+            for k in range(POS_DIM // 4):
+                out[2*k]     = math.sin(rel_r * math.pi * (k+1))
+                out[2*k+1]   = math.cos(rel_r * math.pi * (k+1))
+                out[POS_DIM//2 + 2*k]   = math.sin(rel_c * math.pi * (k+1))
+                out[POS_DIM//2 + 2*k+1] = math.cos(rel_c * math.pi * (k+1))
+            return out
+
         if lib:
             lib.sinusoidal_position_enc(
                 ctypes.c_int(pos), ctypes.c_int(total), ctypes.c_int(POS_DIM),
                 out.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
             )
             return out
+
         rel = pos / max(total - 1, 1)
         for k in range(POS_DIM // 2):
             out[2*k]   = math.sin(rel * math.pi * (k+1))
