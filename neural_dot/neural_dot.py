@@ -233,9 +233,10 @@ class NeuralDot:
             patch_size = max(1, int(n * (0.1 + gran * 0.7)))
 
         patch_size = min(patch_size, n)
-        offset = int(self._rng.uniform(0, max(1, n - patch_size + 1)))
-        start  = min(offset, n - 1)
-        end    = min(start + patch_size, n)
+        if n <= 1: return matrix, 0, n
+        offset = int(self._rng.uniform(0, n - patch_size + 1))
+        start  = max(0, min(offset, n - 1))
+        end    = max(start + 1, min(start + patch_size, n))
         return matrix[start:end], start, end
 
     # ── Dim masking per type ──────────────────────────────────────────
@@ -255,6 +256,15 @@ class NeuralDot:
         """Pool the slice into a single vector; strategy depends on dot type."""
         if mat.shape[0] == 1:
             return mat[0]
+
+        # Multi-modal context awareness:
+        # Check if slice contains mixed modalities via flags [248:252] (236+12:16)
+        modalities = mat[:, 248:252]
+        is_mixed = np.any(np.sum(modalities, axis=0) > 0)
+
+        if is_mixed and self.dot_type in (DotType.RELATIONAL, DotType.LOGIC):
+            # For mixed modalities, Relational/Logic dots focus on cross-modal gaps
+            return self._cross_modal_pool(mat)
 
         if self.dot_type == DotType.TEMPORAL:
             return self._temporal_pool(mat)
@@ -335,6 +345,31 @@ class NeuralDot:
 
         return (weights[:, None] * mat).sum(axis=0)
 
+    def _cross_modal_pool(self, mat: np.ndarray) -> np.ndarray:
+        """
+        Cross-modal pooling: Focuses on interaction between different modalities.
+        Identifies the boundary between modality groups and highlights transitions.
+        """
+        n = mat.shape[0]
+        mod_flags = mat[:, 248:252]
+
+        # Compute pairwise distance between tokens of different modalities
+        # We simplify by using a modality-based weight
+        weights = np.zeros(n, dtype=np.float32)
+        for i in range(n):
+            # High weight if neighbor has different modality
+            if i > 0 and not np.array_equal(mod_flags[i], mod_flags[i-1]):
+                weights[i] += 1.0
+            if i < n-1 and not np.array_equal(mod_flags[i], mod_flags[i+1]):
+                weights[i] += 1.0
+
+        if weights.sum() < 1e-10:
+            # If no transitions, we boost everything to encourage discovery
+            weights = np.ones(n, dtype=np.float32)
+
+        weights /= weights.sum() + 1e-10
+        return (weights[:, None] * mat).sum(axis=0)
+
     # ── Abstraction transform ─────────────────────────────────────────
 
     def _abstract(self, v: np.ndarray) -> np.ndarray:
@@ -384,6 +419,13 @@ class NeuralDot:
           list of (prediction, confidence, info) — one per head
         """
         sl, start, end = self._select_slice(basemap.matrix)
+        # Determine dominant modality of the slice
+        mod_flags = sl[:, 248:252]
+        mod_counts = np.sum(mod_flags, axis=0)
+        dom_mod_idx = np.argmax(mod_counts) if np.max(mod_counts) > 0 else 0
+        mod_names = ["text", "image", "audio", "video"]
+        modality = mod_names[dom_mod_idx]
+
         pooled   = self._pool(sl, memory_hint)
         focused  = self._apply_dim_focus(pooled)
         abstract = self._abstract(focused)
@@ -408,6 +450,7 @@ class NeuralDot:
                 "bias":      self.bias,
                 "source":    "original",
                 "inversion_type": None,
+                "modality":  modality,
             }
             results.append((pred, conf, info))
         return results

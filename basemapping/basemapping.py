@@ -81,7 +81,14 @@ FLAG_DIM    = 16
 CTX_DIM     = 4
 FEATURE_DIM = EMBED_DIM + POS_DIM + FREQ_DIM + FLAG_DIM + CTX_DIM  # = 256
 
-# Morphological suffix sets for flag dims 14 and 15
+# Modality flag indices in modifier_flags (16 dims total)
+# Dims 12-15 used for modality identification
+MOD_TEXT  = 12
+MOD_IMAGE = 13
+MOD_AUDIO = 14
+MOD_VIDEO = 15
+
+# Morphological suffix sets for flag dims 10 and 11
 _VERB_SUFFIXES = ("ing", "ed", "ize", "ise", "ify", "ate")
 _NOUN_SUFFIXES = ("tion", "sion", "ness", "ity", "ment", "er", "or", "ist", "ism")
 _ADJ_SUFFIXES  = ("ful", "ous", "ive", "able", "ible", "al", "ic", "ent", "ant")
@@ -323,7 +330,13 @@ class BaseMapper:
             self._base_vocab[w] = new_emb
 
     def transform(self, input_data: Any, mode: str = "text") -> BaseMap:
-        """Convert input data into a BaseMap (one row per token/patch)."""
+        """
+        Convert input data into a BaseMap (one row per token/patch).
+        Supports cross-modal interleaving if input_data is a List[Dict].
+        """
+        if isinstance(input_data, list) and mode == "fusion":
+            return self._transform_fusion(input_data)
+
         if mode == "image":
             return self._transform_image(input_data)
         if mode == "audio":
@@ -350,6 +363,9 @@ class BaseMapper:
             pos   = self._position_enc(i, n)
             freq  = self._freq_features(tok, freq_vals[i], max_freq)
             flags = self._modifier_flags(tok, typ, i, n)
+            # Add modality flag
+            flags[MOD_TEXT] = 1.0
+
             ctx   = self._context_summary(i, tokens, types)
 
             matrix[i, :EMBED_DIM]                                      = embed
@@ -374,6 +390,28 @@ class BaseMapper:
         return BaseMap(matrix=matrix, tokens=tokens, token_types=types,
                        modifiers=modifiers, metadata=metadata)
 
+    def _transform_fusion(self, input_list: List[Dict]) -> BaseMap:
+        """Interleave multiple modalities into a single BaseMap stream."""
+        all_matrices = []
+        all_tokens = []
+        all_types = []
+
+        for item in input_list:
+            mode = item.get("mode", "text")
+            data = item.get("data")
+            bm = self.transform(data, mode=mode)
+            all_matrices.append(bm.matrix)
+            all_tokens.extend(bm.tokens)
+            all_types.extend(bm.token_types)
+
+        final_matrix = np.vstack(all_matrices)
+        # Update global position encodings for fused stream
+        n = final_matrix.shape[0]
+        for i in range(n):
+            final_matrix[i, EMBED_DIM:EMBED_DIM+POS_DIM] = self._position_enc(i, n)
+
+        return BaseMap(final_matrix, all_tokens, all_types, {}, {"mode": "fusion"})
+
     def _transform_image(self, img_path: str) -> BaseMap:
         """Treat images as sentences of visual tokens (patches)."""
         img = Image.open(img_path).convert("RGB")
@@ -391,13 +429,13 @@ class BaseMapper:
         n = len(patches)
         matrix = np.zeros((n, self.feature_dim), dtype=np.float32)
         for i, p in enumerate(patches):
-            # Fill embedding space with flattened patch features
-            # pad or trim to EMBED_DIM (224)
             feat = p[:EMBED_DIM]
             if len(feat) < EMBED_DIM:
                 feat = np.pad(feat, (0, EMBED_DIM - len(feat)))
             matrix[i, :EMBED_DIM] = feat
             matrix[i, EMBED_DIM:EMBED_DIM+POS_DIM] = self._position_enc(i, n)
+            # Flag as Image
+            matrix[i, EMBED_DIM+POS_DIM+FREQ_DIM+MOD_IMAGE] = 1.0
 
         return BaseMap(matrix, [f"patch_{i}" for i in range(n)],
                        ["visual"] * n, {}, {"mode": "image"})
@@ -408,7 +446,6 @@ class BaseMapper:
         spec = np.abs(librosa.stft(y))
         spec_db = librosa.amplitude_to_db(spec, ref=np.max)
 
-        # Mean pool time-steps into 32 tokens
         n_tokens = 32
         hop = spec_db.shape[1] // n_tokens
         tokens = []
@@ -421,34 +458,54 @@ class BaseMapper:
             feat = t[:EMBED_DIM]
             if len(feat) < EMBED_DIM:
                 feat = np.pad(feat, (0, EMBED_DIM - len(feat)))
-            # Normalize spectral feature
             feat = (feat - np.mean(feat)) / (np.std(feat) + 1e-10)
             matrix[i, :EMBED_DIM] = feat
             matrix[i, EMBED_DIM:EMBED_DIM+POS_DIM] = self._position_enc(i, n)
+            # Flag as Audio
+            matrix[i, EMBED_DIM+POS_DIM+FREQ_DIM+MOD_AUDIO] = 1.0
 
         return BaseMap(matrix, [f"spectral_{i}" for i in range(n)],
                        ["spectral"] * n, {}, {"mode": "audio"})
 
     def _transform_video(self, video_path: str) -> BaseMap:
-        """Treat video as temporal sequence of visual patches."""
+        """Treat video as temporal sequence with motion extraction."""
         cap = cv2.VideoCapture(video_path)
         frames = []
-        while len(frames) < 16: # Sample 16 frames
+        diffs = []
+        prev_frame = None
+
+        while len(frames) < 16:
             ret, frame = cap.read()
             if not ret: break
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            frame = cv2.resize(frame, (64, 64))
-            frames.append(frame.flatten() / 255.0)
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            frame_resized = cv2.resize(frame_rgb, (64, 64))
+
+            flat = frame_resized.flatten() / 255.0
+            frames.append(flat)
+
+            if prev_frame is not None:
+                # Simple motion extraction: frame difference
+                diff = cv2.absdiff(frame_gray, prev_frame)
+                diff = cv2.resize(diff, (64, 64)).flatten() / 255.0
+                diffs.append(diff)
+            else:
+                diffs.append(np.zeros_like(flat))
+
+            prev_frame = frame_gray
         cap.release()
 
         n = len(frames)
         matrix = np.zeros((n, self.feature_dim), dtype=np.float32)
-        for i, f in enumerate(frames):
-            feat = f[:EMBED_DIM]
+        for i, (f, d) in enumerate(zip(frames, diffs)):
+            # Combine visual feature and motion feature
+            feat = 0.7 * f[:EMBED_DIM] + 0.3 * d[:EMBED_DIM]
             if len(feat) < EMBED_DIM:
                 feat = np.pad(feat, (0, EMBED_DIM - len(feat)))
             matrix[i, :EMBED_DIM] = feat
             matrix[i, EMBED_DIM:EMBED_DIM+POS_DIM] = self._position_enc(i, n)
+            # Flag as Video
+            matrix[i, EMBED_DIM+POS_DIM+FREQ_DIM+MOD_VIDEO] = 1.0
 
         return BaseMap(matrix, [f"frame_{i}" for i in range(n)],
                        ["temporal_visual"] * n, {}, {"mode": "video"})
@@ -670,10 +727,6 @@ class BaseMapper:
         """
         16 binary/continuous flags encoding token identity, position, and
         morphological role.
-
-        Dims 0–13: type identity, position, structural, length (unchanged)
-        Dim  14:   verb-like suffix flag  (-ing, -ed, -ize, -ize, -ify, -ate)
-        Dim  15:   noun/adj/adv suffix    (-tion, -ness, -ous, -ly, etc.)
         """
         f = np.zeros(FLAG_DIM, dtype=np.float32)
         f[0]  = 1.0 if typ == "primitive" else 0.0
@@ -686,16 +739,11 @@ class BaseMapper:
         f[7]  = 1.0 if token.replace(" ","").isalpha() else 0.0
         f[8]  = 1.0 if token.replace(" ","").isdigit() else 0.0
         f[9]  = 1.0 if not token.replace(" ","").isalnum() else 0.0
-        f[10] = float(len(token)) / 30.0
-        f[11] = 1.0 if " " in token else 0.0
-        f[12] = 1.0 if len(token) == 1 else 0.0
-        f[13] = 1.0 if len(token) > 8  else 0.0
 
-        # Morphological suffix detection (dims 14–15)
-        # Replaces the old position-cluster dims that were redundant with position_enc.
+        # Morphological suffix detection (dims 10-11)
         clean = token.replace(" ", "")
-        f[14] = 1.0 if any(clean.endswith(s) for s in _VERB_SUFFIXES) else 0.0
-        f[15] = 1.0 if (any(clean.endswith(s) for s in _NOUN_SUFFIXES)
+        f[10] = 1.0 if any(clean.endswith(s) for s in _VERB_SUFFIXES) else 0.0
+        f[11] = 1.0 if (any(clean.endswith(s) for s in _NOUN_SUFFIXES)
                         or any(clean.endswith(s) for s in _ADJ_SUFFIXES)
                         or clean.endswith(_ADV_SUFFIX)) else 0.0
 

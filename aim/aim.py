@@ -67,9 +67,11 @@ class InversionType:
     RELATIONAL    = "relational"
     TEMPORAL      = "temporal"
     COMPOSITIONAL = "compositional"
+    # Cross-Modal
+    CROSS_MODAL   = "cross_modal"
 
     ALL = [FEATURE, CONTEXT, SPATIAL, SCALE, ABSTRACTION, NOISE,
-           RELATIONAL, TEMPORAL, COMPOSITIONAL]
+           RELATIONAL, TEMPORAL, COMPOSITIONAL, CROSS_MODAL]
 
     # Weights for random selection (research-informed priors)
     WEIGHTS = {
@@ -82,6 +84,7 @@ class InversionType:
         RELATIONAL:    1.1,
         TEMPORAL:      1.0,
         COMPOSITIONAL: 0.7,
+        CROSS_MODAL:   1.3,
     }
 
 
@@ -287,6 +290,21 @@ def _invert_compositional(p: np.ndarray) -> np.ndarray:
 
 # ── Inversion dispatch ────────────────────────────────────────────────
 
+def _invert_cross_modal(p: np.ndarray) -> np.ndarray:
+    """
+    Cross-Modal Inversion: Swap modality identities.
+    Specifically, it flips the modality flag bits [248:252].
+    This challenges the system to see if a 'visual' pattern still makes
+    sense if interpreted as an 'audio' or 'text' pattern.
+    """
+    out = p.copy()
+    if len(out) >= 252:
+        # Shift flags circularly: Text -> Image -> Audio -> Video -> Text
+        flags = out[248:252].copy()
+        out[248:252] = np.roll(flags, 1)
+    return out
+
+
 def _apply_inversion(inv_type: str, pred: np.ndarray, ctx: np.ndarray,
                      rng: np.random.RandomState) -> np.ndarray:
     """Dispatch to the correct inversion function."""
@@ -308,6 +326,8 @@ def _apply_inversion(inv_type: str, pred: np.ndarray, ctx: np.ndarray,
         return _invert_temporal(pred)
     if inv_type == InversionType.COMPOSITIONAL:
         return _invert_compositional(pred)
+    if inv_type == InversionType.CROSS_MODAL:
+        return _invert_cross_modal(pred)
     return pred.copy()
 
 
