@@ -95,12 +95,15 @@ def _make_model(verbose: bool = True):
     if verbose:
         print(f"[IECNN] Initializing model...")
     model = IECNN(
-        feature_dim=128, num_dots=64, n_heads=3,
+        feature_dim=256, num_dots=128, n_heads=4,
         max_iterations=12, evolve=True, seed=42,
+        persistence_path="global_brain.pkl"
     )
     if verbose:
         print(f"[IECNN] Fitting base vocabulary on {len(CORPUS)} corpus sentences...")
     model.fit(CORPUS)
+    if model.base_mapper.persistence_path:
+        model.base_mapper.save(model.base_mapper.persistence_path)
     if verbose:
         bm = model.base_mapper
         n_words  = sum(1 for t in bm._base_types.values() if t == "word")
@@ -200,7 +203,7 @@ def cmd_demo():
     print("║  Novel architecture: neural dots + convergence learning       ║")
     print("║  No backpropagation. No fixed layers. Emergent agreement.     ║")
     print("╠" + "═"*64 + "╣")
-    print("║  Layers: Input → BaseMap → Dots (6 types, 3 heads) → AIM    ║")
+    print("║  Layers: Input → BaseMap → Dots (6 types, 4 heads) → AIM    ║")
     print("║          → Prune → Converge (2-level) → Iterate → Output    ║")
     print("╚" + "═"*64 + "╝")
     print()
@@ -248,8 +251,8 @@ def cmd_demo():
     for tok in ["convergence", "iecnn", "xyz123", "a", "neural networks", "42"]:
         bmap = bm.transform(tok)
         typ  = bmap.token_types[0] if bmap.token_types else "?"
-        emb_n = np.linalg.norm(bmap.matrix[0, :96])
-        print(f"  '{tok:<20}' → type='{typ:<10}'  embed_norm={emb_n:.4f}")
+        embed_n = np.linalg.norm(bmap.matrix[0, :224])
+        print(f"  '{tok:<20}' → type='{typ:<10}'  embed_norm={embed_n:.4f}")
 
     print(f"\n{BAR}")
     print("  Memory & Evolution State (after 6 calls)")
@@ -272,7 +275,7 @@ def cmd_demo():
     print("  ‣ Corpus words/phrases  → 'word'/'phrase' bases (stable embeddings)")
     print("  ‣ Unknown words         → 'composed' (ONE row, built from char bases)")
     print("  ‣ Each token = ONE row  — words are NEVER split into character rows")
-    print("  ‣ Feature vector: [96 embed | 8 pos | 4 freq | 16 flags | 4 ctx]")
+    print("  ‣ Feature vector: [224 embed | 8 pos | 4 freq | 16 flags | 4 ctx]")
 
     print(f"\n{BAR}")
     print("  Formula Summary (F1–F17)")

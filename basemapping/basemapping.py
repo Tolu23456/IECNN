@@ -37,8 +37,15 @@ import re
 import math
 import ctypes
 import os
+import pickle
 from collections import Counter
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Tuple, Optional, Any
+try:
+    from PIL import Image
+    import librosa
+    import cv2
+except ImportError:
+    pass
 
 # ── Load C shared library ────────────────────────────────────────────
 _lib = None
@@ -67,18 +74,31 @@ _PRIMITIVES = list("abcdefghijklmnopqrstuvwxyz0123456789") + [
     ".", ",", "!", "?", "'", "-", "_", "/", "(", ")",
 ]
 
-EMBED_DIM   = 96
+EMBED_DIM   = 224
 POS_DIM     = 8
 FREQ_DIM    = 4
 FLAG_DIM    = 16
 CTX_DIM     = 4
-FEATURE_DIM = EMBED_DIM + POS_DIM + FREQ_DIM + FLAG_DIM + CTX_DIM  # = 128
+FEATURE_DIM = EMBED_DIM + POS_DIM + FREQ_DIM + FLAG_DIM + CTX_DIM  # = 256
 
-# Morphological suffix sets for flag dims 14 and 15
+# Modality flag indices in modifier_flags (16 dims total)
+# Dims 12-15 used for modality identification
+MOD_TEXT  = 12
+MOD_IMAGE = 13
+MOD_AUDIO = 14
+MOD_VIDEO = 15
+
+# Morphological suffix sets for flag dims 10 and 11
 _VERB_SUFFIXES = ("ing", "ed", "ize", "ise", "ify", "ate")
 _NOUN_SUFFIXES = ("tion", "sion", "ness", "ity", "ment", "er", "or", "ist", "ism")
 _ADJ_SUFFIXES  = ("ful", "ous", "ive", "able", "ible", "al", "ic", "ent", "ant")
 _ADV_SUFFIX    = "ly"
+
+_PREFIXES = (
+    "un", "re", "in", "im", "dis", "pre", "post", "anti", "mis", "non",
+    "pro", "over", "under", "trans", "inter", "sub", "ex", "de"
+)
+_SUFFIXES = _VERB_SUFFIXES + _NOUN_SUFFIXES + _ADJ_SUFFIXES + (_ADV_SUFFIX,)
 
 
 def _stable_embedding(token: str, dim: int) -> np.ndarray:
@@ -196,11 +216,42 @@ class BaseMapper:
         self._base_vocab: Dict[str, np.ndarray] = {}  # token → embedding
         self._base_types: Dict[str, str] = {}          # token → 'word'|'phrase'
 
-        # Cooccurrence: word → {neighbor_word: count}
-        self._cooc: Dict[str, Counter] = {}
+        # Cooccurrence: token → {neighbor_token: count}
+        # neighbor_token can be a word string or a specialized sensory key
+        self._cooc: Dict[Any, Counter] = {}
 
         self._embed_cache: Dict[str, np.ndarray] = {}
         self.is_fitted = False
+        self.persistence_path: Optional[str] = None
+
+    # ── Persistence ──────────────────────────────────────────────────
+
+    def save(self, filepath: str):
+        """Save mapper state to a pickle file."""
+        state = {
+            "word_freq":  self._word_freq,
+            "ngram_freq": self._ngram_freq,
+            "base_vocab": self._base_vocab,
+            "base_types": self._base_types,
+            "cooc":       self._cooc,
+            "is_fitted":  self.is_fitted,
+        }
+        with open(filepath, "wb") as f:
+            pickle.dump(state, f)
+
+    def load(self, filepath: str):
+        """Load mapper state from a pickle file."""
+        if not os.path.exists(filepath):
+            return
+        with open(filepath, "rb") as f:
+            state = pickle.load(f)
+        self._word_freq  = state.get("word_freq", Counter())
+        self._ngram_freq = state.get("ngram_freq", Counter())
+        self._base_vocab = state.get("base_vocab", {})
+        self._base_types = state.get("base_types", {})
+        self._cooc       = state.get("cooc", {})
+        self.is_fitted   = state.get("is_fitted", False)
+        self._embed_cache.clear()
 
     # ── Fitting ──────────────────────────────────────────────────────
 
@@ -246,28 +297,37 @@ class BaseMapper:
         self.is_fitted = True
         return self
 
-    def _apply_cooc_smoothing(self):
+    def _apply_cooc_smoothing(self, sensory_hints: Optional[Dict[str, np.ndarray]] = None):
         """
-        One-pass cooccurrence enrichment: for each known word, blend its
-        embedding toward the centroid of its top-5 corpus neighbors.
-
-        Operates only on known base-vocab words (not composed or primitives)
-        since those are the ones with cooccurrence data from the corpus.
+        One-pass cooccurrence enrichment with Sensory Grounding.
+        Blends word embeddings toward both textual neighbors AND sensory centroids.
         """
         updates: Dict[str, np.ndarray] = {}
         for w, emb in self._base_vocab.items():
             if self._base_types.get(w) == "phrase":
-                continue  # phrases are already a blend; skip
+                continue
             neighbors = self._cooc.get(w, Counter())
             if not neighbors:
                 continue
+
             total = float(sum(neighbors.values()))
             delta = np.zeros(EMBED_DIM, dtype=np.float32)
             count = 0
+
+            # Textual Grounding
             for other, cnt in neighbors.most_common(5):
-                if other in self._base_vocab:
+                if isinstance(other, str) and other in self._base_vocab:
                     delta += (cnt / total) * self._base_vocab[other]
                     count += 1
+
+            # Sensory Grounding (if hints provided for words like 'red', 'loud', etc.)
+            if sensory_hints and w in sensory_hints:
+                sensory_vec = sensory_hints[w][:EMBED_DIM]
+                if len(sensory_vec) < EMBED_DIM:
+                    sensory_vec = np.pad(sensory_vec, (0, EMBED_DIM - len(sensory_vec)))
+                delta += 2.0 * sensory_vec # Stronger weight for direct sensory proof
+                count += 2
+
             if count == 0:
                 continue
             dn = np.linalg.norm(delta)
@@ -279,8 +339,23 @@ class BaseMapper:
         for w, new_emb in updates.items():
             self._base_vocab[w] = new_emb
 
-    def transform(self, text: str) -> BaseMap:
-        """Convert text into a BaseMap (one row per token)."""
+    def transform(self, input_data: Any, mode: str = "text") -> BaseMap:
+        """
+        Convert input data into a BaseMap (one row per token/patch).
+        Supports cross-modal interleaving if input_data is a List[Dict].
+        """
+        if isinstance(input_data, list) and mode == "fusion":
+            return self._transform_fusion(input_data)
+
+        if mode == "image":
+            return self._transform_image(input_data)
+        if mode == "audio":
+            return self._transform_audio(input_data)
+        if mode == "video":
+            return self._transform_video(input_data)
+
+        # Default text mode
+        text = str(input_data)
         raw_tokens = self._tokenize(text)
         if not raw_tokens:
             raw_tokens = ["[empty]"]
@@ -298,6 +373,9 @@ class BaseMapper:
             pos   = self._position_enc(i, n)
             freq  = self._freq_features(tok, freq_vals[i], max_freq)
             flags = self._modifier_flags(tok, typ, i, n)
+            # Add modality flag
+            flags[MOD_TEXT] = 1.0
+
             ctx   = self._context_summary(i, tokens, types)
 
             matrix[i, :EMBED_DIM]                                      = embed
@@ -321,6 +399,129 @@ class BaseMapper:
         }
         return BaseMap(matrix=matrix, tokens=tokens, token_types=types,
                        modifiers=modifiers, metadata=metadata)
+
+    def _transform_fusion(self, input_list: List[Dict]) -> BaseMap:
+        """Interleave multiple modalities into a single BaseMap stream."""
+        all_matrices = []
+        all_tokens = []
+        all_types = []
+
+        for item in input_list:
+            mode = item.get("mode", "text")
+            data = item.get("data")
+            bm = self.transform(data, mode=mode)
+            all_matrices.append(bm.matrix)
+            all_tokens.extend(bm.tokens)
+            all_types.extend(bm.token_types)
+
+        final_matrix = np.vstack(all_matrices)
+        # Update global position encodings for fused stream
+        n = final_matrix.shape[0]
+        for i in range(n):
+            final_matrix[i, EMBED_DIM:EMBED_DIM+POS_DIM] = self._position_enc(i, n)
+
+        return BaseMap(final_matrix, all_tokens, all_types, {}, {"mode": "fusion"})
+
+    def _transform_image(self, img_path: str) -> BaseMap:
+        """Treat images as sentences of visual tokens (patches)."""
+        img = Image.open(img_path).convert("RGB")
+        img = img.resize((128, 128))
+        arr = np.array(img, dtype=np.float32) / 255.0
+
+        # Split into 8x8 patches (16x16 pixels each)
+        ps = 16
+        patches = []
+        for r in range(0, 128, ps):
+            for c in range(0, 128, ps):
+                patch = arr[r:r+ps, c:c+ps]
+                patches.append(patch.flatten())
+
+        n = len(patches)
+        matrix = np.zeros((n, self.feature_dim), dtype=np.float32)
+        # 8x8 patches
+        grid_dim = int(np.sqrt(n))
+        for i, p in enumerate(patches):
+            feat = p[:EMBED_DIM]
+            if len(feat) < EMBED_DIM:
+                feat = np.pad(feat, (0, EMBED_DIM - len(feat)))
+            matrix[i, :EMBED_DIM] = feat
+            # Use 2D spatial encoding
+            matrix[i, EMBED_DIM:EMBED_DIM+POS_DIM] = self._position_enc(i, n, grid_dim=grid_dim)
+            # Flag as Image
+            matrix[i, EMBED_DIM+POS_DIM+FREQ_DIM+MOD_IMAGE] = 1.0
+
+        return BaseMap(matrix, [f"patch_{i}" for i in range(n)],
+                       ["visual"] * n, {}, {"mode": "image"})
+
+    def _transform_audio(self, audio_path: str) -> BaseMap:
+        """Treat audio as sentences of spectral tokens."""
+        y, sr = librosa.load(audio_path, duration=5.0)
+        spec = np.abs(librosa.stft(y))
+        spec_db = librosa.amplitude_to_db(spec, ref=np.max)
+
+        n_tokens = 32
+        hop = spec_db.shape[1] // n_tokens
+        tokens = []
+        for i in range(n_tokens):
+            tokens.append(np.mean(spec_db[:, i*hop:(i+1)*hop], axis=1))
+
+        n = len(tokens)
+        matrix = np.zeros((n, self.feature_dim), dtype=np.float32)
+        for i, t in enumerate(tokens):
+            feat = t[:EMBED_DIM]
+            if len(feat) < EMBED_DIM:
+                feat = np.pad(feat, (0, EMBED_DIM - len(feat)))
+            feat = (feat - np.mean(feat)) / (np.std(feat) + 1e-10)
+            matrix[i, :EMBED_DIM] = feat
+            matrix[i, EMBED_DIM:EMBED_DIM+POS_DIM] = self._position_enc(i, n)
+            # Flag as Audio
+            matrix[i, EMBED_DIM+POS_DIM+FREQ_DIM+MOD_AUDIO] = 1.0
+
+        return BaseMap(matrix, [f"spectral_{i}" for i in range(n)],
+                       ["spectral"] * n, {}, {"mode": "audio"})
+
+    def _transform_video(self, video_path: str) -> BaseMap:
+        """Treat video as temporal sequence with motion extraction."""
+        cap = cv2.VideoCapture(video_path)
+        frames = []
+        diffs = []
+        prev_frame = None
+
+        while len(frames) < 16:
+            ret, frame = cap.read()
+            if not ret: break
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            frame_resized = cv2.resize(frame_rgb, (64, 64))
+
+            flat = frame_resized.flatten() / 255.0
+            frames.append(flat)
+
+            if prev_frame is not None:
+                # Simple motion extraction: frame difference
+                diff = cv2.absdiff(frame_gray, prev_frame)
+                diff = cv2.resize(diff, (64, 64)).flatten() / 255.0
+                diffs.append(diff)
+            else:
+                diffs.append(np.zeros_like(flat))
+
+            prev_frame = frame_gray
+        cap.release()
+
+        n = len(frames)
+        matrix = np.zeros((n, self.feature_dim), dtype=np.float32)
+        for i, (f, d) in enumerate(zip(frames, diffs)):
+            # Combine visual feature and motion feature
+            feat = 0.7 * f[:EMBED_DIM] + 0.3 * d[:EMBED_DIM]
+            if len(feat) < EMBED_DIM:
+                feat = np.pad(feat, (0, EMBED_DIM - len(feat)))
+            matrix[i, :EMBED_DIM] = feat
+            matrix[i, EMBED_DIM:EMBED_DIM+POS_DIM] = self._position_enc(i, n)
+            # Flag as Video
+            matrix[i, EMBED_DIM+POS_DIM+FREQ_DIM+MOD_VIDEO] = 1.0
+
+        return BaseMap(matrix, [f"frame_{i}" for i in range(n)],
+                       ["temporal_visual"] * n, {}, {"mode": "video"})
 
     def fit_transform(self, texts: List[str], target: Optional[str] = None) -> BaseMap:
         self.fit(texts)
@@ -391,13 +592,13 @@ class BaseMapper:
         n = np.linalg.norm(v)
         return v / n if n > 1e-10 else v
 
-    def _compose_word_embedding(self, word: str) -> np.ndarray:
+    def _compose_word_embedding(self, word: str, depth: int = 0) -> np.ndarray:
         """
         Compose a word's embedding from its constituent character primitives,
-        using both character unigrams and consecutive character bigrams.
+        using both character unigrams, bigrams, and morpheme decomposition.
 
         Unigrams capture the overall letter distribution; bigrams capture
-        local subword structure (common prefixes, suffixes, letter patterns).
+        local subword structure; morphemes capture semantic chunks.
 
         Returns a single unit-norm EMBED_DIM vector — ONE representation.
         """
@@ -408,14 +609,24 @@ class BaseMapper:
         char_embeds: List[np.ndarray] = []
         weights: List[float] = []
 
-        # Character unigrams (primary signal)
+        # 1. Morpheme Decomposition (Semantic chunks)
+        # Only decompose if we are at the top level to avoid infinite recursion
+        if depth == 0 and len(word) > 5:
+            morphemes = self._split_morphemes(word.lower())
+            if len(morphemes) > 1:
+                for m in morphemes:
+                    # Recursively get embedding for morpheme (at depth 1)
+                    m_emb = self._compose_word_embedding(m, depth=1)
+                    char_embeds.append(m_emb)
+                    weights.append(2.0) # High weight for semantic chunks
+
+        # 2. Character unigrams (primary signal)
         for k, ch in enumerate(chars):
             if ch in self._primitive_embeddings:
                 char_embeds.append(self._primitive_embeddings[ch])
                 weights.append(1.0 / (1.0 + k * 0.1))
 
-        # Character bigrams (secondary signal, lower weight)
-        # Each bigram embedding is the average of its two component chars.
+        # 3. Character bigrams (secondary signal, lower weight)
         for k in range(len(chars) - 1):
             c1, c2 = chars[k], chars[k+1]
             if c1 in self._primitive_embeddings and c2 in self._primitive_embeddings:
@@ -426,7 +637,7 @@ class BaseMapper:
 
         if not char_embeds:
             v = _stable_embedding(word, EMBED_DIM)
-            self._embed_cache[word] = v
+            if depth == 0: self._embed_cache[word] = v
             return v
 
         lib   = _load_lib()
@@ -450,8 +661,30 @@ class BaseMapper:
             if n > 1e-10:
                 out /= n
 
-        self._embed_cache[word] = out
+        if depth == 0: self._embed_cache[word] = out
         return out
+
+    def _split_morphemes(self, word: str) -> List[str]:
+        """Heuristic to split word into known prefix, root, and suffix."""
+        prefix = ""
+        for p in _PREFIXES:
+            if word.startswith(p) and len(word) > len(p) + 2:
+                prefix = p
+                word = word[len(p):]
+                break
+
+        suffix = ""
+        for s in sorted(_SUFFIXES, key=len, reverse=True):
+            if word.endswith(s) and len(word) > len(s) + 2:
+                suffix = s
+                word = word[:-len(s)]
+                break
+
+        res = []
+        if prefix: res.append(prefix)
+        if word:   res.append(word)
+        if suffix: res.append(suffix)
+        return res
 
     def _token_embedding(self, token: str, token_type: str) -> np.ndarray:
         """Return the EMBED_DIM embedding for a token based on its type."""
@@ -463,15 +696,35 @@ class BaseMapper:
 
     # ── Position encoding ────────────────────────────────────────────
 
-    def _position_enc(self, pos: int, total: int) -> np.ndarray:
+    def _position_enc(self, pos: int, total: int, grid_dim: Optional[int] = None) -> np.ndarray:
+        """
+        Enhanced Positional Encoding: supports linear and 2D relational grids.
+        If grid_dim provided, pos is interpreted as a 2D index (row * grid_dim + col).
+        """
         lib = _load_lib()
         out = np.zeros(POS_DIM, dtype=np.float32)
+
+        if grid_dim:
+            # 2D spatial encoding (for image patches)
+            r = pos // grid_dim
+            c = pos % grid_dim
+            rel_r = r / max(grid_dim - 1, 1)
+            rel_c = c / max(grid_dim - 1, 1)
+            # Use half for row, half for col
+            for k in range(POS_DIM // 4):
+                out[2*k]     = math.sin(rel_r * math.pi * (k+1))
+                out[2*k+1]   = math.cos(rel_r * math.pi * (k+1))
+                out[POS_DIM//2 + 2*k]   = math.sin(rel_c * math.pi * (k+1))
+                out[POS_DIM//2 + 2*k+1] = math.cos(rel_c * math.pi * (k+1))
+            return out
+
         if lib:
             lib.sinusoidal_position_enc(
                 ctypes.c_int(pos), ctypes.c_int(total), ctypes.c_int(POS_DIM),
                 out.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
             )
             return out
+
         rel = pos / max(total - 1, 1)
         for k in range(POS_DIM // 2):
             out[2*k]   = math.sin(rel * math.pi * (k+1))
@@ -507,10 +760,6 @@ class BaseMapper:
         """
         16 binary/continuous flags encoding token identity, position, and
         morphological role.
-
-        Dims 0–13: type identity, position, structural, length (unchanged)
-        Dim  14:   verb-like suffix flag  (-ing, -ed, -ize, -ize, -ify, -ate)
-        Dim  15:   noun/adj/adv suffix    (-tion, -ness, -ous, -ly, etc.)
         """
         f = np.zeros(FLAG_DIM, dtype=np.float32)
         f[0]  = 1.0 if typ == "primitive" else 0.0
@@ -523,16 +772,11 @@ class BaseMapper:
         f[7]  = 1.0 if token.replace(" ","").isalpha() else 0.0
         f[8]  = 1.0 if token.replace(" ","").isdigit() else 0.0
         f[9]  = 1.0 if not token.replace(" ","").isalnum() else 0.0
-        f[10] = float(len(token)) / 30.0
-        f[11] = 1.0 if " " in token else 0.0
-        f[12] = 1.0 if len(token) == 1 else 0.0
-        f[13] = 1.0 if len(token) > 8  else 0.0
 
-        # Morphological suffix detection (dims 14–15)
-        # Replaces the old position-cluster dims that were redundant with position_enc.
+        # Morphological suffix detection (dims 10-11)
         clean = token.replace(" ", "")
-        f[14] = 1.0 if any(clean.endswith(s) for s in _VERB_SUFFIXES) else 0.0
-        f[15] = 1.0 if (any(clean.endswith(s) for s in _NOUN_SUFFIXES)
+        f[10] = 1.0 if any(clean.endswith(s) for s in _VERB_SUFFIXES) else 0.0
+        f[11] = 1.0 if (any(clean.endswith(s) for s in _NOUN_SUFFIXES)
                         or any(clean.endswith(s) for s in _ADJ_SUFFIXES)
                         or clean.endswith(_ADV_SUFFIX)) else 0.0
 

@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.env
+venv/
+ENV/
+
+# C Extensions
+*.o
+*.so
+
+# IECNN Persistence
+*.pkl
+corpus.txt
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+*.swp
+
+# Replit
+.replit
+replit.md
+uv.lock
+noisy_multimodal/
+tinystories_noisy_10k.txt
+noisy_multimodal_100.pkl

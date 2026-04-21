@@ -23,7 +23,8 @@ Memory guidance:
 """
 
 import numpy as np
-from typing import List, Dict, Optional, Tuple
+import re
+from typing import List, Dict, Optional, Tuple, Any
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -39,7 +40,7 @@ from evolution.dot_evolution import DotEvolution, EvolutionConfig
 from evaluation.metrics      import IECNNMetrics, RunMetrics
 from formulas.formulas       import (
     similarity_score, cluster_entropy, adaptive_learning_rate, dominance_score,
-    amplify_pressure,
+    amplify_pressure, hierarchical_convergence_score
 )
 
 
@@ -70,8 +71,8 @@ class IECNN:
     """
 
     def __init__(self,
-                 feature_dim:           int   = 128,
-                 num_dots:              int   = 64,
+                 feature_dim:           int   = 256,
+                 num_dots:              int   = 128,
                  n_heads:               int   = N_HEADS,
                  max_iterations:        int   = 12,
                  micro_threshold:       float = 0.60,
@@ -85,6 +86,7 @@ class IECNN:
                  max_aim_variants:      int   = 4,
                  base_lr:               float = 0.10,
                  evolve:                bool  = True,
+                 persistence_path:      Optional[str] = None,
                  seed:                  int   = 42):
         self.feature_dim = feature_dim
         self.num_dots    = num_dots
@@ -95,6 +97,10 @@ class IECNN:
 
         # Core components
         self.base_mapper = BaseMapper(feature_dim=feature_dim)
+        if persistence_path:
+            self.base_mapper.load(persistence_path)
+            self.base_mapper.persistence_path = persistence_path
+
         self.base_bias   = BiasVector(0.5, 0.5, 0.5, 0.3, 1.0)
         self.dot_gen     = DotGenerator(num_dots, feature_dim, self.base_bias,
                                         n_heads=n_heads, seed=seed)
@@ -119,6 +125,9 @@ class IECNN:
         self.evolution       = DotEvolution(EvolutionConfig(), seed)
         self.evaluator       = IECNNMetrics(alpha)
 
+        # Working Memory: stores result of previous run() for context
+        self.working_memory: Optional[np.ndarray] = None
+
         # Dot pool (generated lazily on first use; evolved across calls)
         self._dots: Optional[list] = None
         self._call_count: int = 0
@@ -138,12 +147,33 @@ class IECNN:
 
     # ── Main run ─────────────────────────────────────────────────────
 
-    def run(self, text: str, verbose: bool = False) -> IECNNResult:
-        """Run the full 10-layer IECNN pipeline on a text input."""
+    def run(self, input_data: Any, verbose: bool = False,
+            update_brain: bool = False, mode: str = "text") -> IECNNResult:
+        """
+        Run the full 10-layer IECNN pipeline.
+
+        Args:
+          input_data   — input data (text, img_path, etc.)
+          verbose      — print round-by-round progress
+          update_brain — if True, the text enriches the global BaseMapping knowledge
+          mode         — 'text' | 'image' | 'audio' | 'video'
+        """
+        if update_brain and mode == "text":
+            self.base_mapper.fit([input_data])
+            if self.base_mapper.persistence_path:
+                self.base_mapper.save(self.base_mapper.persistence_path)
+
         self.iter_ctrl.reset()
         self.cluster_memory.reset_call()
 
-        basemap  = self.base_mapper.transform(text)
+        basemap  = self.base_mapper.transform(input_data, mode=mode)
+
+        # ── Layer 2.5: Working Memory Injection ──────────────────
+        # If we have a working memory from the previous call, blend it
+        # into the initial basemap to provide narrative context.
+        # We use a 50/50 blend to ensure context survives the fresh input noise.
+        if self.working_memory is not None:
+            basemap = self._blend(basemap, self.working_memory, alpha=0.50)
         dots     = self._ensure_dots()
         cur_bmap = basemap
         all_rounds: List[Dict] = []
@@ -153,22 +183,30 @@ class IECNN:
         cur_entropy   = 0.5  # initial entropy (unknown)
 
         if verbose:
-            self._print_header(text, basemap, dots)
+            self._print_header(str(input_data), basemap, dots)
 
         while True:
             rnd = self.iter_ctrl.current_round
 
             # ── Memory hints for adaptive attention ──────────────────
-            memory_hints = {
-                dot.dot_id: self.dot_memory.recent_centroid(dot.dot_id)
-                for dot in dots
-            }
+            memory_hints = {}
+            for dot in dots:
+                hint = self.dot_memory.recent_centroid(dot.dot_id)
+                if hint is None and rnd == 0:
+                    # Seed round 0 with cluster pattern library hints
+                    # if dot memory is empty
+                    hint = self.cluster_memory.closest_pattern(basemap.pool("mean"), self.alpha)
+                memory_hints[dot.dot_id] = hint
 
             # ── Layers 3+4: Dot Prediction ───────────────────────────
+            # Provide hazy consensus (previous round centroid) for 'Social Interaction'
+            consensus = prev_centroid if prev_centroid is not None else None
+
             dot_preds = self.dot_gen.run_all(
                 cur_bmap, dots,
                 memory_hints=memory_hints,
                 context_entropy=cur_entropy,
+                consensus=consensus,
             )
 
             # ── Layer 5: AIM (9 inversions in parallel) ───────────────
@@ -254,24 +292,25 @@ class IECNN:
 
             # ── F17 Dot Reinforcement Pressure ───────────────────────────
             delta_u = self.iter_ctrl.utility_acceleration()
-            drp     = self.dot_memory.drp_scores(eug_val, delta_u)
+            dot_ids = [d.dot_id for d in dots]
+            drp     = self.dot_memory.drp_scores(dot_ids, eug_val, delta_u)
 
             # Step 1 — floor pressure on raw scores (gentle, catches near-zero)
-            self.dot_memory.apply_floor_pressure(drp)
+            self.dot_memory.apply_floor_pressure(dot_ids, drp)
 
             # Step 2 — nonlinear amplification: sign(R) × |R|^1.5
             # Monotone, so ranking is preserved; extremes are stretched further apart.
             drp_amp = (np.sign(drp) * np.abs(drp) ** 1.5).astype(np.float32)
 
             # Step 3 — competition decay on amplified scores (bottom 30%)
-            self.dot_memory.competition_decay(drp_amp)
+            self.dot_memory.competition_decay(dot_ids, drp_amp)
 
             # Step 4 — hard selection: bottom 40% cut in half (not just nudged)
-            self.dot_memory.hard_selection(drp_amp)
+            self.dot_memory.hard_selection(dot_ids, drp_amp)
 
             # Step 5 — inline mutation: weak dots transform structurally
             # Use a wider std when EUG is stagnant (more exploration needed)
-            eff          = self.dot_memory.all_effectivenesses()
+            eff          = self.dot_memory.all_effectivenesses(dot_ids)
             mutation_std = 0.10 if abs(eug_val) < 0.01 else 0.05
             dots         = self.evolution.mutate_weak_dots(dots, eff,
                                                            mutation_std=mutation_std)
@@ -281,7 +320,22 @@ class IECNN:
             if self._compute_diversity(dots) < 0.60:
                 self._boost_underrepresented(dots)
 
+            # Step 7 — Dynamic Head Allocation: Grant extra heads to elites
+            self._allocate_heads(dots, eff)
+
             self._learn_bias(surv, candidates, assign)
+
+            # ── Meta-Learning: Auto-tune DRP and LR ──────────────────────
+            # Adjust meta-parameters based on EUG history.
+            # If EUG is consistently low, we increase failure penalty (lambda4)
+            # and potentially base_lr to escape the local basin.
+            self._optimize_meta_params(eug_val)
+
+        # ── Layer 11: Reflection & Self-Correction ────────────────────
+        # Winning cluster is vetted by specialized dots to ensure it
+        # doesn't violate learned constraints.
+        if top_cluster:
+            final_out = self._reflect(final_out, dots, basemap)
 
         # ── Rollback if last round was worse ─────────────────────────
         best = self.iter_ctrl.best_clusters()
@@ -295,6 +349,9 @@ class IECNN:
         if n > 1e-10: final_out = final_out / n * np.sqrt(self.feature_dim)
 
         # ── Post-run: update memory + evolve dots ─────────────────────
+        # Store output in working memory for next call
+        self.working_memory = final_out.copy()
+
         if top_cluster:
             self.cluster_memory.commit_pattern(final_out, top_cluster.score, self.alpha)
         if self.do_evolve:
@@ -312,13 +369,63 @@ class IECNN:
 
     # ── Public API ───────────────────────────────────────────────────
 
-    def encode(self, text: str) -> np.ndarray:
-        """Encode text to a 128-dim vector."""
-        return self.run(text).output
+    def encode(self, text: str, verbose: bool = False) -> np.ndarray:
+        """Encode text to a 256-dim vector (hierarchical for multi-sentence)."""
+        sentences = self._split_sentences(text)
+        if len(sentences) > 1:
+            if verbose: print(f"[IECNN] Processing {len(sentences)} sentences hierarchically...")
+            return self.run_hierarchical(sentences, verbose=verbose)
+        return self.run(text, verbose=verbose).output
 
-    def similarity(self, a: str, b: str) -> float:
+    def run_hierarchical(self, sentences: List[str], verbose: bool = False) -> np.ndarray:
+        """
+        Document-level processing: process each sentence independently,
+        then perform a final 'Master Convergence' on their centroids.
+        """
+        centroids = []
+        scores = []
+        for sent in sentences:
+            res = self.run(sent, verbose=verbose)
+            if res.top_cluster:
+                centroids.append(res.top_cluster.centroid)
+                scores.append(res.top_cluster.score)
+
+        if not centroids:
+            return np.zeros(self.feature_dim, dtype=np.float32)
+
+        # Final centroid: confidence-weighted average of sentence centroids
+        # weighted by their individual convergence scores.
+        stack = np.stack(centroids)
+        weights = np.array(scores)
+        weights /= weights.sum() + 1e-10
+        master_centroid = (stack * weights[:, None]).sum(axis=0)
+
+        # Re-normalize
+        n = np.linalg.norm(master_centroid)
+        if n > 1e-10:
+            master_centroid = master_centroid / n * np.sqrt(self.feature_dim)
+
+        return master_centroid
+
+    def _split_sentences(self, text: str) -> List[str]:
+        """Simple heuristic sentence splitter."""
+        # Split on . ! ? followed by space or end of string
+        parts = re.split(r'(?<=[.!?])\s+', text)
+        return [p.strip() for p in parts if p.strip()]
+
+    def similarity(self, a: str, b: str, update_brain: bool = False) -> float:
         """Similarity between two texts (F1)."""
-        return float(similarity_score(self.encode(a), self.encode(b), self.alpha))
+        # If we update brain, we do it for both first to ensure mutual knowledge
+        if update_brain:
+            self.base_mapper.fit([a, b])
+            if self.base_mapper.persistence_path:
+                self.base_mapper.save(self.base_mapper.persistence_path)
+
+        return float(similarity_score(
+            self.encode(a),
+            self.encode(b),
+            self.alpha
+        ))
 
     def compare(self, texts: List[str]) -> np.ndarray:
         """Return n×n similarity matrix for a list of texts."""
@@ -333,8 +440,10 @@ class IECNN:
 
     def memory_status(self) -> Dict:
         """Summary of dot memory and cluster memory state."""
+        dots = self._ensure_dots()
+        dot_ids = [d.dot_id for d in dots]
         return {
-            "dot_memory":     self.dot_memory.summary(),
+            "dot_memory":     self.dot_memory.summary(dot_ids),
             "cluster_memory": self.cluster_memory.summary(),
             "evolution":      self.evolution.stats(self.dot_memory),
             "call_count":     self._call_count,
@@ -342,13 +451,60 @@ class IECNN:
 
     # ── Internal helpers ─────────────────────────────────────────────
 
-    def _blend(self, original: BaseMap, refined: np.ndarray) -> BaseMap:
+    def _reflect(self, output: np.ndarray, dots: list, basemap: BaseMap) -> np.ndarray:
+        """
+        Self-Correction: Veto/Refine output based on logical consistency.
+        Uses LOGIC and SEMANTIC dots to 're-predict' from the final output.
+        """
+        # Select specialized dots for reflection
+        veto_dots = [d for d in dots if d.dot_type in (DotType.LOGIC, DotType.SEMANTIC)]
+        if not veto_dots:
+            return output
+
+        # Sample a few dots
+        sample_size = min(10, len(veto_dots))
+        idx = self._rng.choice(len(veto_dots), sample_size, replace=False)
+        selected = [veto_dots[i] for i in idx]
+
+        # Each selected dot 'critiques' the output by measuring its
+        # consistency with the original basemap.
+        corrections = []
+        for dot in selected:
+            # We treat the final output as a 'prediction' and see if the dot agrees
+            preds = dot.predict(basemap, memory_hint=output, context_entropy=0.1)
+            for p, conf, _ in preds:
+                sim = similarity_score(output, p, self.alpha)
+                if sim < 0.4: # Potential contradiction
+                    # Add a correction nudge toward the dot's perspective
+                    corrections.append(conf * (p - output))
+
+        if corrections:
+            # Apply weighted corrections
+            nudge = np.mean(np.stack(corrections), axis=0)
+            return output + 0.2 * nudge
+
+        return output
+
+    def _optimize_meta_params(self, current_eug: float):
+        """Adjust DRP weights and Base LR based on utility gradient."""
+        # Simple heuristic: if EUG is low, increase selection pressure
+        if abs(current_eug) < 0.005:
+            # Increase failure penalty to flush out weak dots
+            self.dot_memory.lambda4 = min(0.30, self.dot_memory.lambda4 + 0.01)
+            # Increase base learning rate to explore more
+            self.iter_ctrl.base_lr = min(0.20, self.iter_ctrl.base_lr + 0.005)
+        elif current_eug > 0.05:
+            # System is doing well, potentially reduce pressure to stabilize
+            self.dot_memory.lambda4 = max(0.05, self.dot_memory.lambda4 - 0.005)
+            self.iter_ctrl.base_lr = max(0.05, self.iter_ctrl.base_lr - 0.002)
+
+    def _blend(self, original: BaseMap, refined: np.ndarray, alpha: float = 0.85) -> BaseMap:
         """Blend the refined vector back into the basemap for the next round."""
         mat = original.matrix.copy()
         n = np.linalg.norm(refined)
         if n > 1e-10:
             r = refined / n
-            mat = 0.85 * mat + 0.15 * r[None, :]
+            mat = alpha * mat + (1.0 - alpha) * r[None, :]
         from basemapping.basemapping import BaseMap as BM
         return BM(mat, original.tokens, original.token_types,
                   original.modifiers, {**original.metadata, "blended": True})
@@ -413,6 +569,31 @@ class IECNN:
             counts[t] = counts.get(t, 0) + 1
         n = len(dots)
         return float(1.0 - sum((c / n) ** 2 for c in counts.values()))
+
+    def _allocate_heads(self, dots: list, effectivenesses: np.ndarray):
+        """
+        Dynamically allocate prediction heads based on effectiveness.
+        Top 20% get 6 heads, bottom 40% get 2 heads, others get default (4).
+        """
+        n = len(dots)
+        if n < 5: return
+
+        # effectivenesses corresponds to the dots list order
+        order = np.argsort(effectivenesses)[::-1]
+
+        top_k = max(1, int(n * 0.20))
+        bot_k = max(1, int(n * 0.40))
+
+        elites = set(order[:top_k])
+        weak   = set(order[-bot_k:])
+
+        for i, dot in enumerate(dots):
+            if i in elites:
+                dot.n_heads = 6
+            elif i in weak:
+                dot.n_heads = 2
+            else:
+                dot.n_heads = self.n_heads # Default (4)
 
     def _boost_underrepresented(self, dots: list) -> None:
         """

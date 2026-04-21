@@ -67,9 +67,11 @@ class InversionType:
     RELATIONAL    = "relational"
     TEMPORAL      = "temporal"
     COMPOSITIONAL = "compositional"
+    # Cross-Modal
+    CROSS_MODAL   = "cross_modal"
 
     ALL = [FEATURE, CONTEXT, SPATIAL, SCALE, ABSTRACTION, NOISE,
-           RELATIONAL, TEMPORAL, COMPOSITIONAL]
+           RELATIONAL, TEMPORAL, COMPOSITIONAL, CROSS_MODAL]
 
     # Weights for random selection (research-informed priors)
     WEIGHTS = {
@@ -82,6 +84,7 @@ class InversionType:
         RELATIONAL:    1.1,
         TEMPORAL:      1.0,
         COMPOSITIONAL: 0.7,
+        CROSS_MODAL:   1.3,
     }
 
 
@@ -231,17 +234,17 @@ def _invert_relational(p: np.ndarray) -> np.ndarray:
 
 def _invert_temporal(p: np.ndarray) -> np.ndarray:
     """
-    Temporal Inversion: treats the position-encoded segment [96:104]
+    Temporal Inversion: treats the position-encoded segment [224:232]
     as a sequence and reverses its temporal order; also applies a
-    causal reversal to the semantic dims [0:96] by splitting into 8
+    causal reversal to the semantic dims [0:224] by splitting into 8
     time steps and reversing.
     """
     out = p.copy()
     # Reverse position encoding dims (8 dims, 4 sin-cos pairs)
-    if len(out) >= 104:
-        out[96:104] = out[96:104][::-1]
-    # Reverse the 8 semantic "time steps" of 12 dims each (96/8 = 12)
-    n_sem = 96; step = n_sem // 8
+    if len(out) >= 232:
+        out[224:232] = out[224:232][::-1]
+    # Reverse the 8 semantic "time steps" of 28 dims each (224/8 = 28)
+    n_sem = 224; step = n_sem // 8
     steps = [out[i*step:(i+1)*step].copy() for i in range(8)]
     steps.reverse()
     for i, s in enumerate(steps):
@@ -287,6 +290,21 @@ def _invert_compositional(p: np.ndarray) -> np.ndarray:
 
 # ── Inversion dispatch ────────────────────────────────────────────────
 
+def _invert_cross_modal(p: np.ndarray) -> np.ndarray:
+    """
+    Cross-Modal Inversion: Swap modality identities.
+    Specifically, it flips the modality flag bits [248:252].
+    This challenges the system to see if a 'visual' pattern still makes
+    sense if interpreted as an 'audio' or 'text' pattern.
+    """
+    out = p.copy()
+    if len(out) >= 252:
+        # Shift flags circularly: Text -> Image -> Audio -> Video -> Text
+        flags = out[248:252].copy()
+        out[248:252] = np.roll(flags, 1)
+    return out
+
+
 def _apply_inversion(inv_type: str, pred: np.ndarray, ctx: np.ndarray,
                      rng: np.random.RandomState) -> np.ndarray:
     """Dispatch to the correct inversion function."""
@@ -308,6 +326,8 @@ def _apply_inversion(inv_type: str, pred: np.ndarray, ctx: np.ndarray,
         return _invert_temporal(pred)
     if inv_type == InversionType.COMPOSITIONAL:
         return _invert_compositional(pred)
+    if inv_type == InversionType.CROSS_MODAL:
+        return _invert_cross_modal(pred)
     return pred.copy()
 
 
@@ -333,11 +353,31 @@ class AIMLayer:
         # Normalize weights
         self._weights = self.ALL_WEIGHTS / self.ALL_WEIGHTS.sum()
 
-    def _pick_inversions(self, inv_bias: float) -> List[str]:
+    def _pick_inversions(self, inv_bias: float, requested: Optional[str] = None) -> List[str]:
+        """Pick inversions, prioritizing requested hypotheses."""
         n = max(1, round(inv_bias * self.max_variants))
         n = min(n, len(InversionType.ALL))
-        idx = self._rng.choice(len(InversionType.ALL), size=n, replace=False, p=self._weights)
-        return [InversionType.ALL[i] for i in idx]
+
+        chosen = []
+        if requested and requested in InversionType.ALL:
+            chosen.append(requested)
+
+        remaining_n = n - len(chosen)
+        if remaining_n > 0:
+            # Mask out already chosen
+            weights = self._weights.copy()
+            if requested:
+                try:
+                    req_idx = InversionType.ALL.index(requested)
+                    weights[req_idx] = 0.0
+                    weights /= weights.sum()
+                except ValueError:
+                    pass
+
+            idx = self._rng.choice(len(InversionType.ALL), size=remaining_n, replace=False, p=weights)
+            chosen.extend([InversionType.ALL[i] for i in idx])
+
+        return chosen
 
     def _apply(self, pred: np.ndarray, inv_type: str, ctx: np.ndarray) -> np.ndarray:
         inv = _apply_inversion(inv_type, pred, ctx, self._rng)
@@ -354,7 +394,9 @@ class AIMLayer:
         for pred, conf, info in predictions:
             out.append((pred, conf, {**info, "source": "original", "inversion_type": None}))
             inv_bias = info.get("bias").inversion_bias if info.get("bias") else 0.3
-            for inv_type in self._pick_inversions(inv_bias):
+            requested = info.get("requested_inversion")
+
+            for inv_type in self._pick_inversions(inv_bias, requested=requested):
                 try:
                     inv = self._apply(pred, inv_type, ctx)
                     inv_conf = prediction_confidence(inv)
