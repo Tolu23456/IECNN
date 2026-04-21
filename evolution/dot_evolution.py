@@ -63,7 +63,8 @@ class DotEvolution:
             return dots
 
         dot_ids = [d.dot_id for d in dots]
-        eff = memory.all_effectivenesses(dot_ids)
+        # Use F24 Dot Fitness for selection
+        fitness = memory.all_fitness_scores(dot_ids)
         cfg = self.config
 
         # Minimum runs before evolution kicks in
@@ -79,8 +80,8 @@ class DotEvolution:
         n_cross    = max(1, int(n * cfg.crossover_fraction))
         n_random   = n - n_keep - n_clone - n_cross
 
-        # Sort indices by effectiveness
-        order = np.argsort(eff)[::-1]
+        # Sort indices by fitness
+        order = np.argsort(fitness)[::-1]
         elite_indices   = list(order[:n_keep])
         replace_indices = list(order[n_keep:])
 
@@ -95,7 +96,7 @@ class DotEvolution:
 
         # 2. Clones with mutation
         for _ in range(n_clone):
-            parent_idx = self._tournament_select(elite_indices, eff, cfg.tournament_size)
+            parent_idx = self._tournament_select(elite_indices, fitness, cfg.tournament_size)
             parent    = dots[parent_idx]
             child     = self._mutate(parent, cfg)
             try:
@@ -106,8 +107,8 @@ class DotEvolution:
 
         # 3. Crossover offspring
         for _ in range(n_cross):
-            p1_idx = self._tournament_select(elite_indices, eff, cfg.tournament_size)
-            p2_idx = self._tournament_select(elite_indices, eff, cfg.tournament_size)
+            p1_idx = self._tournament_select(elite_indices, fitness, cfg.tournament_size)
+            p2_idx = self._tournament_select(elite_indices, fitness, cfg.tournament_size)
             child = self._crossover(dots[p1_idx], dots[p2_idx])
             try:
                 slot = next(slots)

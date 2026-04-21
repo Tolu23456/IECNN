@@ -28,7 +28,8 @@ import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from formulas.formulas import (
     dominance_score, adaptive_learning_rate, temporal_stability,
-    emergent_utility_gradient,
+    emergent_utility_gradient, global_energy, system_objective,
+    stability_energy, exploration_pressure,
 )
 from convergence.convergence import Cluster
 
@@ -44,7 +45,7 @@ class StopReason:
 
 class IterationController:
     """
-    Manages the IECNN iteration loop.
+    Manages the IECNN iteration loop with an Energy-Based Objective.
 
     Usage:
       ctrl = IterationController(...)
@@ -78,6 +79,10 @@ class IterationController:
         self._centroid_history: List[Optional[np.ndarray]] = []
         self._score_history:    List[float] = []
         self._eug_history:      List[float] = []
+        self._entropy_history:  List[float] = []
+        self._stability_history: List[float] = []
+        self._energy_history:   List[float] = []
+        self._objective_history: List[float] = []
         self._stop_reason:      Optional[str] = None
         self._history:          List[Dict] = []
 
@@ -91,6 +96,10 @@ class IterationController:
         self._centroid_history.clear()
         self._score_history.clear()
         self._eug_history.clear()
+        self._entropy_history.clear()
+        self._stability_history.clear()
+        self._energy_history.clear()
+        self._objective_history.clear()
         self._stop_reason = None
         self._history.clear()
         self._best_round = 0
@@ -109,12 +118,36 @@ class IterationController:
         return float(self._history[-1].get("dominance", 0.0))
 
     def current_lr(self) -> float:
-        """Formula 14: adaptive learning rate based on current dominance."""
-        return adaptive_learning_rate(self.base_lr, self.current_dominance())
+        """Formula 14: adaptive learning rate based on current dominance and stability."""
+        dom = self.current_dominance()
+        stab = self._stability_history[-1] if self._stability_history else 0.5
+        # FIXED F14: η(t) = η0 * (1 - 0.8*D(t)^2) * (1 + 0.2*S(t))
+        return adaptive_learning_rate(self.base_lr, dom) * (1.0 + 0.2 * stab)
 
     def current_eug(self) -> float:
-        """Formula 16: Emergent Utility Gradient from current score history."""
-        return emergent_utility_gradient(self._score_history)
+        """Formula 16: Emergent Utility Gradient (improvement + entropy + stability)."""
+        return emergent_utility_gradient(
+            self._score_history, self._entropy_history, self._stability_history
+        )
+
+    def current_objective(self) -> float:
+        """F22: Master System Objective J(t)."""
+        if not self._objective_history: return 0.0
+        return self._objective_history[-1]
+
+    def current_energy(self) -> float:
+        """F21: Global Energy E(t)."""
+        if not self._energy_history: return 1.0
+        return self._energy_history[-1]
+
+    def current_stability(self) -> float:
+        """F25: Stability Energy S(t)."""
+        if not self._stability_history: return 0.0
+        return self._stability_history[-1]
+
+    def exploration_pressure(self) -> float:
+        """F26: Exploration Pressure X(t)."""
+        return exploration_pressure(self.current_stability(), self.current_dominance())
 
     def utility_acceleration(self) -> float:
         """ΔU = U(t) - U(t-1): rate of change of EUG across the last two rounds."""
@@ -144,23 +177,18 @@ class IterationController:
             return True, StopReason.DOMINANCE
 
         # 3. EUG — Emergent Utility Gradient (F16) (requires ≥ 3 rounds)
-        #    Replaces the old cluster-ID novelty_gain check, which always
-        #    returned 0 because cluster IDs reset to 0,1,2… each round.
         if self._round >= 3:
-            eug = emergent_utility_gradient(self._score_history)
+            eug = self.current_eug()
             if eug <= self.eug_thresh:
                 self._stop_reason = StopReason.EUG
                 return True, StopReason.EUG
 
         # 4. Temporal stability (centroid barely moved)
         if self._round >= 2 and len(self._centroid_history) >= 1:
-            curr_cent = clusters[0].centroid
-            prev_cent = self._centroid_history[-1]
-            if curr_cent is not None and prev_cent is not None:
-                ts = temporal_stability(curr_cent, prev_cent, self.alpha)
-                if ts >= self.stability_thresh:
-                    self._stop_reason = StopReason.STABILITY
-                    return True, StopReason.STABILITY
+            ts = self.current_stability()
+            if ts >= self.stability_thresh:
+                self._stop_reason = StopReason.STABILITY
+                return True, StopReason.STABILITY
 
         # 5. Score decline for `decline_patience` consecutive rounds
         if self._round >= self.decline_patience + 1:
@@ -174,35 +202,64 @@ class IterationController:
     # ── Round recording ──────────────────────────────────────────────
 
     def record_round(self, clusters: List[Cluster], stats: Dict):
+        ent = stats.get("entropy", 0.5)
+        self._entropy_history.append(float(ent))
+
         if clusters and clusters[0].centroid is not None:
-            self._centroid_history.append(clusters[0].centroid.copy())
+            curr_cent = clusters[0].centroid
+            self._centroid_history.append(curr_cent.copy())
             self._score_history.append(float(clusters[0].score))
 
-            # Rollback tracking: keep the best round's clusters
+            # Temporal instability
+            if len(self._centroid_history) >= 2:
+                prev_cent = self._centroid_history[-2]
+                instab = 1.0 - temporal_stability(curr_cent, prev_cent, self.alpha)
+            else:
+                instab = 0.5
+
+            # Stability Energy (F25)
+            stab = stability_energy(ent, instab)
+            self._stability_history.append(stab)
+
+            # Global Energy (F21)
+            scores = [c.score for c in clusters]
+            dom = dominance_score(scores[0], scores)
+            energy = global_energy(ent, dom, instab)
+            self._energy_history.append(energy)
+
+            # EUG (F16)
+            eug = self.current_eug()
+            self._eug_history.append(eug)
+
+            # Master Objective J(t) (F22)
+            obj = system_objective(float(clusters[0].score), eug, energy)
+            self._objective_history.append(obj)
+
+            # Rollback tracking: keep the best round's objective
             if (self._best_clusters is None or
-                    float(clusters[0].score) >= float(self._best_clusters[0].score)):
+                    obj >= self._objective_history[self._best_round]):
                 self._best_round    = self._round
                 self._best_clusters = clusters[:]
-                self._best_centroid = clusters[0].centroid.copy()
+                self._best_centroid = curr_cent.copy()
         else:
             self._centroid_history.append(None)
             self._score_history.append(0.0)
-
-        scores = [c.score for c in clusters]
-        total  = sum(scores)
-        dom    = scores[0] / total if total > 1e-10 and scores else 0.0
-        eug    = emergent_utility_gradient(self._score_history)
-        self._eug_history.append(eug)
-        lr     = self.current_lr()
+            self._stability_history.append(0.0)
+            self._energy_history.append(1.0)
+            self._eug_history.append(0.0)
+            self._objective_history.append(-1.0)
 
         self._history.append({
             "round":     self._round,
             "clusters":  len(clusters),
             "top_score": float(clusters[0].score) if clusters else 0.0,
-            "dominance": float(dom),
-            "eug":       float(eug),
+            "dominance": float(dom) if clusters else 0.0,
+            "energy":    float(self.current_energy()),
+            "objective": float(self.current_objective()),
+            "stability": float(self.current_stability()),
+            "eug":       float(self.current_eug()),
             "delta_u":   float(self.utility_acceleration()),
-            "lr":        float(lr),
+            "lr":        float(self.current_lr()),
         })
         self._round += 1
 

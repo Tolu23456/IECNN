@@ -74,6 +74,39 @@ float adaptive_learning_rate(float base_lr, float dominance);
 float hierarchical_convergence_score(const float *centroids, const float *scores,
                                      int n, int dim, float alpha, float gamma);
 
+/* Formula 21: Global Energy Function
+ * E(t) = alpha*H(t) + beta*D(t) + gamma*||C_t - C_{t-1}||
+ */
+float global_energy(float entropy, float dominance, float instability,
+                    float alpha, float beta, float gamma);
+
+/* Formula 22: System Objective (Master Function)
+ * J(t) = C(t) + U(t) - E(t)
+ */
+float system_objective(float convergence, float utility, float energy);
+
+/* Formula 23: Memory Plasticity (rho)
+ * rho(t) = sigmoid(stability(t))
+ * rho = 1 / (1 + exp(-stability))
+ */
+float memory_plasticity(float stability);
+
+/* Formula 24: Dot Fitness Function
+ * F_d = R_d + alpha*C_d + beta*S_d + gamma*U_d - delta*N_d
+ */
+float dot_fitness(float rd, float cd, float sd, float ud, float nd,
+                  float alpha, float beta, float gamma, float delta);
+
+/* Formula 25: Stability Energy
+ * S(t) = 1 - (lambda1*H(t) + lambda2*||C_t - C_{t-1}||)
+ */
+float stability_energy(float entropy, float instability, float lambda1, float lambda2);
+
+/* Formula 26: Exploration Pressure
+ * X(t) = 1 - S(t) + (1 - D(t))
+ */
+float exploration_pressure(float stability, float dominance);
+
 /* Formula 17 extension: Convergence Score Ultra
  * Adds a repellent term that penalises proximity to a previously-seen centroid,
  * preventing the cluster from collapsing back to an earlier attractor.
