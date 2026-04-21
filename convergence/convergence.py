@@ -100,7 +100,34 @@ class Cluster:
     @property
     def size(self): return len(self.predictions)
     @property
-    def num_micro(self): return len(self._micro_clusters)
+    def num_micro(self) -> int: return len(self._micro_clusters)
+
+    def sources(self) -> Dict[str, int]:
+        counts: Dict[str, int] = {}
+        for info in self.infos:
+            s = info.get("source", "unknown")
+            counts[s] = counts.get(s, 0) + 1
+        return counts
+
+    def dot_types(self) -> Dict[str, int]:
+        counts: Dict[str, int] = {}
+        for info in self.infos:
+            t = info.get("dot_type", "unknown")
+            counts[t] = counts.get(t, 0) + 1
+        return counts
+
+    def modalities(self) -> Dict[str, int]:
+        """Distribution of modalities within this cluster."""
+        counts: Dict[str, int] = {}
+        for info in self.infos:
+            m = info.get("modality", "unknown")
+            counts[m] = counts.get(m, 0) + 1
+        return counts
+
+    def __repr__(self):
+        return (f"Cluster(id={self.cluster_id}, size={self.size}, "
+                f"score={self.score:.4f}, micro={self.num_micro})")
+
 
 class ConvergenceLayer:
     def __init__(self, micro_threshold=0.60, macro_threshold=0.40, alpha=0.7, gamma=0.3, dominance_threshold=0.70, cross_type_bonus=0.15):
@@ -116,8 +143,18 @@ class ConvergenceLayer:
         preds = [c[0] for c in candidates]
         confs = [c[1] for c in candidates]
         infos = [c[2] for c in candidates]
-        micro_clusters = self._micro_cluster(preds, confs, infos)
-        for mc in micro_clusters: mc.compute_score(self.alpha)
+
+        # Multi-modal boost: slightly lower threshold for cross-modal agreement
+        # to encourage the emergence of unified concepts.
+        is_mixed = len(set(info.get("modality", "unknown") for info in infos)) > 1
+        current_micro_thresh = self.micro_thresh * 0.9 if is_mixed else self.micro_thresh
+
+        # Stage 1: micro-clustering
+        micro_clusters = self._micro_cluster(preds, confs, infos, current_micro_thresh)
+        for mc in micro_clusters:
+            mc.compute_score(self.alpha)
+
+        # Stage 2: macro-clustering over micro-cluster centroids
         macro_clusters = self._macro_cluster(micro_clusters)
         for cl in macro_clusters:
             cl.compute_score(self.alpha, self.gamma)
@@ -130,26 +167,19 @@ class ConvergenceLayer:
                     if info in mc.infos: assign[i] = cl.cluster_id
         return macro_clusters, assign
 
-    def _micro_cluster(self, preds, confs, infos, threshold=None):
-        if threshold is None: threshold = self.micro_thresh
-        lib = _load_lib()
-        if lib and preds:
-            n = len(preds)
-            dim = len(preds[0])
-            stk = np.ascontiguousarray(np.stack(preds), np.float32)
-            assigns = np.zeros(n, dtype=np.int32)
-            cents_buf = np.zeros((n, dim), dtype=np.float32)
-            num_c = lib.greedy_cluster(_fp(stk)[0], ctypes.c_int(n), ctypes.c_int(dim),
-                                      ctypes.c_float(threshold), ctypes.c_float(self.alpha),
-                                      assigns.ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
-                                      _fp(cents_buf)[0])
-            clusters = [MicroCluster(i) for i in range(num_c)]
-            for i, cid in enumerate(assigns): clusters[cid].add(preds[i], confs[i], infos[i])
-            return clusters
+    # ── Stage 1: Micro-clustering ────────────────────────────────────
 
-        # Fallback
-        clusters = []
-        centroids = []
+    def _micro_cluster(self, preds: List[np.ndarray], confs: List[float],
+                       infos: List[Dict], threshold: Optional[float] = None) -> List[MicroCluster]:
+        """
+        Sequential greedy micro-clustering.
+        A prediction joins an existing micro-cluster if its similarity to
+        the cluster centroid exceeds micro_threshold.
+        """
+        if threshold is None: threshold = self.micro_thresh
+        clusters: List[MicroCluster] = []
+        centroids: List[np.ndarray]  = []
+
         for i, (p, c, info) in enumerate(zip(preds, confs, infos)):
             best_cid, best_sim = -1, threshold
             for cid, cent in enumerate(centroids):
