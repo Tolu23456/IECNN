@@ -11,12 +11,14 @@ implementing a novel neural architecture. It runs entirely in the terminal
 ## Running the App
 
 ```bash
-python main.py             # full interactive demo (recommended)
-python main.py build       # (re)compile C extensions
-python main.py encode "text"
-python main.py sim "text A" "text B"
-python main.py compare "a" "b" "c"
-python main.py memory
+python main.py                          # full interactive demo (recommended)
+python main.py train data/corpus.txt    # train on large text file, then interactive
+python main.py generate "prompt"        # encode prompt → decode output text
+python main.py encode "text"            # encode → 256-dim latent
+python main.py sim "text A" "text B"    # cosine similarity
+python main.py compare "a" "b" "c"      # n×n similarity table
+python main.py memory                   # dot memory + evolution state
+python main.py build                    # (re)compile C extensions
 ```
 
 The workflow is configured to run `python main.py` via the Replit workflow named
@@ -27,12 +29,12 @@ The workflow is configured to run `python main.py` via the Replit workflow named
 ## Dependencies
 
 **System:** Python 3.10+, gcc (for C extensions)
-**Python:** numpy (only external dependency)
+**Python:** numpy, Pillow (image and video decoding)
 **C:** compiled automatically by `build.sh` on first run
 
-Install numpy if missing:
+Install missing packages if needed:
 ```bash
-pip install numpy
+pip install numpy Pillow
 ```
 
 Compile C extensions:
@@ -53,21 +55,21 @@ python main.py build
 ├── main.py                 CLI entry point
 ├── build.sh                gcc compilation script
 ├── README.md               Full architecture documentation
-├── formulas.md             All 15 formulas with derivations
+├── formulas.md             All 20 formulas with derivations
 ├── CHANGELOG.md            Version history
 ├── replit.md               This file
 │
 ├── neural_dot/             The core prediction unit
-│   └── neural_dot.py       NeuralDot, BiasVector, DotGenerator, DotType
+│   └── neural_dot.py       NeuralDot, BiasVector, DotGenerator, DotType (8 types)
 │
-├── basemapping/            Input → structured matrix
+├── basemapping/            Input → 256-dim structured matrix
 │   ├── basemapping.py      BaseMapper, BaseMap
 │   ├── basemapping.c       C acceleration
 │   └── basemapping_c.so    Compiled C library
 │
 ├── aim/                    Attention Inverse Mechanism (9 inversions)
 │   ├── aim.py              AIMLayer, InversionType, 9 inversion functions
-│   ├── aim.c               C acceleration for original 6
+│   ├── aim.c               C acceleration
 │   └── aim_c.so
 │
 ├── convergence/            Two-level hierarchical clustering
@@ -82,7 +84,10 @@ python main.py build
 │   └── iteration.py        IterationController (5 stops, adaptive LR, rollback)
 │
 ├── pipeline/               Integration of all layers
-│   └── pipeline.py         IECNN (main model class), IECNNResult
+│   └── pipeline.py         IECNN (main model class), fit_file(), generate()
+│
+├── decoding/               Output reconstruction
+│   └── decoder.py          IECNNDecoder — latent → text / image / audio / video
 │
 ├── memory/                 Persistent state across iterations and calls
 │   ├── dot_memory.py       DotMemory — per-dot effectiveness and hints
@@ -95,7 +100,7 @@ python main.py build
 │   └── metrics.py          IECNNMetrics, RunMetrics
 │
 └── formulas/               Mathematical engine (Python + C)
-    ├── formulas.py          All 15 formulas, ctypes bindings
+    ├── formulas.py          All 20 formulas + F18/F19/F20 (Python-only)
     ├── formulas.c           C implementations (F1–F15)
     ├── formulas.h           C header
     └── formulas_c.so        Compiled
@@ -106,30 +111,48 @@ python main.py build
 ## Architecture Notes
 
 ### Neural Dots
-- 6 types: SEMANTIC, STRUCTURAL, CONTEXTUAL, RELATIONAL, TEMPORAL, GLOBAL
-- 3 prediction heads per dot (per-head projection matrices)
+- 8 types: SEMANTIC, STRUCTURAL, CONTEXTUAL, RELATIONAL, TEMPORAL, GLOBAL, LOGIC, MORPH
+- 4 prediction heads per dot (per-head projection matrices); 128 dots total
 - Bias vector (5-dim): attention, granularity, abstraction, inversion, temperature
 - Memory-guided attention: recent centroid from DotMemory used as query hint
 
 ### Formulas
-All 15 formulas are implemented in Python (fallback) and C (primary).
+F1–F17 implemented in Python (fallback) and C (primary via ctypes).
+F18 (Cross-Modal Binding), F19 (Semantic Drift), F20 (Vocab Coverage) — Python-only.
 C .so files use `_c.so` suffix to avoid colliding with Python module names.
 
 ### BaseMapping
 - Primitives (a-z, 0-9, punct) are pre-seeded and always available
-- Each token = exactly ONE matrix row (words never split into char rows)
+- Each token = exactly ONE 256-dim row (words never split into char rows)
 - Unknown words → 'composed' type (weighted char-base combination)
-- Feature layout: [96 embed | 8 pos | 4 freq | 16 flags | 4 ctx]
+- Feature layout: [224 embed | 8 pos | 4 freq | 16 flags (incl. 4 modality) | 4 ctx]
+- Modality flags at dims 248:252 (text/image/audio/video — one-hot)
+
+### Multimodal Transforms
+- **Image**: lossless 8×8 patches + global stats → stacked feature vector (numpy-only, PIL for I/O)
+- **Audio**: numpy FFT-based MFCC approximation (no librosa)
+- **Video**: PIL ImageSequence frame-by-frame processing (no cv2)
+
+### Decoder (IECNNDecoder)
+- Two-stage greedy text decoding: Stage 1 ranks all vocab by embedding cosine (cheap),
+  Stage 2 selects tokens greedily by average embedding similarity (no full pipeline calls)
+- Image decode: latent dims mapped to pixel pattern via sinusoidal gradient
+- Audio decode: latent dims mapped to frequency components via numpy synthesis
 
 ### Iteration Loop
 - 5 stopping conditions (budget, dominance, novelty gain, stability, decline)
 - Adaptive LR via Formula 14: eta(t) = eta_0 * (1 - 0.8 * dom²)
 - Rollback to best-scoring round if final round regressed
+- Thresholds recalibrated for 256-dim: micro=0.25, macro=0.15, dom=0.35
 
 ### Evolution
 - Runs between calls (not during a call)
 - Uses DotMemory effectiveness scores to rank dots
 - Tournament selection + mutation + crossover + random injection
+
+### Large Dataset Training
+- `fit_file(path, verbose=True)` — stream one sentence per line, batch train
+- `generate(prompt, max_tokens=8, iterations=20)` — prompt → latent → decoded text
 
 ---
 
@@ -146,7 +169,7 @@ C .so files use `_c.so` suffix to avoid colliding with Python module names.
 
 ## Version
 
-Current: **v0.6.0** — see CHANGELOG.md for full history.
+Current: **v0.8.0** — see CHANGELOG.md for full history.
 
 ---
 

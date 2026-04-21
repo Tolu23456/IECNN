@@ -61,43 +61,86 @@ class IECNNDecoder:
 
         return None
 
-    def _generative_reconstruction_text(self, target_latent: np.ndarray,
-                                      max_tokens: int, iterations: int) -> str:
+    def _score_emb(self, emb: np.ndarray, target: np.ndarray) -> float:
+        """Fast cosine similarity between two vectors (no full pipeline)."""
+        a_norm = float(np.linalg.norm(emb))
+        b_norm = float(np.linalg.norm(target))
+        if a_norm < 1e-10 or b_norm < 1e-10:
+            return 0.0
+        return float(np.dot(emb / a_norm, target / b_norm))
+
+    def _build_candidate_emb(self, tokens: list) -> np.ndarray:
         """
-        Greedy iterative reconstruction of the text sequence.
+        Cheap 256-dim candidate vector built purely from base embeddings —
+        no pipeline call needed.  Average token base-embeddings, pad to
+        FEATURE_DIM with zeros for the modifier dims.
+        """
+        vecs = []
+        for tok in tokens:
+            emb = self.mapper._base_vocab.get(tok)
+            if emb is None:
+                emb = self.mapper._compose_word_embedding(tok)
+            vecs.append(emb.astype(np.float32))
+        if not vecs:
+            return np.zeros(FEATURE_DIM, dtype=np.float32)
+        avg = np.mean(vecs, axis=0)
+        out = np.zeros(FEATURE_DIM, dtype=np.float32)
+        out[:len(avg)] = avg
+        return out
+
+    def _generative_reconstruction_text(self, target_latent: np.ndarray,
+                                         max_tokens: int, iterations: int) -> str:
+        """
+        Fast greedy text reconstruction using two cheap stages:
+
+          Stage 1: rank ALL vocab words by cosine similarity to the target
+                   latent's base region (dims 0:EMBED_DIM).  O(|vocab|).
+          Stage 2: for each token position, average the chosen tokens' base
+                   embeddings and pick the next candidate that maximises
+                   cosine similarity to the full target latent.
+                   No full pipeline calls — runs in milliseconds.
         """
         if not self.mapper.is_fitted or not self.mapper._base_vocab:
             return "[unknown]"
 
-        current_tokens = []
-        best_sim = -1.0
+        # Stage 1 — cheap pre-ranking using raw base embeddings
+        vocab_words = [w for w in self.mapper._base_vocab if " " not in w]
+        if not vocab_words:
+            vocab_words = list(self.mapper._base_vocab.keys())
+        if not vocab_words:
+            return "..."
 
-        vocab_list = list(self.mapper._base_vocab.keys())
-        # Filter vocab to common words to speed up
-        search_vocab = [w for w in vocab_list if ' ' not in w] # Only unigrams for reconstruction
-        if not search_vocab: search_vocab = vocab_list
+        target_base = target_latent[:EMBED_DIM].astype(np.float32)
 
-        for _ in range(max_tokens):
-            best_next_token = None
+        scored: list = []
+        for word in vocab_words:
+            emb = self.mapper._base_vocab[word].astype(np.float32)
+            cos = self._score_emb(emb, target_base)
+            scored.append((cos, word))
+        scored.sort(key=lambda x: -x[0])
+
+        # Top-K candidates for Stage 2
+        k = min(max(iterations, 20), len(scored))
+        top_k = [w for _, w in scored[:k]]
+
+        # Stage 2 — greedy token selection using cheap average-embedding score
+        current_tokens: list = []
+        best_sim: float = -1.0
+
+        for _step in range(max_tokens):
+            best_next: str = ""
             improved = False
 
-            # Sample vocab to keep it fast
-            sample_size = min(200, len(search_vocab))
-            candidates = self._rng.choice(search_vocab, sample_size, replace=False)
-
-            for token in candidates:
-                test_seq = " ".join(current_tokens + [token])
-                # Encode the candidate sequence
-                test_latent = self.model.encode(test_seq)
-                sim = similarity_score(test_latent, target_latent, self.alpha)
-
-                if sim > best_sim:
+            for token in top_k:
+                cand_emb = self._build_candidate_emb(current_tokens + [token])
+                sim = self._score_emb(cand_emb, target_latent)
+                if sim > best_sim + 1e-4:
                     best_sim = sim
-                    best_next_token = token
+                    best_next = token
                     improved = True
 
-            if improved and best_next_token:
-                current_tokens.append(best_next_token)
+            if improved and best_next:
+                current_tokens.append(best_next)
             else:
                 break
 

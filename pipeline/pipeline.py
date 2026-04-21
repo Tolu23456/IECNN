@@ -75,9 +75,9 @@ class IECNN:
                  num_dots:              int   = 128,
                  n_heads:               int   = N_HEADS,
                  max_iterations:        int   = 12,
-                 micro_threshold:       float = 0.60,
-                 macro_threshold:       float = 0.40,
-                 dominance_threshold:   float = 0.70,
+                 micro_threshold:       float = 0.25,
+                 macro_threshold:       float = 0.15,
+                 dominance_threshold:   float = 0.35,
                  novelty_threshold:     float = 0.05,
                  stability_threshold:   float = 0.99,
                  alpha:                 float = 0.70,
@@ -138,6 +138,57 @@ class IECNN:
     def fit(self, texts: List[str]) -> "IECNN":
         """Discover word and phrase bases from a corpus."""
         self.base_mapper.fit(texts)
+        return self
+
+    def fit_file(self, filepath: str, batch_size: int = 500,
+                 verbose: bool = True) -> "IECNN":
+        """
+        Train on a large text file in streaming batches.
+
+        Reads the file line by line so arbitrarily large corpora fit in
+        memory.  Each batch_size lines are fed to fit() which enriches the
+        BaseMapper vocabulary with word/phrase co-occurrences and IDF weights.
+        After the last batch the persistence path is saved (if set).
+
+        Args:
+          filepath   — path to a UTF-8 plain-text file (one sentence per line)
+          batch_size — lines per training batch (default 500)
+          verbose    — print progress to stdout
+
+        Returns self for chaining.
+        """
+        if not os.path.exists(filepath):
+            raise FileNotFoundError(f"Training file not found: {filepath}")
+
+        total_lines = 0
+        batch: List[str] = []
+
+        with open(filepath, "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                batch.append(line)
+                total_lines += 1
+                if len(batch) >= batch_size:
+                    self.base_mapper.fit(batch)
+                    batch = []
+                    if verbose:
+                        n_bases = len(self.base_mapper._base_vocab)
+                        print(f"[IECNN] Trained on {total_lines:>8} lines "
+                              f"│ vocab: {n_bases:>6} bases", end="\r")
+
+        if batch:
+            self.base_mapper.fit(batch)
+
+        if self.base_mapper.persistence_path:
+            self.base_mapper.save(self.base_mapper.persistence_path)
+
+        if verbose:
+            n_bases = len(self.base_mapper._base_vocab)
+            print(f"\n[IECNN] Training complete — {total_lines} lines "
+                  f"│ vocab: {n_bases} word/phrase bases")
+
         return self
 
     def _ensure_dots(self) -> list:
@@ -412,6 +463,41 @@ class IECNN:
         # Split on . ! ? followed by space or end of string
         parts = re.split(r'(?<=[.!?])\s+', text)
         return [p.strip() for p in parts if p.strip()]
+
+    def generate(self, prompt: str, max_tokens: int = 12,
+                 iterations: int = 40) -> str:
+        """
+        Encode a prompt to a latent vector, then decode back to text.
+
+        Uses a fast BaseMapper pooled-vector as the target latent (no full
+        pipeline call) so generation completes in under a second regardless
+        of model size.  For maximum semantic fidelity on a small model, pass
+        use_pipeline=True to the underlying decoder directly.
+
+        Args:
+          prompt     — input text to encode and then regenerate
+          max_tokens — maximum output tokens (default 12)
+          iterations — decoder search budget: higher = more thorough but slower
+
+        Returns a string, or the original prompt if the decoder cannot improve.
+        """
+        from decoding.decoder import IECNNDecoder
+        # Fast path: get latent from BaseMapper (no full pipeline call)
+        if self.base_mapper.is_fitted:
+            bm = self.base_mapper.fit_transform([prompt])
+            latent = bm.pool("mean").astype(np.float32)
+            # Pad to FEATURE_DIM if the pool output is shorter
+            if len(latent) < self.feature_dim:
+                padded = np.zeros(self.feature_dim, dtype=np.float32)
+                padded[:len(latent)] = latent
+                latent = padded
+        else:
+            latent = self.encode(prompt)
+
+        decoder = IECNNDecoder(self)
+        out = decoder.decode(latent, target_mode="text",
+                             max_tokens=max_tokens, iterations=iterations)
+        return out if out and out != "..." else prompt
 
     def similarity(self, a: str, b: str, update_brain: bool = False) -> float:
         """Similarity between two texts (F1)."""

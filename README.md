@@ -28,16 +28,17 @@ The answer that emerges is the output.
 ```
 INPUT
   ↓
-Layer 1:  Input              Raw text string
-Layer 2:  BaseMapping        Token → one 128-dim row  (structured, composable, enriched)
-Layer 3:  Dot Generation     64 dots × 6 types × 3 heads
+Layer 1:  Input              Raw text / image / audio / video
+Layer 2:  BaseMapping        Token → one 256-dim row  (structured, composable, enriched)
+Layer 3:  Dot Generation     128 dots × 8 types × 4 heads
 Layer 4:  Prediction         Each dot independently predicts
 Layer 5:  AIM                9 inversions run in parallel with originals
 Layer 6:  Pruning (S1)       Soft filter: confidence, near-duplicates, AIM cap
 Layer 7:  Convergence        Two-level hierarchical clustering (micro + macro)
 Layer 8:  Pruning (S2+S3)    Cluster compression + dynamic hard selection
 Layer 9:  Iteration Control  5 stopping conditions + adaptive LR + rollback
-Layer 10: Output             Normalized 128-dim vector (stable and reproducible)
+Layer 10: Output             Normalized 256-dim vector (stable and reproducible)
+                             → Decoded back to text / image / audio via IECNNDecoder
 ```
 
 ---
@@ -55,17 +56,19 @@ NeuralDot {
 }
 ```
 
-**Six specialization types:**
+**Eight specialization types:**
 - `SEMANTIC` — attends to embedding dims [0:64], fine granularity
 - `STRUCTURAL` — attends to structural/positional features [64:128]
 - `CONTEXTUAL` — global context view across the full sequence
 - `RELATIONAL` — detects cross-token interaction patterns
 - `TEMPORAL` — position-weighted sequential pooling
 - `GLOBAL` — uniform broad overview of the entire input
+- `LOGIC` — attends to flag/modifier dims, detects logical structure
+- `MORPH` — attends to morphological flag dims, specialises on word form
 
-**Multi-head prediction:** Each dot generates 3 predictions using different
-head-specific projection matrices. With 64 dots × 3 heads = 192 base predictions,
-plus AIM variants (up to 9 inversions each), the convergence layer sees hundreds of
+**Multi-head prediction:** Each dot generates 4 predictions using different
+head-specific projection matrices. With 128 dots × 4 heads = 512 base predictions,
+plus AIM variants (up to 9 inversions each), the convergence layer sees thousands of
 competing candidates per round.
 
 **Memory-guided attention:** DotMemory tracks which dots' predictions historically
@@ -94,10 +97,10 @@ enter Convergence together, competing fairly.
 
 ## Convergence — Two-Level Hierarchical Clustering
 
-**Level 1 — Micro-clustering** (threshold 0.60):
+**Level 1 — Micro-clustering** (threshold 0.25):
 Groups very similar predictions. Produces tight, high-confidence micro-clusters.
 
-**Level 2 — Macro-clustering** (threshold 0.40):
+**Level 2 — Macro-clustering** (threshold 0.15):
 Groups micro-cluster centroids. Scored via Formula 15 (Hierarchical Convergence Score).
 
 **Centroid:** Confidence-weighted mean of all predictions in the macro-cluster.
@@ -107,7 +110,7 @@ a cluster, its score is boosted by up to 15%.
 
 ---
 
-## Formulas (F1–F17)
+## Formulas (F1–F20)
 
 | # | Name | Purpose |
 |---|---|---|
@@ -128,6 +131,9 @@ a cluster, its score is boosted by up to 15%.
 | F15 | Hierarchical Conv. Score | mean_C·(1 + γ·cross_sim) |
 | F16 | Emergent Utility Gradient | U(t) = E[C_{t+1}] − C_t  (EUG) |
 | F17 | Dot Reinforcement Pressure | R_d = λ1·C_d + λ2·S_d + λ3·U_n·(1+β·ΔU) − λ4·N_d |
+| F18 | Cross-Modal Binding | CMB = (cos(zA,zB) + \|mean(zA+zB)\|/√d − 1) / 2 |
+| F19 | Semantic Drift | SD = 1 − cos(zA, zB) — measures representational shift across modalities |
+| F20 | Vocabulary Coverage | VC = \|{t: type∈{word,phrase}}\| / \|tokens\| — fraction of known bases |
 
 Full derivations and parameter tables: see `formulas.md`.
 
@@ -210,15 +216,16 @@ Gaussian noise and context_entropy is raised by 0.30 for the next round.
 
 ## BaseMapping
 
-One 128-dimensional row per token. Words are **never** split into character rows.
+One 256-dimensional row per token. Words are **never** split into character rows.
 
 ```
-Feature vector layout (128 dims):
-  [0  : 96 ]  Base embedding      (stable hash + char composition + cooccurrence enrichment)
-  [96 : 104]  Position encoding   (8 sinusoidal sin/cos pairs)
-  [104: 108]  Frequency features  (relative, log, tanh, sigmoid)
-  [108: 124]  Modifier flags      (type, structural, morphological suffix markers)
-  [124: 128]  Context summary     (semantic cohesion, balance, phrase/vocab density)
+Feature vector layout (256 dims):
+  [0  : 224]  Base embedding      (stable hash + char composition + cooccurrence enrichment)
+  [224: 232]  Position encoding   (8 sinusoidal sin/cos pairs)
+  [232: 236]  Frequency features  (relative, log, tanh, sigmoid)
+  [236: 252]  Modifier flags      (type, structural, morphological suffix markers)
+  [248: 252]  Modality flags      (text / image / audio / video — one-hot)
+  [252: 256]  Context summary     (semantic cohesion, balance, phrase/vocab density)
 ```
 
 **Token types:**
@@ -243,21 +250,22 @@ Feature vector layout (128 dims):
 
 ```
 iecnn/
-├── main.py                 CLI entry point
+├── main.py                 CLI entry point (demo / train / generate / encode / sim / compare)
 ├── build.sh                Compile all C extensions
 ├── README.md               This file
-├── formulas.md             Full formula derivations (F1–F17)
+├── formulas.md             Full formula derivations (F1–F20)
 ├── CHANGELOG.md            Version history
 ├── plans.md                Project TODOs and roadmap
 ├── replit.md               Setup and architecture notes
 │
-├── neural_dot/             Neural Dot (6 types, 3 heads, memory-guided)
-├── basemapping/            Token → BaseMap (primitives, cooccurrence, bigrams)
+├── neural_dot/             Neural Dot (8 types, 4 heads, memory-guided)
+├── basemapping/            Token → 256-dim BaseMap (primitives, cooccurrence, bigrams)
 ├── aim/                    AIM (9 inversions, attention refinement)
-├── convergence/            Two-level hierarchical clustering
+├── convergence/            Two-level hierarchical clustering (micro 0.25 / macro 0.15)
 ├── pruning/                3-stage candidate & cluster filtering
 ├── iteration/              Iteration control (5 stops, rollback, adaptive LR, EUG)
-├── pipeline/               Full IECNN pipeline (all layers + selection pressure)
+├── pipeline/               Full IECNN pipeline (all layers + fit_file + generate)
+├── decoding/               IECNNDecoder — latent → text / image / audio / video
 │
 ├── memory/                 Per-dot and cluster memory systems
 │   ├── dot_memory.py       Effectiveness tracking, DRP, hard selection
@@ -270,7 +278,7 @@ iecnn/
 │   └── metrics.py          RunMetrics, IECNNMetrics (F10–F15)
 │
 └── formulas/               Mathematical engine
-    ├── formulas.py         Python + ctypes bindings (F1–F17 + amplify_pressure)
+    ├── formulas.py         Python + ctypes bindings (F1–F20 + amplify_pressure)
     ├── formulas.c          C implementations (F1–F15)
     └── formulas.h          C header with all signatures
 ```
@@ -283,8 +291,11 @@ iecnn/
 # Full interactive demo (recommended first run)
 python main.py
 
-# Compile C extensions manually
-python main.py build
+# Train on a large text file, then drop into interactive mode
+python main.py train data/corpus.txt
+
+# One-shot generation: encode prompt → decode output
+python main.py generate "attention mechanisms focus"
 
 # Encode text to vector
 python main.py encode "neural convergence"
@@ -297,7 +308,20 @@ python main.py compare "text A" "text B" "text C"
 
 # Memory and evolution state
 python main.py memory
+
+# Compile C extensions manually
+python main.py build
 ```
+
+**Interactive mode commands** (available after `python main.py` or `python main.py train`):
+
+| Command | Description |
+|---|---|
+| `generate <prompt>` | Encode prompt → decode output text |
+| `train <filepath>` | Train on a text file (one sentence/line) |
+| `sim A \| B` | Cosine similarity between two texts |
+| `memory` | Show dot memory + evolution state |
+| `quit` / `q` | Exit |
 
 ---
 

@@ -20,10 +20,30 @@ Tracked ideas, fixes, and features. Mark items done with [x] as work completes.
 - [x] BaseMapping v2: morphological suffix flags (verb/noun/adj detection)
 - [x] BaseMapping v2: semantic context summary (embedding cosine to neighbors)
 - [x] BaseMapping v2: IDF-weighted pooling option
+- [x] FEATURE_DIM upgrade: 128 → 256 (EMBED=224, POS=8, FREQ=4, FLAGS=16, CTX=4)
+- [x] 8 dot types: added LOGIC and MORPH specializations
+- [x] 4 prediction heads per dot (up from 3), 128 dots (up from 64)
+- [x] F18 Cross-Modal Binding — measures latent alignment across modalities
+- [x] F19 Semantic Drift — measures representational shift between modality encodings
+- [x] F20 Vocabulary Coverage — fraction of input tokens with known corpus bases
+- [x] Multimodal image transform: lossless 8×8 patches + stats (numpy-only, no cv2)
+- [x] Multimodal audio transform: pure numpy FFT (no librosa)
+- [x] Multimodal video transform: PIL ImageSequence (no cv2)
+- [x] fit_file(): streaming large-dataset training (one sentence per line)
+- [x] generate(): prompt → latent → fast greedy text decoding
+- [x] IECNNDecoder: latent → text (two-stage cheap greedy), image, audio, video
+- [x] train / generate CLI commands (python main.py train <file>, python main.py generate "prompt")
+- [x] Convergence threshold recalibration for 256-dim/128-dot regime (micro 0.25, macro 0.15, dom 0.35)
+- [x] generate interactive command inside demo loop
 
 ---
 
 ## Active / Near-term
+
+### Decoder quality
+- [ ] Beam search in Stage 2 of text decoder (width 3–5): keep top-N partial sequences instead of greedy argmax to reduce first-token errors
+- [ ] Add common function words to `_base_vocab` as guaranteed entries so short frequent words are always decodable even with small corpora
+- [ ] Expose `model.save()` / `model.load()` so trained vocab persists to disk between CLI sessions
 
 ### Stopping condition tuning
 - [ ] Dynamic EUG threshold: scale threshold with round number
@@ -49,25 +69,24 @@ Tracked ideas, fixes, and features. Mark items done with [x] as work completes.
 ## Medium-term
 
 ### BaseMapping
-- [ ] Larger corpus: expose a --corpus flag so users can feed a text file
-      for richer cooccurrence and vocabulary discovery
 - [ ] Subword decomposition for morphologically rich words (e.g. "unbelievably"
       → un + believ + able + ly) using a simple morpheme split heuristic
 - [ ] C acceleration for cooccurrence smoothing pass (currently Python loop)
 - [ ] Attention-based pooling in BaseMap.pool() — weight tokens by their
       query-key similarity to the sentence centroid
 
-### Dot architecture
-- [ ] Expand dot pool from 64 → 128 for longer / denser inputs
-- [ ] Add a 7th dot type: MORPHOLOGICAL — specifically attends to the
-      morphological flag dims (108:124) to specialise on word structure
-- [ ] Head count from 3 → 4 (adds ~33% candidate diversity at low cost)
-
 ### Pipeline
 - [ ] Multi-pass refinement: run a second lightweight convergence pass on the
       top 3 cluster centroids after the main loop exits
 - [ ] Output ensemble: if multiple calls on similar inputs produce close outputs,
       average them for a more stable embedding
+
+### Multimodal
+- [ ] Image generation: improve `_decode_image` with pattern-based rendering using
+      more latent dims (currently only dims 0–4 are used)
+- [ ] Audio generation: use latent dims to drive harmonic envelope and beat frequency
+      instead of two fixed sinusoids
+- [ ] Multimodal training: `fit_file` for image/audio datasets (one path per line)
 
 ---
 
@@ -78,14 +97,15 @@ Tracked ideas, fixes, and features. Mark items done with [x] as work completes.
       similarity judgements (STS-B subset, license-free)
 - [ ] Track quality score distribution across 100+ inputs; plot histogram
 - [ ] Compare IECNN vs random-projection baseline on retrieval@k
+- [ ] Use F20 (vocab coverage) as a proxy for OOV rate; plot vs training size
 
 ### Architecture experiments
-- [ ] FEATURE_DIM = 256 variant: double the embedding space, test whether
-      richer input representation improves convergence
 - [ ] Replace AIM's 9 fixed inversions with learned inversion types driven
       by dot type — semantic dots propose different inversions than temporal
 - [ ] Hierarchical input: allow multi-sentence input where each sentence is
       a separate BaseMap, and a top-level convergence layer fuses them
+- [ ] Use F18/F19 as a training signal: if cross-modal binding is low, increase
+      modality-specific dot specialization
 
 ### Publication / sharing
 - [ ] Write a short technical paper describing the IECNN architecture

@@ -466,8 +466,77 @@ def batch_similarity(queries: np.ndarray, targets: np.ndarray, alpha: float = 0.
                                  ctypes.c_int(n_t), ctypes.c_int(dim),
                                  ctypes.c_float(alpha), _fp(out)[0])
         return out
-    # Fallback
     for i in range(n_q):
         for j in range(n_t):
             out[i, j] = similarity_score(queries[i], targets[j], alpha)
     return out
+
+
+# ── Formula 18: Cross-Modal Binding Score ────────────────────────────
+
+def cross_modal_binding(v_text: np.ndarray, v_modal: np.ndarray,
+                        alpha: float = 0.7,
+                        modal_flag_start: int = 248,
+                        modal_flag_end:   int = 252) -> float:
+    """
+    F18: CMB(t, v) = S(t, v) × (1 + 0.3 × modal_diversity)
+
+    Rewards high semantic similarity between a text vector and a non-text
+    modal vector, with a bonus when their modality flags are distinct
+    (confirming they truly come from different modalities that have been
+    aligned rather than two copies of the same modality).
+
+    modal_flag_start/end: slice indices of the modality one-hot flags inside
+    the feature vector (default dims 248:252 for the 256-dim IECNN layout).
+    """
+    base_sim = similarity_score(v_text, v_modal, alpha)
+    if len(v_text) > modal_flag_end and len(v_modal) > modal_flag_end:
+        flag_diff = float(np.mean(np.abs(
+            v_text[modal_flag_start:modal_flag_end].astype(np.float32) -
+            v_modal[modal_flag_start:modal_flag_end].astype(np.float32)
+        )))
+        bond = 1.0 + 0.3 * flag_diff
+    else:
+        bond = 1.0
+    return float(np.clip(base_sim * bond, -1.0, 1.0))
+
+
+# ── Formula 19: Semantic Drift Score ─────────────────────────────────
+
+def semantic_drift(input_latent: np.ndarray, output_latent: np.ndarray,
+                   alpha: float = 0.7) -> float:
+    """
+    F19: SD(z_in, z_out) = 1 − S(z_in, z_out)
+
+    Measures how far the model's output drifted from the input in latent
+    space.  SD → 0 means the output stayed very close to the input
+    (conservative / copy-like).  SD → 1 means maximal divergence
+    (the model explored far from its starting point).
+
+    Useful for monitoring generative fidelity vs creativity trade-off.
+    """
+    return float(np.clip(1.0 - similarity_score(input_latent, output_latent, alpha),
+                         0.0, 1.0))
+
+
+# ── Formula 20: Vocabulary Coverage Score ────────────────────────────
+
+def vocab_coverage(token_types: List[str]) -> float:
+    """
+    F20: VC = |{t : type ∈ {word, phrase}}| / |tokens|
+
+    Fraction of input tokens that had known (fitted) bases in the
+    BaseMapper vocabulary.  Tokens of type 'composed' are unknown words
+    that fell back to character-level construction.
+
+    VC = 1.0 → perfect coverage (all tokens were seen in training).
+    VC = 0.0 → no coverage (model has never been trained, or all tokens
+                are novel).
+
+    Use after fit() or fit_file() to gauge training quality for a given
+    input domain.
+    """
+    if not token_types:
+        return 0.0
+    known = sum(1 for t in token_types if t in ("word", "phrase"))
+    return float(known / len(token_types))

@@ -3,12 +3,21 @@
 IECNN CLI — Iterative Emergent Convergent Neural Network
 
 Usage:
-  python main.py                       # full interactive demo
-  python main.py encode "text"         # encode text → 128-dim vector
-  python main.py sim "text A" "text B" # similarity between two texts
-  python main.py compare "a" "b" "c"  # n×n similarity table
-  python main.py memory                # show dot memory and evolution state
-  python main.py build                 # compile C extensions
+  python main.py                        # full interactive demo (train + encode + generate)
+  python main.py train <file>           # train on large text file, then interactive
+  python main.py generate "prompt"      # encode prompt → decode output text
+  python main.py encode "text"          # encode text → 256-dim latent vector
+  python main.py sim "text A" "text B"  # similarity between two texts
+  python main.py compare "a" "b" "c"   # n×n similarity table
+  python main.py memory                 # show dot memory and evolution state
+  python main.py build                  # compile C extensions
+
+  Interactive commands (available in all interactive modes):
+    generate <prompt>   encode prompt then decode output
+    train <filepath>    train on a text file (one sentence per line)
+    sim A | B           pairwise similarity
+    memory              dot memory + evolution state
+    quit / q            exit
 
 Component folders:
   aim/   basemapping/  convergence/  evaluation/
@@ -278,7 +287,7 @@ def cmd_demo():
     print("  ‣ Feature vector: [224 embed | 8 pos | 4 freq | 16 flags | 4 ctx]")
 
     print(f"\n{BAR}")
-    print("  Formula Summary (F1–F17)")
+    print("  Formula Summary (F1–F20)")
     print(BAR)
     formulas = [
         ("F1",  "Similarity Score",            "S(p,q) = α·cos(p,q) + (1-α)·A(p,q)"),
@@ -298,12 +307,20 @@ def cmd_demo():
         ("F15", "Hierarchical Conv. Score",    "HC(K) = mean_score · (1+γ·cross_sim)"),
         ("F16", "Emergent Utility Gradient",   "U(t) = E[C_{t+1}(p)] - C_t(p)"),
         ("F17", "Dot Reinforcement Pressure",  "R_d = λ1·C_d + λ2·S_d + λ3·U_n·(1+β·ΔU) - λ4·N_d"),
+        ("F18", "Cross-Modal Binding",         "CMB(t,v) = S(t,v) × (1 + 0.3·modal_diversity)"),
+        ("F19", "Semantic Drift",              "SD(z_in, z_out) = 1 − S(z_in, z_out)"),
+        ("F20", "Vocabulary Coverage",         "VC = |known_tokens| / |total_tokens|"),
     ]
     for fid, name, formula in formulas:
         print(f"  {fid:<4} {name:<28} {formula}")
 
     print(f"\n{BAR}")
-    print("  Interactive — enter text to encode, 'sim A | B', 'memory', or 'quit'")
+    print("  Interactive — type text to encode  │  Commands:")
+    print("    sim A | B          compute similarity between A and B")
+    print("    generate <prompt>  encode prompt then decode back to text")
+    print("    train <filepath>   train on a large text file (one line per sentence)")
+    print("    memory             show dot memory and evolution state")
+    print("    quit / q           exit")
     print(BAR)
     while True:
         try:
@@ -313,8 +330,10 @@ def cmd_demo():
         if not user: continue
         if user.lower() in ("q", "quit", "exit"):
             print("  Goodbye."); break
+
         if user.lower() == "memory":
             cmd_memory(model); continue
+
         if user.lower().startswith("sim ") and "|" in user:
             parts = user[4:].split("|", 1)
             from formulas.formulas import similarity_score
@@ -322,11 +341,32 @@ def cmd_demo():
             vb = model.encode(parts[1].strip())
             print(f"  Similarity: {similarity_score(va, vb):+.4f}")
             continue
+
+        if user.lower().startswith("generate "):
+            prompt = user[9:].strip()
+            if not prompt:
+                print("  Usage: generate <prompt>"); continue
+            print("  [generating...]", end="", flush=True)
+            out = model.generate(prompt)
+            print(f"\r  Output: {out}")
+            continue
+
+        if user.lower().startswith("train "):
+            fpath = user[6:].strip()
+            if not fpath:
+                print("  Usage: train <filepath>"); continue
+            try:
+                model.fit_file(fpath, verbose=True)
+            except FileNotFoundError as e:
+                print(f"  Error: {e}")
+            continue
+
         res = model.run(user, verbose=True)
-        m = res.metrics
+        m   = res.metrics
+        q   = f"{m.convergence_quality:.3f}" if m else "n/a"
         print(f"  → norm={np.linalg.norm(res.output):.3f}  "
               f"rounds={res.summary['rounds']}  stop='{res.stop_reason}'  "
-              f"quality={m.convergence_quality:.3f if m else 'n/a'}")
+              f"quality={q}")
 
 
 # ── Entry ─────────────────────────────────────────────────────────────
@@ -353,5 +393,39 @@ if __name__ == "__main__":
         cmd_compare(args[1:])
     elif args[0] == "memory":
         _build_c(); cmd_memory()
+    elif args[0] == "train" and len(args) >= 2:
+        filepath = args[1]
+        _build_c()
+        from pipeline.pipeline import IECNN
+        model = IECNN()
+        model.fit_file(filepath, verbose=True)
+        print("[IECNN] Model ready. Starting interactive mode...")
+        # Drop into interactive loop after training
+        from formulas.formulas import similarity_score
+        while True:
+            try:
+                user = input("\n  > ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print("\n  Goodbye."); break
+            if not user or user.lower() in ("q", "quit", "exit"):
+                break
+            if user.lower().startswith("generate "):
+                prompt = user[9:].strip()
+                print("  [generating...]", end="", flush=True)
+                out = model.generate(prompt)
+                print(f"\r  Output: {out}")
+            else:
+                res = model.run(user, verbose=True)
+                m   = res.metrics
+                q   = f"{m.convergence_quality:.3f}" if m else "n/a"
+                print(f"  → norm={np.linalg.norm(res.output):.3f}  "
+                      f"rounds={res.summary['rounds']}  quality={q}")
+    elif args[0] == "generate" and len(args) >= 2:
+        prompt = " ".join(args[1:])
+        _build_c()
+        model = _make_model(verbose=False)
+        print(f"[IECNN] Generating from: '{prompt}'")
+        out = model.generate(prompt)
+        print(f"  Output: {out}")
     else:
         print(__doc__)

@@ -423,101 +423,212 @@ class BaseMapper:
         return BaseMap(final_matrix, all_tokens, all_types, {}, {"mode": "fusion"})
 
     def _transform_image(self, img_path: str) -> BaseMap:
-        """Treat images as sentences of visual tokens (patches)."""
-        img = Image.open(img_path).convert("RGB")
-        img = img.resize((128, 128))
-        arr = np.array(img, dtype=np.float32) / 255.0
+        """
+        Treat images as sentences of visual tokens using 8×8 patch statistics.
 
-        # Split into 8x8 patches (16x16 pixels each)
-        ps = 16
-        patches = []
-        for r in range(0, 128, ps):
-            for c in range(0, 128, ps):
-                patch = arr[r:r+ps, c:c+ps]
-                patches.append(patch.flatten())
+        Each patch captures:
+          • raw 8×8×3 = 192 pixel values  (full lossless patch content)
+          • per-channel std (3 values)
+          • edge gradient energy (1 value)
+          • saturation approximation (1 value)
+        Total = 197 dims, zero-padded to EMBED_DIM (224).
+        This is lossless relative to the patch (no truncation) unlike the
+        previous 16×16 approach which discarded 70% of each patch.
+        """
+        img = Image.open(img_path).convert("RGB")
+        img = img.resize((64, 64))
+        arr = np.array(img, dtype=np.float32) / 255.0  # (64, 64, 3)
+
+        ps = 8          # 8-pixel patch side → 8×8=64 patches total
+        grid_dim = 64 // ps  # = 8
+        patches: List[np.ndarray] = []
+        patch_row_col: List[Tuple[int, int]] = []
+
+        for r in range(0, 64, ps):
+            for c in range(0, 64, ps):
+                patch = arr[r:r+ps, c:c+ps]        # (8, 8, 3)
+                raw   = patch.flatten()              # 192 values
+
+                # Spatial edge energy (gradient magnitude on luminance)
+                lum = patch.mean(axis=2)             # (8, 8)
+                gx  = np.diff(lum, axis=1)
+                gy  = np.diff(lum, axis=0)
+                edge = float(np.mean(np.abs(gx)) + np.mean(np.abs(gy)))
+
+                ch_std   = patch.std(axis=(0, 1))   # (3,)
+                sat_approx = float(patch.max(axis=2).mean()
+                                   - patch.min(axis=2).mean())
+
+                feat = np.concatenate([raw, ch_std, [edge, sat_approx]])
+                if len(feat) < EMBED_DIM:
+                    feat = np.pad(feat, (0, EMBED_DIM - len(feat)))
+                else:
+                    feat = feat[:EMBED_DIM]
+
+                n_val = np.linalg.norm(feat)
+                if n_val > 1e-10:
+                    feat = feat / n_val
+
+                patches.append(feat.astype(np.float32))
+                patch_row_col.append((r // ps, c // ps))
 
         n = len(patches)
         matrix = np.zeros((n, self.feature_dim), dtype=np.float32)
-        # 8x8 patches
-        grid_dim = int(np.sqrt(n))
-        for i, p in enumerate(patches):
-            feat = p[:EMBED_DIM]
-            if len(feat) < EMBED_DIM:
-                feat = np.pad(feat, (0, EMBED_DIM - len(feat)))
-            matrix[i, :EMBED_DIM] = feat
-            # Use 2D spatial encoding
-            matrix[i, EMBED_DIM:EMBED_DIM+POS_DIM] = self._position_enc(i, n, grid_dim=grid_dim)
-            # Flag as Image
+        for i, (p, (pr, pc)) in enumerate(zip(patches, patch_row_col)):
+            matrix[i, :EMBED_DIM] = p
+            spatial_idx = pr * grid_dim + pc
+            matrix[i, EMBED_DIM:EMBED_DIM+POS_DIM] = self._position_enc(
+                spatial_idx, n, grid_dim=grid_dim)
             matrix[i, EMBED_DIM+POS_DIM+FREQ_DIM+MOD_IMAGE] = 1.0
 
         return BaseMap(matrix, [f"patch_{i}" for i in range(n)],
                        ["visual"] * n, {}, {"mode": "image"})
 
     def _transform_audio(self, audio_path: str) -> BaseMap:
-        """Treat audio as sentences of spectral tokens."""
-        y, sr = librosa.load(audio_path, duration=5.0)
-        spec = np.abs(librosa.stft(y))
-        spec_db = librosa.amplitude_to_db(spec, ref=np.max)
+        """
+        Treat audio as sentences of spectral tokens using pure-numpy FFT.
+
+        No external library required — reads WAV via the standard `wave`
+        module and computes per-frame log-magnitude spectra with a Hann
+        window.  The first EMBED_DIM (224) FFT bins are kept, covering the
+        most energy-rich low frequencies for typical speech and music.
+        """
+        import wave as _wave
 
         n_tokens = 32
-        hop = spec_db.shape[1] // n_tokens
-        tokens = []
-        for i in range(n_tokens):
-            tokens.append(np.mean(spec_db[:, i*hop:(i+1)*hop], axis=1))
+        fft_size  = 512   # → 257 unique bins; we keep first 224
 
-        n = len(tokens)
+        try:
+            with _wave.open(audio_path, "rb") as wf:
+                n_channels   = wf.getnchannels()
+                sample_width = wf.getsampwidth()
+                sample_rate  = wf.getframerate()
+                # Limit to first 5 seconds
+                max_frames = sample_rate * 5
+                raw = wf.readframes(min(wf.getnframes(), max_frames))
+        except Exception:
+            # Unreadable — return a silent all-zero basemap
+            n = n_tokens
+            matrix = np.zeros((n, self.feature_dim), dtype=np.float32)
+            for i in range(n):
+                matrix[i, EMBED_DIM:EMBED_DIM+POS_DIM] = self._position_enc(i, n)
+                matrix[i, EMBED_DIM+POS_DIM+FREQ_DIM+MOD_AUDIO] = 1.0
+            return BaseMap(matrix, [f"spectral_{i}" for i in range(n)],
+                           ["spectral"] * n, {}, {"mode": "audio", "error": "unreadable"})
+
+        # Decode to float32 in [-1, 1]
+        if sample_width == 2:
+            samples = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+        elif sample_width == 1:
+            samples = (np.frombuffer(raw, dtype=np.uint8).astype(np.float32) / 128.0) - 1.0
+        else:
+            samples = np.frombuffer(raw, dtype=np.float32)
+
+        if n_channels > 1:
+            # Average channels to mono
+            samples = samples.reshape(-1, n_channels).mean(axis=1)
+
+        # Ensure enough samples for n_tokens frames
+        needed = fft_size + (n_tokens - 1) * (fft_size // 2)
+        if len(samples) < needed:
+            samples = np.pad(samples, (0, needed - len(samples)))
+
+        hann = np.hanning(fft_size).astype(np.float32)
+        hop  = (len(samples) - fft_size) // max(n_tokens - 1, 1)
+
+        spectral_tokens: List[np.ndarray] = []
+        for i in range(n_tokens):
+            start = i * hop
+            frame = samples[start:start + fft_size]
+            if len(frame) < fft_size:
+                frame = np.pad(frame, (0, fft_size - len(frame)))
+            # Log-magnitude spectrum (perceptual scale)
+            spectrum = np.abs(np.fft.rfft(frame * hann))[:EMBED_DIM]
+            spectrum = np.log1p(spectrum * 100.0)
+            s_max = np.max(spectrum)
+            if s_max > 1e-10:
+                spectrum /= s_max
+            if len(spectrum) < EMBED_DIM:
+                spectrum = np.pad(spectrum, (0, EMBED_DIM - len(spectrum)))
+            spectral_tokens.append(spectrum.astype(np.float32))
+
+        n = len(spectral_tokens)
         matrix = np.zeros((n, self.feature_dim), dtype=np.float32)
-        for i, t in enumerate(tokens):
-            feat = t[:EMBED_DIM]
-            if len(feat) < EMBED_DIM:
-                feat = np.pad(feat, (0, EMBED_DIM - len(feat)))
-            feat = (feat - np.mean(feat)) / (np.std(feat) + 1e-10)
-            matrix[i, :EMBED_DIM] = feat
+        for i, t in enumerate(spectral_tokens):
+            matrix[i, :EMBED_DIM] = t
             matrix[i, EMBED_DIM:EMBED_DIM+POS_DIM] = self._position_enc(i, n)
-            # Flag as Audio
             matrix[i, EMBED_DIM+POS_DIM+FREQ_DIM+MOD_AUDIO] = 1.0
 
         return BaseMap(matrix, [f"spectral_{i}" for i in range(n)],
                        ["spectral"] * n, {}, {"mode": "audio"})
 
     def _transform_video(self, video_path: str) -> BaseMap:
-        """Treat video as temporal sequence with motion extraction."""
-        cap = cv2.VideoCapture(video_path)
-        frames = []
-        diffs = []
-        prev_frame = None
+        """
+        Treat video as a temporal sequence of visual tokens.
 
-        while len(frames) < 16:
-            ret, frame = cap.read()
-            if not ret: break
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            frame_resized = cv2.resize(frame_rgb, (64, 64))
+        Accepts animated GIF / APNG / WebP (via PIL ImageSequence) or a
+        directory of image files sorted alphabetically.  Up to 16 frames
+        are extracted; each frame is down-sampled to 64×64 and represented
+        as an 8×8 block-mean tensor (8×8×3=192 dims), matching the image
+        transform for cross-modal consistency.  Motion (mean absolute frame
+        difference) is encoded in the final embedding dimension.
 
-            flat = frame_resized.flatten() / 255.0
-            frames.append(flat)
+        No cv2 dependency — uses only Pillow + numpy.
+        """
+        import glob as _glob
+        from PIL import ImageSequence as _IS
 
-            if prev_frame is not None:
-                # Simple motion extraction: frame difference
-                diff = cv2.absdiff(frame_gray, prev_frame)
-                diff = cv2.resize(diff, (64, 64)).flatten() / 255.0
-                diffs.append(diff)
-            else:
-                diffs.append(np.zeros_like(flat))
+        frames_rgb: List[np.ndarray] = []
 
-            prev_frame = frame_gray
-        cap.release()
+        try:
+            img = Image.open(video_path)
+            for i, frame in enumerate(_IS.Iterator(img)):
+                if i >= 16:
+                    break
+                f = np.array(frame.convert("RGB").resize((64, 64)),
+                             dtype=np.float32) / 255.0
+                frames_rgb.append(f)
+        except Exception:
+            pass
 
-        n = len(frames)
+        if not frames_rgb and os.path.isdir(video_path):
+            img_files: List[str] = []
+            for ext in ("*.png", "*.jpg", "*.jpeg", "*.bmp", "*.webp"):
+                img_files.extend(_glob.glob(os.path.join(video_path, ext)))
+            for fp in sorted(img_files)[:16]:
+                try:
+                    f = np.array(Image.open(fp).convert("RGB").resize((64, 64)),
+                                 dtype=np.float32) / 255.0
+                    frames_rgb.append(f)
+                except Exception:
+                    continue
+
+        if not frames_rgb:
+            frames_rgb = [np.zeros((64, 64, 3), dtype=np.float32)]
+
+        n = len(frames_rgb)
         matrix = np.zeros((n, self.feature_dim), dtype=np.float32)
-        for i, (f, d) in enumerate(zip(frames, diffs)):
-            # Combine visual feature and motion feature
-            feat = 0.7 * f[:EMBED_DIM] + 0.3 * d[:EMBED_DIM]
-            if len(feat) < EMBED_DIM:
-                feat = np.pad(feat, (0, EMBED_DIM - len(feat)))
-            matrix[i, :EMBED_DIM] = feat
+
+        for i, frame in enumerate(frames_rgb):
+            # 8×8 block means: (64,64,3) → (8,8,8,8,3).mean → (8,8,3) = 192 dims
+            block = frame.reshape(8, 8, 8, 8, 3).mean(axis=(2, 4)).flatten()
+            if len(block) < EMBED_DIM:
+                block = np.pad(block, (0, EMBED_DIM - len(block)))
+            else:
+                block = block[:EMBED_DIM]
+
+            # Temporal motion: mean absolute pixel diff vs previous frame
+            if i > 0:
+                motion = float(np.mean(np.abs(frames_rgb[i] - frames_rgb[i - 1])))
+                block = block.copy()
+                block[-1] = motion  # encode motion in last embedding dim
+
+            n_val = np.linalg.norm(block)
+            if n_val > 1e-10:
+                block = block / n_val
+
+            matrix[i, :EMBED_DIM] = block.astype(np.float32)
             matrix[i, EMBED_DIM:EMBED_DIM+POS_DIM] = self._position_enc(i, n)
-            # Flag as Video
             matrix[i, EMBED_DIM+POS_DIM+FREQ_DIM+MOD_VIDEO] = 1.0
 
         return BaseMap(matrix, [f"frame_{i}" for i in range(n)],
