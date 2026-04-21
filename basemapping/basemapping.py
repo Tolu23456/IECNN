@@ -59,11 +59,12 @@ def _load_lib():
     if os.path.exists(so_path):
         try:
             _lib = ctypes.CDLL(so_path)
-            _lib.compose_from_chars.restype     = None
-            _lib.sinusoidal_position_enc.restype = None
-            _lib.normalize_vector.restype       = None
-            _lib.mean_pool.restype              = None
-            _lib.attention_pool.restype         = None
+            _lib.compose_from_chars.restype      = None
+            _lib.sinusoidal_position_enc.restype  = None
+            _lib.normalize_vector.restype        = None
+            _lib.mean_pool.restype               = None
+            _lib.attention_pool.restype          = None
+            _lib.cooccurrence_smooth.restype     = None
         except Exception:
             _lib = None
     return _lib
@@ -314,45 +315,62 @@ class BaseMapper:
 
     def _apply_cooc_smoothing(self, sensory_hints: Optional[Dict[str, np.ndarray]] = None):
         """
-        One-pass cooccurrence enrichment with Sensory Grounding.
-        Blends word embeddings toward both textual neighbors AND sensory centroids.
+        C-accelerated cooccurrence smoothing with Sensory Grounding.
         """
-        updates: Dict[str, np.ndarray] = {}
-        for w, emb in self._base_vocab.items():
-            if self._base_types.get(w) == "phrase":
-                continue
+        lib = _load_lib()
+        words = [w for w, t in self._base_types.items() if t == "word"]
+        if not words: return
+
+        word_to_idx = {w: i for i, w in enumerate(words)}
+        n_vocab = len(words)
+        vocab_mat = np.zeros((n_vocab, EMBED_DIM), dtype=np.float32)
+        for i, w in enumerate(words):
+            vocab_mat[i] = self._base_vocab[w]
+
+        k = 5
+        nb_indices = np.full((n_vocab, k), -1, dtype=np.int32)
+        nb_weights = np.zeros((n_vocab, k), dtype=np.float32)
+
+        for i, w in enumerate(words):
             neighbors = self._cooc.get(w, Counter())
-            if not neighbors:
-                continue
-
+            if not neighbors: continue
             total = float(sum(neighbors.values()))
-            delta = np.zeros(EMBED_DIM, dtype=np.float32)
-            count = 0
+            for j, (other, cnt) in enumerate(neighbors.most_common(k)):
+                if other in word_to_idx:
+                    nb_indices[i, j] = word_to_idx[other]
+                    nb_weights[i, j] = cnt / total
 
-            # Textual Grounding
-            for other, cnt in neighbors.most_common(5):
-                if isinstance(other, str) and other in self._base_vocab:
-                    delta += (cnt / total) * self._base_vocab[other]
-                    count += 1
+        out_mat = np.zeros_like(vocab_mat)
 
-            # Sensory Grounding (if hints provided for words like 'red', 'loud', etc.)
-            if sensory_hints and w in sensory_hints:
-                sensory_vec = sensory_hints[w][:EMBED_DIM]
-                if len(sensory_vec) < EMBED_DIM:
-                    sensory_vec = np.pad(sensory_vec, (0, EMBED_DIM - len(sensory_vec)))
-                delta += 2.0 * sensory_vec # Stronger weight for direct sensory proof
-                count += 2
+        if lib:
+            lib.cooccurrence_smooth(
+                vocab_mat.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+                nb_indices.ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
+                nb_weights.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+                ctypes.c_int(n_vocab), ctypes.c_int(EMBED_DIM),
+                ctypes.c_int(k), ctypes.c_float(self.cooc_alpha),
+                out_mat.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+            )
+        else:
+            # Python fallback (vectorized)
+            for i in range(n_vocab):
+                delta = np.zeros(EMBED_DIM, dtype=np.float32)
+                total_w = 0.0
+                for j in range(k):
+                    idx = nb_indices[i, j]
+                    if idx >= 0:
+                        w = nb_weights[i, j]
+                        delta += w * vocab_mat[idx]
+                        total_w += w
+                if total_w > 1e-10:
+                    delta /= np.linalg.norm(delta) + 1e-10
+                    blended = (1.0 - self.cooc_alpha) * vocab_mat[i] + self.cooc_alpha * delta
+                    out_mat[i] = blended / (np.linalg.norm(blended) + 1e-10)
+                else:
+                    out_mat[i] = vocab_mat[i]
 
-            if count == 0:
-                continue
-            dn = np.linalg.norm(delta)
-            if dn > 1e-10:
-                blended = ((1.0 - self.cooc_alpha) * emb
-                           + self.cooc_alpha * (delta / dn))
-                bn = np.linalg.norm(blended)
-                updates[w] = blended / bn if bn > 1e-10 else blended
-        for w, new_emb in updates.items():
-            self._base_vocab[w] = new_emb
+        for i, w in enumerate(words):
+            self._base_vocab[w] = out_mat[i]
 
     def transform(self, input_data: Any, mode: str = "text") -> BaseMap:
         """

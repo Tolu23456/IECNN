@@ -41,6 +41,15 @@ float similarity_score(const float *a, const float *b, int n, float alpha) {
     return alpha * cosine_sim(a, b, n) + (1.0f - alpha) * agreement_str(a, b, n);
 }
 
+void normalize_vector(float *v, int n) {
+    float norm = 0.0f;
+    for (int i = 0; i < n; i++) norm += v[i] * v[i];
+    norm = sqrtf(norm);
+    if (norm > 1e-10f) {
+        for (int i = 0; i < n; i++) v[i] /= norm;
+    }
+}
+
 /* ── Formula 2: Convergence Score ──────────────────────────────────── */
 float convergence_score(const float *preds, const float *confs,
                         int n_preds, int dim, float alpha) {

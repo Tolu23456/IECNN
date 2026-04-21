@@ -30,4 +30,16 @@ float score_cluster(const float *preds, const float *confs,
 /* Compute centroid of n predictions of given dim */
 void compute_centroid(const float *preds, int n, int dim, float *out);
 
+/* Sequential greedy clustering (Micro-clustering)
+ * preds: (n_preds x dim)
+ * n_preds: number of input predictions
+ * dim: feature dimension
+ * threshold: similarity threshold
+ * alpha: formula 1 weight
+ * out_cluster_ids: (n_preds,) array to store cluster ID for each prediction
+ * returns number of clusters created
+ */
+int greedy_cluster(const float *preds, int n_preds, int dim,
+                   float threshold, float alpha, int *out_cluster_ids);
+
 #endif

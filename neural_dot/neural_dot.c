@@ -22,14 +22,19 @@ void relational_pool(const float *mat, int n, int dim, float *out) {
         if (n == 1) memcpy(out, mat, dim * sizeof(float));
         return;
     }
-    int count = 0;
+
+    /* Optimized O(n) sum of differences using coefficients:
+     * sum_{i<j} (mat[i] - mat[j]) = sum_i mat[i] * (n - 1 - 2*i)
+     */
     for (int i = 0; i < n; i++) {
-        for (int j = i + 1; j < n; j++) {
-            for (int d = 0; d < dim; d++) out[d] += (mat[i * dim + d] - mat[j * dim + d]);
-            count++;
+        float coeff = (float)(n - 1 - 2 * i);
+        for (int d = 0; d < dim; d++) {
+            out[d] += mat[i * dim + d] * coeff;
         }
     }
-    for (int d = 0; d < dim; d++) out[d] /= (float)count;
+
+    float num_pairs = (float)(n * (n - 1) / 2);
+    for (int d = 0; d < dim; d++) out[d] /= num_pairs;
 }
 
 void logic_pool(const float *mat, int n, int dim, float *out) {

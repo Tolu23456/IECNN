@@ -92,3 +92,36 @@ void attention_pool(const float *matrix, const float *query,
 
     free(scores);
 }
+
+void cooccurrence_smooth(const float *vocab, const int *neighbor_indices,
+                        const float *neighbor_weights, int n_vocab,
+                        int embed_dim, int k, float alpha, float *out) {
+    for (int i = 0; i < n_vocab; i++) {
+        float *cur_out = out + i * embed_dim;
+        const float *cur_orig = vocab + i * embed_dim;
+
+        float *delta = (float *)calloc(embed_dim, sizeof(float));
+        float total_w = 0.0f;
+
+        for (int j = 0; j < k; j++) {
+            int nb_idx = neighbor_indices[i * k + j];
+            if (nb_idx < 0) continue;
+
+            float w = neighbor_weights[i * k + j];
+            total_w += w;
+            const float *nb_vec = vocab + nb_idx * embed_dim;
+            for (int d = 0; d < embed_dim; d++) delta[d] += w * nb_vec[d];
+        }
+
+        if (total_w > 1e-10f) {
+            normalize_vector(delta, embed_dim);
+            for (int d = 0; d < embed_dim; d++) {
+                cur_out[d] = (1.0f - alpha) * cur_orig[d] + alpha * delta[d];
+            }
+            normalize_vector(cur_out, embed_dim);
+        } else {
+            memcpy(cur_out, cur_orig, embed_dim * sizeof(float));
+        }
+        free(delta);
+    }
+}

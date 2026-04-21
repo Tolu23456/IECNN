@@ -253,23 +253,18 @@ class NeuralDot:
     def _relational_pool(self, mat: np.ndarray) -> np.ndarray:
         """
         Relational pooling: compute the difference between all token pairs,
-        then average. Captures interaction patterns between tokens.
-        Optimized with vectorized matrix operations.
+        then average. Optimized with C acceleration.
         """
         n = mat.shape[0]
         if n == 1: return mat[0]
 
-        # O(n^2) optimized using broadcasting: (n, 1, d) - (1, n, d) -> (n, n, d)
-        # We only need the upper triangle i < j, but averaging all pairs (i, j)
-        # where i != j is equivalent due to symmetry (i-j = -(j-i)).
-        # Summing (i-j) for all i,j gives 0. So we specifically want the mean of
-        # absolute or squared differences? No, the original logic was mean of (mat[i] - mat[j]).
-        # Actually, mean of (mat[i] - mat[j]) for all i < j is:
-        # sum_{i<j} (mat[i] - mat[j]) / (n*(n-1)/2)
+        lib = _load_lib()
+        out = np.zeros(self.feature_dim, dtype=np.float32)
+        if lib:
+            lib.relational_pool(_fp(mat)[0], ctypes.c_int(n), ctypes.c_int(self.feature_dim), _fp(out)[0])
+            return out
 
-        # Efficient implementation:
-        # sum_{i<j} (mat[i] - mat[j]) = sum_{i} mat[i]*(n-1-i) - sum_{j} mat[j]*j
-        # where i is index from 0 to n-1.
+        # Python Fallback
         coeffs = np.arange(n-1, -n, -2, dtype=np.float32)
         total_diff = (mat * coeffs[:, None]).sum(axis=0)
         num_pairs = n * (n - 1) / 2
@@ -278,16 +273,20 @@ class NeuralDot:
     def _logic_pool(self, mat: np.ndarray) -> np.ndarray:
         """
         Logic pooling: focus on structural transitions and conditional patterns.
-        Computes second-order differences (gradients of differences) to
-        detect shifts in logical flow.
+        Optimized with C acceleration.
         """
         n = mat.shape[0]
         if n < 3: return np.mean(mat, axis=0)
 
+        lib = _load_lib()
+        out = np.zeros(self.feature_dim, dtype=np.float32)
+        if lib:
+            lib.logic_pool(_fp(mat)[0], ctypes.c_int(n), ctypes.c_int(self.feature_dim), _fp(out)[0])
+            return out
+
+        # Python Fallback
         diffs = np.diff(mat, axis=0)
         accel = np.diff(diffs, axis=0)
-
-        # Combine mean state with structural acceleration
         return 0.7 * np.mean(mat, axis=0) + 0.3 * np.mean(accel, axis=0)
 
     def _morph_pool(self, mat: np.ndarray) -> np.ndarray:

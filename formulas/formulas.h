@@ -6,6 +6,9 @@ float cosine_sim(const float *a, const float *b, int n);
 float agreement_str(const float *a, const float *b, int n);
 float similarity_score(const float *a, const float *b, int n, float alpha);
 
+/* Normalize a vector in-place to unit length */
+void normalize_vector(float *v, int n);
+
 /* ── Formula 2: Convergence Score ────────────────────────────────── */
 float convergence_score(const float *preds, const float *confs,
                         int n_preds, int dim, float alpha);

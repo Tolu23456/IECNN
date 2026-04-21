@@ -173,10 +173,31 @@ class ConvergenceLayer:
                        infos: List[Dict], threshold: Optional[float] = None) -> List[MicroCluster]:
         """
         Sequential greedy micro-clustering.
-        A prediction joins an existing micro-cluster if its similarity to
-        the cluster centroid exceeds micro_threshold.
+        Optimized with C acceleration.
         """
         if threshold is None: threshold = self.micro_thresh
+        if not preds: return []
+
+        lib = _load_lib()
+        n_preds = len(preds)
+        dim = len(preds[0])
+
+        if lib:
+            stk = np.ascontiguousarray(np.stack(preds), np.float32)
+            c_ids = np.zeros(n_preds, dtype=np.int32)
+            n_clusters = lib.greedy_cluster(
+                _fp(stk)[0], ctypes.c_int(n_preds), ctypes.c_int(dim),
+                ctypes.c_float(threshold), ctypes.c_float(self.alpha),
+                c_ids.ctypes.data_as(ctypes.POINTER(ctypes.c_int))
+            )
+
+            clusters = [MicroCluster(i) for i in range(n_clusters)]
+            for i in range(n_preds):
+                cid = c_ids[i]
+                clusters[cid].add(preds[i], confs[i], infos[i])
+            return clusters
+
+        # Python fallback
         clusters: List[MicroCluster] = []
         centroids: List[np.ndarray]  = []
 
