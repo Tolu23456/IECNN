@@ -227,3 +227,37 @@ float hierarchical_convergence_score(const float *centroids, const float *scores
     float cross_sim = pairs > 0 ? cross / (float)pairs : 0.0f;
     return mean_score * (1.0f + gamma * cross_sim);
 }
+
+/* Formula 2 Ultra: Convergence with Dynamic Repellent
+ * This version penalizes clusters that are too similar to a 'repellent' centroid,
+ * which helps in increasing the discriminative gap.
+ */
+float convergence_score_ultra(const float *preds, const float *confs,
+                             int n_preds, int dim, float alpha,
+                             const float *repellent, float repellent_weight) {
+    float base_c = convergence_score(preds, confs, n_preds, dim, alpha);
+    if (!repellent || repellent_weight <= 0.0f) return base_c;
+
+    float *mean_p = (float *)calloc(dim, sizeof(float));
+    for (int i = 0; i < n_preds; i++) {
+        for (int d = 0; d < dim; d++) mean_p[d] += preds[i*dim + d] / (float)n_preds;
+    }
+
+    float r_sim = similarity_score(mean_p, repellent, dim, alpha);
+    free(mean_p);
+
+    // Repellent penalty: score drops as it gets closer to repellent
+    return base_c * (1.0f - repellent_weight * r_sim);
+}
+
+/* Fast Batch Similarity Score
+ * Efficiently computes similarity between a batch of queries and a batch of targets.
+ */
+void batch_similarity_fast(const float *queries, int n_q, const float *targets, int n_t,
+                          int dim, float alpha, float *out_matrix) {
+    for (int i = 0; i < n_q; i++) {
+        for (int j = 0; j < n_t; j++) {
+            out_matrix[i * n_t + j] = similarity_score(queries + i * dim, targets + j * dim, dim, alpha);
+        }
+    }
+}

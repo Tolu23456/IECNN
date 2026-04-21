@@ -31,3 +31,10 @@ void compute_centroid(const float *preds, int n, int dim, float *out) {
         }
     }
 }
+
+/* Ultra scoring interface */
+float score_cluster_ultra(const float *preds, const float *confs,
+                         int n, int dim, float alpha,
+                         const float *repellent, float repellent_weight) {
+    return convergence_score_ultra(preds, confs, n, dim, alpha, repellent, repellent_weight);
+}

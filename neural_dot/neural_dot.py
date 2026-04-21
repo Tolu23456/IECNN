@@ -1,42 +1,35 @@
 """
 Neural Dot — the fundamental prediction unit of IECNN.
-
-A neural dot is fundamentally different from a neuron:
-  Neuron   → tiny signal-passer in a fixed layered graph, no agency
-  NeuralDot → complete stateless mini-predictor with its own view of the world
-
-Each dot is characterized by:
-  - A DotType: determines what aspect of the input it specialises in
-  - A BiasVector: 5-dimensional control vector shaping its attention and output
-  - Weight matrices W, P (per-head projection), Q (attention query basis)
-  - No shared weights with any other dot
-
-Dot types:
-  SEMANTIC   — attends to semantic embedding dims [0:64], fine-grain
-  STRUCTURAL — attends to structural/positional features [64:128]
-  CONTEXTUAL — global view across all tokens, high abstraction
-  RELATIONAL — detects cross-token relational patterns
-  TEMPORAL   — sequential, position-weighted pooling
-  GLOBAL     — uniform broad pooling, the "overview" specialist
-
-Multi-head prediction:
-  Each dot generates N_HEADS predictions using different head-specific
-  projection matrices. This increases diversity from the same dot.
-
-Memory-guided attention:
-  If a dot's recent centroid from DotMemory is available, it is blended
-  into the attention query to bias the dot toward historically good regions.
 """
 
 import numpy as np
+import ctypes
 from enum import IntEnum
 from typing import List, Optional, Tuple, Dict
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from formulas.formulas import prediction_confidence, bias_vector_update
+from formulas.formulas import prediction_confidence, bias_vector_update, _fp
 
+# ── Load C shared library ────────────────────────────────────────────
+_lib = None
 
-# ── Dot Types ─────────────────────────────────────────────────────────
+def _load_lib():
+    global _lib
+    if _lib is not None:
+        return _lib
+    here = os.path.dirname(os.path.abspath(__file__))
+    so_path = os.path.join(here, "neural_dot_c.so")
+    if os.path.exists(so_path):
+        try:
+            _lib = ctypes.CDLL(so_path)
+            _lib.temporal_pool.restype = None
+            _lib.relational_pool.restype = None
+            _lib.logic_pool.restype = None
+            _lib.project_head.restype = None
+            _lib.apply_synergy_fast.restype = None
+        except Exception:
+            _lib = None
+    return _lib
 
 class DotType(IntEnum):
     SEMANTIC   = 0  # semantic content
@@ -71,8 +64,7 @@ _TYPE_DIM_RANGES = {
     DotType.MORPH:      (236, 252),  # focus strictly on morphological flag dims
 }
 
-# Default bias presets per type (attention, granularity, abstraction, inversion, temperature)
-_TYPE_BIAS_PRESETS: Dict[DotType, Tuple[float, ...]] = {
+_TYPE_BIAS_PRESETS = {
     DotType.SEMANTIC:   (0.7, 0.3, 0.5, 0.3, 0.8),
     DotType.STRUCTURAL: (0.6, 0.5, 0.3, 0.2, 0.6),
     DotType.CONTEXTUAL: (0.4, 0.8, 0.8, 0.4, 1.2),
@@ -97,77 +89,47 @@ def get_next_dot_id() -> int:
     _NEXT_DOT_ID += 1
     return res
 
-
-# ── Bias Vector ───────────────────────────────────────────────────────
+def get_next_dot_id():
+    global _NEXT_DOT_ID
+    res = _NEXT_DOT_ID
+    _NEXT_DOT_ID += 1
+    return res
 
 class BiasVector:
-    """
-    5-dimensional control vector that shapes how a dot sees and processes input.
-
-    Dimensions:
-      0  attention_bias      — sharpness of focus (0=uniform, 1=peaked)
-      1  granularity_bias    — patch size as fraction of sequence (0=tiny, 1=full)
-      2  abstraction_bias    — raw features vs transformed (0=raw, 1=abstract)
-      3  inversion_bias      — rate of AIM inversion (0=never, 1=always)
-      4  sampling_temperature— output diversity (low=focused, high=diverse)
-    """
-    DIM = 5
-
     def __init__(self, attention_bias=0.5, granularity_bias=0.5,
                  abstraction_bias=0.5, inversion_bias=0.3, sampling_temperature=1.0):
-        self.attention_bias       = float(np.clip(attention_bias,       0.0, 1.0))
-        self.granularity_bias     = float(np.clip(granularity_bias,     0.0, 1.0))
-        self.abstraction_bias     = float(np.clip(abstraction_bias,     0.0, 1.0))
-        self.inversion_bias       = float(np.clip(inversion_bias,       0.0, 1.0))
+        self.attention_bias = float(np.clip(attention_bias, 0.0, 1.0))
+        self.granularity_bias = float(np.clip(granularity_bias, 0.0, 1.0))
+        self.abstraction_bias = float(np.clip(abstraction_bias, 0.0, 1.0))
+        self.inversion_bias = float(np.clip(inversion_bias, 0.0, 1.0))
         self.sampling_temperature = float(max(sampling_temperature, 1e-6))
 
-    def to_array(self) -> np.ndarray:
-        return np.array([
-            self.attention_bias, self.granularity_bias,
-            self.abstraction_bias, self.inversion_bias,
-            self.sampling_temperature,
-        ], dtype=np.float32)
+    def to_array(self):
+        return np.array([self.attention_bias, self.granularity_bias, self.abstraction_bias,
+                         self.inversion_bias, self.sampling_temperature], dtype=np.float32)
 
     @classmethod
-    def from_array(cls, arr: np.ndarray) -> "BiasVector":
+    def from_array(cls, arr):
         return cls(*arr.tolist())
 
     @classmethod
-    def from_dot_type(cls, dot_type: DotType,
-                      rng: Optional[np.random.RandomState] = None) -> "BiasVector":
-        """Initialise from the preset for a given DotType, with small noise."""
+    def from_dot_type(cls, dot_type, rng=None):
         preset = _TYPE_BIAS_PRESETS[dot_type]
-        if rng is not None:
+        if rng:
             noise = rng.randn(len(preset)).astype(np.float32) * 0.05
-            arr   = np.clip(np.array(preset, np.float32) + noise, 0.01, 1.99)
-            arr[-1] = max(arr[-1], 0.05)
+            arr = np.clip(np.array(preset, np.float32) + noise, 0.01, 1.99)
             return cls.from_array(arr)
         return cls(*preset)
 
     @classmethod
-    def random(cls, rng: Optional[np.random.RandomState] = None) -> "BiasVector":
+    def random(cls, rng=None):
         rng = rng or np.random.RandomState()
         return cls(rng.uniform(0.1, 0.9), rng.uniform(0.0, 1.0),
                    rng.uniform(0.0, 1.0), rng.uniform(0.0, 0.6),
                    rng.uniform(0.3, 2.0))
 
-    def update(self, winning: "BiasVector", lr: float = 0.1) -> "BiasVector":
-        """Formula 8: shift toward winning bias pattern."""
-        return BiasVector.from_array(
-            bias_vector_update(self.to_array(), winning.to_array(), lr)
-        )
-
-    def effective_temperature(self, base_entropy: float) -> float:
-        """Adaptive temperature: rises when exploration needed, falls when converging."""
+    def effective_temperature(self, base_entropy):
         return self.sampling_temperature * (1.0 + 0.3 * base_entropy)
-
-    def __repr__(self):
-        return (f"BiasVector(attn={self.attention_bias:.2f}, gran={self.granularity_bias:.2f}, "
-                f"abst={self.abstraction_bias:.2f}, inv={self.inversion_bias:.2f}, "
-                f"temp={self.sampling_temperature:.2f})")
-
-
-# ── Neural Dot ────────────────────────────────────────────────────────
 
 class NeuralDot:
     """
@@ -196,8 +158,6 @@ class NeuralDot:
         seed = seed if seed is not None else dot_id * 31 + 7
         rng  = np.random.RandomState(seed)
         scale = 1.0 / np.sqrt(feature_dim)
-
-        # Main transformation matrix
         self.W = rng.randn(feature_dim, feature_dim).astype(np.float32) * scale
 
         # Per-head projection matrices (feature_dim → feature_dim)
@@ -209,28 +169,37 @@ class NeuralDot:
 
         # Attention query basis (for computing the query from pooled input)
         self.Q_basis = rng.randn(feature_dim, feature_dim).astype(np.float32) * scale
-
-        # Offset (learnable bias in linear transforms)
         self.b_offset = rng.randn(feature_dim).astype(np.float32) * scale * 0.1
-
         self._rng = np.random.RandomState(seed + 1)
 
-    # ── Slice selection ───────────────────────────────────────────────
+    def predict(self, basemap, memory_hint=None, context_entropy=0.5, consensus=None):
+        lib = _load_lib()
+        sl, start, end = self._select_slice(basemap.matrix)
 
-    def _select_slice(self, matrix: np.ndarray) -> Tuple[np.ndarray, int, int]:
-        """Select a contiguous slice of the token sequence."""
-        n, d = matrix.shape
-        gran = self.bias.granularity_bias
+        if self.dot_type == DotType.TEMPORAL: pooled = self._temporal_pool(sl)
+        elif self.dot_type == DotType.RELATIONAL: pooled = self._relational_pool(sl)
+        elif self.dot_type == DotType.LOGIC: pooled = self._logic_pool(sl)
+        else: pooled = np.mean(sl, axis=0)
 
-        if self.dot_type == DotType.GLOBAL:
-            return matrix, 0, n  # full sequence always
+        focused = self._apply_dim_focus(pooled)
+        abstract = np.tanh(self.W @ focused + self.b_offset)
+        T = self.bias.effective_temperature(context_entropy)
 
-        if self.dot_type == DotType.CONTEXTUAL:
-            patch_size = max(2, int(n * (0.5 + gran * 0.5)))
-        elif self.dot_type == DotType.TEMPORAL:
-            patch_size = max(1, int(n * (0.3 + gran * 0.5)))
-        else:
-            patch_size = max(1, int(n * (0.1 + gran * 0.7)))
+        results = []
+        for h in range(self.n_heads):
+            noise = self._rng.randn(self.feature_dim).astype(np.float32)
+            if lib:
+                out = np.zeros(self.feature_dim, dtype=np.float32)
+                lib.project_head(_fp(abstract)[0], _fp(self.head_projs[h])[0], _fp(self.b_offset)[0],
+                                 ctypes.c_int(self.feature_dim), ctypes.c_float(T), _fp(noise)[0], _fp(out)[0])
+                pred = out
+            else:
+                pred = np.tanh(self.head_projs[h] @ abstract + self.b_offset) + noise * T * 0.05
+
+            norm = np.linalg.norm(pred)
+            if norm > 1e-10: pred = pred / norm * np.sqrt(self.feature_dim)
+            results.append((pred, prediction_confidence(pred), {"dot_id": self.dot_id, "dot_type": _TYPE_NAMES[self.dot_type], "source": "original"}))
+        return results
 
         patch_size = min(patch_size, n)
         if n <= 1: return matrix, 0, n
@@ -239,13 +208,8 @@ class NeuralDot:
         end    = max(start + 1, min(start + patch_size, n))
         return matrix[start:end], start, end
 
-    # ── Dim masking per type ──────────────────────────────────────────
-
-    def _apply_dim_focus(self, v: np.ndarray) -> np.ndarray:
-        """Zero out irrelevant dims based on dot type focus range."""
+    def _apply_dim_focus(self, v):
         lo, hi = _TYPE_DIM_RANGES[self.dot_type]
-        if lo == 0 and hi == self.feature_dim:
-            return v  # full range — no masking
         out = np.zeros_like(v)
         out[lo:hi] = v[lo:hi]
         return out
