@@ -201,8 +201,21 @@ class NeuralDot:
             results.append((pred, prediction_confidence(pred), {"dot_id": self.dot_id, "dot_type": _TYPE_NAMES[self.dot_type], "source": "original"}))
         return results
 
+    def _select_slice(self, matrix: np.ndarray):
+        """
+        Select a contiguous slice of the basemap matrix.
+
+        The slice length is controlled by granularity_bias:
+          - high granularity → short focused slice (fine detail)
+          - low  granularity → long slice (broad context)
+
+        Returns (slice, start_idx, end_idx).
+        """
+        n = matrix.shape[0]
+        patch_size = max(1, int(self.bias.granularity_bias * n))
         patch_size = min(patch_size, n)
-        if n <= 1: return matrix, 0, n
+        if n <= 1:
+            return matrix, 0, n
         offset = int(self._rng.uniform(0, n - patch_size + 1))
         start  = max(0, min(offset, n - 1))
         end    = max(start + 1, min(start + patch_size, n))

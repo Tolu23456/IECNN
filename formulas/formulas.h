@@ -74,4 +74,14 @@ float adaptive_learning_rate(float base_lr, float dominance);
 float hierarchical_convergence_score(const float *centroids, const float *scores,
                                      int n, int dim, float alpha, float gamma);
 
+/* Formula 17 extension: Convergence Score Ultra
+ * Adds a repellent term that penalises proximity to a previously-seen centroid,
+ * preventing the cluster from collapsing back to an earlier attractor.
+ * repellent: (dim,) vector of the previous best centroid (or NULL to skip)
+ * repellent_weight: how strongly to penalise proximity (0 = off)
+ */
+float convergence_score_ultra(const float *preds, const float *confs,
+                               int n_preds, int dim, float alpha,
+                               const float *repellent, float repellent_weight);
+
 #endif
