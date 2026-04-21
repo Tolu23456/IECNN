@@ -34,6 +34,7 @@ from aim.aim                 import AIMLayer
 from convergence.convergence import ConvergenceLayer, Cluster
 from pruning.pruning         import PruningLayer
 from iteration.iteration     import IterationController, StopReason
+from cognition.cognition     import CognitionLayer
 from memory.dot_memory       import DotMemory
 from memory.cluster_memory   import ClusterMemory
 from evolution.dot_evolution import DotEvolution, EvolutionConfig
@@ -97,9 +98,16 @@ class IECNN:
 
         # Core components
         self.base_mapper = BaseMapper(feature_dim=feature_dim)
+        self.cognition   = CognitionLayer(seed=seed)
+
         if persistence_path:
             self.base_mapper.load(persistence_path)
             self.base_mapper.persistence_path = persistence_path
+
+            # Load cognition state if it exists
+            cog_path = persistence_path + ".cog"
+            if os.path.exists(cog_path):
+                self.cognition.load(cog_path)
 
         self.base_bias   = BiasVector(0.5, 0.5, 0.5, 0.3, 1.0)
         self.dot_gen     = DotGenerator(num_dots, feature_dim, self.base_bias,
@@ -183,6 +191,9 @@ class IECNN:
 
         if self.base_mapper.persistence_path:
             self.base_mapper.save(self.base_mapper.persistence_path)
+            # Save cognition state too
+            cog_path = self.base_mapper.persistence_path + ".cog"
+            self.cognition.save(cog_path)
 
         if verbose:
             n_bases = len(self.base_mapper._base_vocab)
@@ -216,6 +227,20 @@ class IECNN:
 
         self.iter_ctrl.reset()
         self.cluster_memory.reset_call()
+
+        # ── Layer 0: Cognition (Outer Loop Start) ──────────────────
+        # Use previous state to modulate current run parameters
+        base_params = {
+            "max_iterations": self.iter_ctrl.max_iterations,
+            "exploration_noise": 0.05
+        }
+        if self.cognition.last_csv is not None:
+            cog_report = self.cognition.process(self.cognition.last_csv)
+            modulated = self.cognition.modulate_parameters(cog_report, base_params)
+
+            # Apply modulations
+            self.iter_ctrl.max_iterations = modulated["max_iterations"]
+            base_params["exploration_noise"] = modulated["exploration_noise"]
 
         basemap  = self.base_mapper.transform(input_data, mode=mode)
 
@@ -336,7 +361,9 @@ class IECNN:
             # dots explore broader temperature / inversion settings next round.
             eug_val = self.iter_ctrl.current_eug()
             if abs(eug_val) < 0.01:
-                noise   = self._rng.randn(len(refined)).astype(np.float32) * 0.05
+                # Modulate exploration noise by policy
+                exp_noise = base_params["exploration_noise"]
+                noise   = self._rng.randn(len(refined)).astype(np.float32) * exp_noise
                 refined = refined + noise
                 cur_entropy = min(1.0, cur_entropy + 0.30)
 
@@ -409,6 +436,27 @@ class IECNN:
         # ── Normalize output vector ───────────────────────────────────
         n = np.linalg.norm(final_out)
         if n > 1e-10: final_out = final_out / n * np.sqrt(self.feature_dim)
+
+        # ── Layer 11: Cognition (Outer Loop End) ──────────────────────
+        # Observe final state and update AAF
+        final_state = self.iter_ctrl._history[-1] if self.iter_ctrl._history else {}
+        cog_report = self.cognition.observe(
+            convergence = final_state.get("top_score", 0.0),
+            utility     = final_state.get("eug", 0.0),
+            entropy     = final_state.get("entropy", 0.5),
+            dominance   = final_state.get("dominance", 0.0),
+            stability   = final_state.get("stability", 0.0)
+        )
+        cog_summary = self.cognition.process(cog_report)
+
+        # Meta-learning update for AAF
+        # Reward is the master objective J(t)
+        final_j = final_state.get("objective", 0.0)
+        # delta_j is relative to some baseline or previous run
+        self.cognition.update_aaf(final_j, lr=0.01)
+
+        if verbose:
+            self._print_cognition_footer(cog_summary)
 
         # ── Post-run: update memory + evolve dots ─────────────────────
         # Store output in working memory for next call
@@ -738,3 +786,14 @@ class IECNN:
               f"{r['entropy']:>6.3f}  {r['stability']:>6.3f}  "
               f"{r['energy']:>6.3f}  "
               f"{r['lr']:>6.4f}  {eug_str}")
+
+    def _print_cognition_footer(self, cog: Dict):
+        p = cog["policy"]
+        pol_str = " ".join(f"{k[:3]}={v:.2f}" for k, v in p.items())
+        print(f"  {'─'*71}")
+        print(f"  COGNITION │ policy: {pol_str}")
+        print(f"            │ depth: {cog['reasoning_depth']:.3f} "
+              f"│ grad: {cog['abstraction_gradient']:+.3f} "
+              f"│ horizon: {cog['planning_horizon']:.3f} "
+              f"│ goal_stab: {cog['goal_stability']:.3f}")
+        print(f"{'═'*74}\n")

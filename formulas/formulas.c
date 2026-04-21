@@ -278,6 +278,30 @@ float exploration_pressure(float stability, float dominance) {
     return (1.0f - stability) + (1.0f - dominance);
 }
 
+/* ── Cognition Layer Formulas F27–F35 ─────────────────────────── */
+
+float reasoning_depth(float cs_norm, float stability) {
+    return logf(1.0f + cs_norm) * stability;
+}
+
+float abstraction_gradient(float entropy, float convergence) {
+    return entropy - convergence;
+}
+
+float planning_horizon(float stability, float entropy, float reasoning) {
+    return (stability / (1.0f + entropy)) * reasoning;
+}
+
+float goal_stability(float convergence, float dominance) {
+    return convergence / (1.0f + fabsf(dominance));
+}
+
+void self_model_update(float *sm, const float *cs, float rho, int n) {
+    for (int i = 0; i < n; i++) {
+        sm[i] = (1.0f - rho) * sm[i] + rho * cs[i];
+    }
+}
+
 /* Fast Batch Similarity Score
  * Efficiently computes similarity between a batch of queries and a batch of targets.
  */

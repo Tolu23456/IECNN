@@ -61,6 +61,12 @@ def _load_lib():
             lib.dot_fitness.restype              = ctypes.c_float
             lib.stability_energy.restype         = ctypes.c_float
             lib.exploration_pressure.restype     = ctypes.c_float
+            # F27–F35
+            lib.reasoning_depth.restype          = ctypes.c_float
+            lib.abstraction_gradient.restype     = ctypes.c_float
+            lib.planning_horizon.restype         = ctypes.c_float
+            lib.goal_stability.restype           = ctypes.c_float
+            lib.self_model_update.restype        = None
             _lib = lib
         except Exception:
             _lib = None
@@ -578,6 +584,48 @@ def exploration_pressure(stability: float, dominance: float) -> float:
             ctypes.c_float(stability), ctypes.c_float(dominance)
         ))
     return (1.0 - stability) + (1.0 - dominance)
+
+
+# ── Cognition Layer Formulas F27–F35 ───────────────────────────
+
+def reasoning_depth(cs_norm: float, stability: float) -> float:
+    """F29: R(t) = log(1 + ||CS(t)||) * S(t)"""
+    lib = _load_lib()
+    if lib:
+        return float(lib.reasoning_depth(ctypes.c_float(cs_norm), ctypes.c_float(stability)))
+    return float(np.log1p(cs_norm) * stability)
+
+def abstraction_gradient(entropy: float, convergence: float) -> float:
+    """F30: AG(t) = H(t) - C(t)"""
+    lib = _load_lib()
+    if lib:
+        return float(lib.abstraction_gradient(ctypes.c_float(entropy), ctypes.c_float(convergence)))
+    return entropy - convergence
+
+def planning_horizon(stability: float, entropy: float, reasoning: float) -> float:
+    """F32: P(t) = (S(t) / (1 + H(t))) * R(t)"""
+    lib = _load_lib()
+    if lib:
+        return float(lib.planning_horizon(
+            ctypes.c_float(stability), ctypes.c_float(entropy), ctypes.c_float(reasoning)
+        ))
+    return (stability / (1.0 + entropy)) * reasoning
+
+def goal_stability(convergence: float, dominance: float) -> float:
+    """F33: G(t) = C(t) / (1 + |D(t)|)"""
+    lib = _load_lib()
+    if lib:
+        return float(lib.goal_stability(ctypes.c_float(convergence), ctypes.c_float(dominance)))
+    return convergence / (1.0 + abs(dominance))
+
+def self_model_update(sm: np.ndarray, cs: np.ndarray, rho: float):
+    """F35: SM(t+1) = (1 - rho) * SM(t) + rho * CS(t)"""
+    lib = _load_lib()
+    if lib:
+        fsm, _ = _fp(sm); fcs, _ = _fp(cs)
+        lib.self_model_update(fsm, fcs, ctypes.c_float(rho), ctypes.c_int(len(sm)))
+        return
+    sm[:] = (1.0 - rho) * sm + rho * cs
 
 
 # ── Formula 20: Vocabulary Coverage Score ────────────────────────────

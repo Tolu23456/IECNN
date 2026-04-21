@@ -107,6 +107,33 @@ float stability_energy(float entropy, float instability, float lambda1, float la
  */
 float exploration_pressure(float stability, float dominance);
 
+/* ── Cognition Layer Formulas F27–F35 ─────────────────────────── */
+
+/* Formula 29: Reasoning Depth
+ * R = log(1 + ||CS||) * S
+ */
+float reasoning_depth(float cs_norm, float stability);
+
+/* Formula 30: Abstraction Gradient
+ * AG = H - C
+ */
+float abstraction_gradient(float entropy, float convergence);
+
+/* Formula 32: Planning Horizon
+ * P = (S / (1 + H)) * R
+ */
+float planning_horizon(float stability, float entropy, float reasoning);
+
+/* Formula 33: Goal Stability
+ * G = C / (1 + |D|)
+ */
+float goal_stability(float convergence, float dominance);
+
+/* Formula 35: Self-Model Update
+ * SM_new = (1 - rho) * SM_old + rho * CS
+ */
+void self_model_update(float *sm, const float *cs, float rho, int n);
+
 /* Formula 17 extension: Convergence Score Ultra
  * Adds a repellent term that penalises proximity to a previously-seen centroid,
  * preventing the cluster from collapsing back to an earlier attractor.
