@@ -13,6 +13,9 @@ from formulas.formulas import (
     reasoning_depth, abstraction_gradient, planning_horizon,
     goal_stability, self_model_update, memory_plasticity
 )
+from .world import WorldState
+from .planning import PlanningSystem
+from .memory import LongTermMemory
 
 class CognitionLayer:
     """
@@ -23,9 +26,15 @@ class CognitionLayer:
 
     TASKS = ["reasoning", "planning", "abstraction", "memory", "exploration"]
 
-    def __init__(self, state_dim: int = 5, seed: int = 42):
+    def __init__(self, state_dim: int = 5, feature_dim: int = 256, seed: int = 42):
         self.state_dim = state_dim
+        self.feature_dim = feature_dim
         self._rng = np.random.RandomState(seed)
+
+        # Core Cognitive Pillars
+        self.world = WorldState(feature_dim=feature_dim)
+        self.planning = PlanningSystem(seed=seed)
+        self.memory = LongTermMemory(feature_dim=feature_dim)
 
         # F35: Self-Model (Persistent across runs)
         self.self_model = np.zeros(state_dim, dtype=np.float32)
@@ -142,11 +151,60 @@ class CognitionLayer:
         # a single cluster representing the weighted mean of top 3.
         return clusters
 
+    def run_agi_loop(self, current_latent: np.ndarray, j_score: float,
+                     concepts: List = None) -> Dict:
+        """
+        Executes the full AGI loop (F36–F45) after a pipeline run.
+        """
+        # 1. Update World Model (F37)
+        self.world.update(current_latent)
+
+        # 2. Causal Discovery (F38)
+        # Use simple surprise signal for now (norm of change)
+        surprise = float(np.linalg.norm(current_latent - self.world.global_vector))
+        delta_j = j_score - 0.5 # relative to a prior
+        self.world.construct_causal_graph(surprise, delta_j)
+
+        # 3. Simulate and Plan (F39–F42)
+        # Simulate k-steps ahead using current policy
+        futures = self.planning.simulate(self.world.global_vector, self.last_policy)
+
+        # Evaluate plan (crude score based on future stability)
+        plan_score = self.planning.evaluate_plan([j_score] * len(futures))
+
+        # 4. Long-Term Memory (F43–F45)
+        self.memory.encode(self.world.global_vector, concepts or [], j_score)
+
+        # Memory retrieval based on cognitive state
+        associative_recall = self.memory.retrieve(self.last_csv)
+
+        # Consolidation if surprise was high
+        if surprise > 0.5:
+            # Predict next state (dummy prediction = last global vector)
+            w_pred = self.world.global_vector
+            self.memory.consolidate(current_latent, w_pred)
+
+        return {
+            "surprise": surprise,
+            "plan_score": plan_score,
+            "recall_norm": float(np.linalg.norm(associative_recall))
+        }
+
     def save(self, path: str):
-        np.savez(path, self_model=self.self_model, aaf=self.aaf)
+        np.savez(path,
+                 self_model=self.self_model,
+                 aaf=self.aaf,
+                 world_vector=self.world.global_vector,
+                 memories=self.memory.memories,
+                 mem_count=self.memory.count)
 
     def load(self, path: str):
         if os.path.exists(path):
             data = np.load(path)
             self.self_model = data["self_model"]
             self.aaf = data["aaf"]
+            if "world_vector" in data:
+                self.world.global_vector = data["world_vector"]
+            if "memories" in data:
+                self.memory.memories = data["memories"]
+                self.memory.count = int(data["mem_count"])

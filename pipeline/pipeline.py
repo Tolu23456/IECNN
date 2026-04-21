@@ -455,8 +455,11 @@ class IECNN:
         # delta_j is relative to some baseline or previous run
         self.cognition.update_aaf(final_j, lr=0.01)
 
+        # ── Layer 12: AGI Loop (World, Memory, Planning) ──────────────
+        agi_report = self.cognition.run_agi_loop(final_out, final_j)
+
         if verbose:
-            self._print_cognition_footer(cog_summary)
+            self._print_cognition_footer(cog_summary, agi_report)
 
         # ── Post-run: update memory + evolve dots ─────────────────────
         # Store output in working memory for next call
@@ -787,7 +790,7 @@ class IECNN:
               f"{r['energy']:>6.3f}  "
               f"{r['lr']:>6.4f}  {eug_str}")
 
-    def _print_cognition_footer(self, cog: Dict):
+    def _print_cognition_footer(self, cog: Dict, agi: Dict = None):
         p = cog["policy"]
         pol_str = " ".join(f"{k[:3]}={v:.2f}" for k, v in p.items())
         print(f"  {'─'*71}")
@@ -796,4 +799,8 @@ class IECNN:
               f"│ grad: {cog['abstraction_gradient']:+.3f} "
               f"│ horizon: {cog['planning_horizon']:.3f} "
               f"│ goal_stab: {cog['goal_stability']:.3f}")
+        if agi:
+            print(f"  AGI STACK │ surprise: {agi['surprise']:.3f} "
+                  f"│ plan_score: {agi['plan_score']:.3f} "
+                  f"│ recall: {agi['recall_norm']:.3f}")
         print(f"{'═'*74}\n")

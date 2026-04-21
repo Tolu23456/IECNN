@@ -132,16 +132,15 @@ class BaseMap:
     def __len__(self):
         return len(self.tokens)
 
-    def pool(self, method: str = "mean") -> np.ndarray:
+    def pool(self, method: str = "mean", query: Optional[np.ndarray] = None) -> np.ndarray:
         """
         Pool the token rows into a single vector.
 
         Methods:
-          "mean"  — uniform average of all rows (default)
-          "max"   — element-wise maximum
-          "idf"   — IDF-style: down-weight high-frequency tokens (stop-word
-                    suppression without a stop-word list).  Weights are
-                    computed from the frequency column in the feature matrix.
+          "mean"      — uniform average of all rows (default)
+          "max"       — element-wise maximum
+          "idf"       — IDF-style: down-weight high-frequency tokens
+          "attention" — weight tokens by similarity to `query`
         """
         if method == "mean":
             return np.mean(self.matrix, axis=0)
@@ -153,6 +152,22 @@ class BaseMap:
             weighted = self.matrix * idf_w[:, None]
             denom    = idf_w.sum()
             return weighted.sum(axis=0) / max(float(denom), 1e-10)
+        if method == "attention" and query is not None:
+            lib = _load_lib()
+            out = np.zeros(self.matrix.shape[1], dtype=np.float32)
+            if lib:
+                m_ptr = self.matrix.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+                q_ptr = query.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+                o_ptr = out.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+                lib.attention_pool(m_ptr, q_ptr, ctypes.c_int(len(self.tokens)),
+                                   ctypes.c_int(self.matrix.shape[1]),
+                                   ctypes.c_float(5.0), o_ptr)
+                return out
+            # Fallback
+            scores = self.matrix @ query
+            w = np.exp(scores - np.max(scores))
+            w /= w.sum() + 1e-10
+            return (self.matrix * w[:, None]).sum(axis=0)
         return np.mean(self.matrix, axis=0)
 
     def slice(self, start: int, end: int) -> np.ndarray:

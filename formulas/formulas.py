@@ -67,6 +67,11 @@ def _load_lib():
             lib.planning_horizon.restype         = ctypes.c_float
             lib.goal_stability.restype           = ctypes.c_float
             lib.self_model_update.restype        = None
+            # F36–F45
+            lib.world_update.restype             = None
+            lib.plan_evaluation.restype          = ctypes.c_float
+            lib.memory_retrieval_attention.restype = None
+            lib.experience_consolidation.restype = None
             _lib = lib
         except Exception:
             _lib = None
@@ -626,6 +631,54 @@ def self_model_update(sm: np.ndarray, cs: np.ndarray, rho: float):
         lib.self_model_update(fsm, fcs, ctypes.c_float(rho), ctypes.c_int(len(sm)))
         return
     sm[:] = (1.0 - rho) * sm + rho * cs
+
+
+# ── World & Planning Formulas F36–F45 ──────────────────────────
+
+def world_update(w: np.ndarray, do_obs: np.ndarray, lambda_rate: float):
+    """F37: W(t+1) = lambda*W(t) + (1-lambda)*dO_t"""
+    lib = _load_lib()
+    if lib:
+        fw, _ = _fp(w); fdo, _ = _fp(do_obs)
+        lib.world_update(fw, fdo, ctypes.c_float(lambda_rate), ctypes.c_int(len(w)))
+        return
+    w[:] = lambda_rate * w + (1.0 - lambda_rate) * do_obs
+
+def plan_evaluation(j_scores: List[float], gamma: float = 0.9) -> float:
+    """F41: V = Σ (gamma^k * J_k)"""
+    lib = _load_lib()
+    k = len(j_scores)
+    if lib:
+        fjs, _ = _fp(np.array(j_scores, dtype=np.float32))
+        return float(lib.plan_evaluation(fjs, ctypes.c_float(gamma), ctypes.c_int(k)))
+    v = 0.0
+    g = gamma
+    for score in j_scores:
+        v += g * score
+        g *= gamma
+    return float(v)
+
+def memory_retrieval_attention(cs: np.ndarray, m_long: np.ndarray) -> np.ndarray:
+    """F44: R_m(t) = softmax(CS(t) * M_long)"""
+    lib = _load_lib()
+    n_mem, dim = m_long.shape
+    out = np.zeros(n_mem, dtype=np.float32)
+    if lib:
+        fcs, _ = _fp(cs); fm, _ = _fp(m_long); fo, _ = _fp(out)
+        lib.memory_retrieval_attention(fcs, fm, ctypes.c_int(n_mem), ctypes.c_int(dim), fo)
+        return out
+    scores = m_long @ cs
+    e_s = np.exp(scores - np.max(scores))
+    return e_s / (e_s.sum() + 1e-10)
+
+def experience_consolidation(m: np.ndarray, w: np.ndarray, w_pred: np.ndarray, eta: float):
+    """F45: M(t+1) = M(t) + eta * (W(t) - W_pred(t))"""
+    lib = _load_lib()
+    if lib:
+        fm, _ = _fp(m); fw, _ = _fp(w); fwp, _ = _fp(w_pred)
+        lib.experience_consolidation(fm, fw, fwp, ctypes.c_float(eta), ctypes.c_int(len(m)))
+        return
+    m += eta * (w - w_pred)
 
 
 # ── Formula 20: Vocabulary Coverage Score ────────────────────────────

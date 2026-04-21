@@ -134,6 +134,30 @@ float goal_stability(float convergence, float dominance);
  */
 void self_model_update(float *sm, const float *cs, float rho, int n);
 
+/* ── World & Planning Formulas F36–F45 ────────────────────────── */
+
+/* Formula 37: World Update Function
+ * W_new = lambda * W_old + (1 - lambda) * dO
+ */
+void world_update(float *w, const float *do_obs, float lambda, int n);
+
+/* Formula 41: Plan Evaluation Function
+ * V = Σ (gamma^k * J_k)
+ */
+float plan_evaluation(const float *j_scores, float gamma, int k_steps);
+
+/* Formula 44: Memory Retrieval Attention
+ * R_m = softmax(CS * M_long)
+ */
+void memory_retrieval_attention(const float *cs, const float *m_long,
+                                int n_mem, int dim, float *out_weights);
+
+/* Formula 45: Experience Consolidation
+ * M_new = M_old + eta * (W - W_pred)
+ */
+void experience_consolidation(float *m, const float *w, const float *w_pred,
+                              float eta, int n);
+
 /* Formula 17 extension: Convergence Score Ultra
  * Adds a repellent term that penalises proximity to a previously-seen centroid,
  * preventing the cluster from collapsing back to an earlier attractor.

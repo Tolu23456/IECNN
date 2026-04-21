@@ -302,6 +302,48 @@ void self_model_update(float *sm, const float *cs, float rho, int n) {
     }
 }
 
+/* ── World & Planning Formulas F36–F45 ────────────────────────── */
+
+void world_update(float *w, const float *do_obs, float lambda, int n) {
+    for (int i = 0; i < n; i++) {
+        w[i] = lambda * w[i] + (1.0f - lambda) * do_obs[i];
+    }
+}
+
+float plan_evaluation(const float *j_scores, float gamma, int k_steps) {
+    float v = 0.0f;
+    float g = gamma;
+    for (int i = 0; i < k_steps; i++) {
+        v += g * j_scores[i];
+        g *= gamma;
+    }
+    return v;
+}
+
+void memory_retrieval_attention(const float *cs, const float *m_long,
+                                int n_mem, int dim, float *out_weights) {
+    float max_s = -1e30f;
+    for (int i = 0; i < n_mem; i++) {
+        float dot = 0.0f;
+        for (int d = 0; d < dim; d++) dot += cs[d] * m_long[i*dim + d];
+        out_weights[i] = dot;
+        if (dot > max_s) max_s = dot;
+    }
+    float sum = 0.0f;
+    for (int i = 0; i < n_mem; i++) {
+        out_weights[i] = expf(out_weights[i] - max_s);
+        sum += out_weights[i];
+    }
+    for (int i = 0; i < n_mem; i++) out_weights[i] /= (sum + 1e-10f);
+}
+
+void experience_consolidation(float *m, const float *w, const float *w_pred,
+                              float eta, int n) {
+    for (int i = 0; i < n; i++) {
+        m[i] += eta * (w[i] - w_pred[i]);
+    }
+}
+
 /* Fast Batch Similarity Score
  * Efficiently computes similarity between a batch of queries and a batch of targets.
  */
