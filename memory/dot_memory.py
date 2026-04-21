@@ -111,20 +111,37 @@ class DotMemory:
         return np.mean(np.stack(list(w)), axis=0).astype(np.float32)
 
     def rankings(self, dot_ids: Optional[List[int]] = None) -> List[Tuple[int, float]]:
-        """Return list of (dot_id, effectiveness) sorted highest first."""
+        """Return list of (dot_id, fitness) sorted highest first."""
         if dot_ids is None:
             dot_ids = list(self._total_counts.keys())
+        fit = self.all_fitness_scores(dot_ids)
+        order = np.argsort(fit)[::-1]
+        return [(int(dot_ids[i]), float(fit[i])) for i in order]
+
+    def all_fitness_scores(self, dot_ids: List[int], j_norm: float = 0.0) -> np.ndarray:
+        """
+        F24: Dot Fitness Function
+        F_d = R_d + alpha*C_d + beta*S_d + gamma*U_d - delta*N_d
+        """
+        from formulas.formulas import dot_fitness
+        drp = self.drp_scores(dot_ids, j_norm)
         eff = self.all_effectivenesses(dot_ids)
-        order = np.argsort(eff)[::-1]
-        return [(int(dot_ids[i]), float(eff[i])) for i in order]
+        fit = np.zeros(len(dot_ids), dtype=np.float32)
+        for i, did in enumerate(dot_ids):
+            spec = self.specialization_score(did)
+            # Use effectiveness as proxy for U_d (utility impact) for now
+            fit[i] = dot_fitness(
+                rd=float(drp[i]), cd=float(eff[i]), sd=spec, ud=float(eff[i]), nd=1.0 - float(eff[i])
+            )
+        return fit
 
     # ── Dot Reinforcement Pressure (F17) ─────────────────────────────
 
-    def drp_scores(self, dot_ids: List[int], eug: float, delta_u: float) -> np.ndarray:
+    def drp_scores(self, dot_ids: List[int], system_health: float) -> np.ndarray:
         """
-        Compute F17 Dot Reinforcement Pressure scores for every dot.
+        Compute FIXED F17 Dot Reinforcement Pressure scores for every dot.
 
-        R_d = λ1·effectiveness + λ2·specialization + λ3·U_norm·(1+β·ΔU_norm) − λ4·failure_rate
+        R_d = λ1·effectiveness + λ2·specialization + λ3·J_norm − λ4·failure_rate
 
         Returns an array of shape (len(dot_ids),) with a pressure score per dot.
         """
@@ -137,16 +154,25 @@ class DotMemory:
             scores[i]    = dot_reinforcement_pressure(
                 convergence_contrib = float(eff[i]),
                 specialization      = spec,
-                eug                 = eug,
-                delta_u             = delta_u,
+                system_health       = system_health,
                 failure_rate        = failure_rate,
                 lambda1             = self.lambda1,
                 lambda2             = self.lambda2,
                 lambda3             = self.lambda3,
-                beta                = self.beta,
                 lambda4             = self.lambda4,
             )
         return scores
+
+    def apply_memory_decay(self, dot_ids: List[int], rho: float, x: float = 0.0):
+        """
+        F23: Memory Decay Function
+        M_{t+1} = (1 - rho) * M_t + rho * X
+
+        Applies decay to success_counts based on plasticity rate rho.
+        """
+        for did in dot_ids:
+            if did in self._success_counts:
+                self._success_counts[did] = (1.0 - rho) * self._success_counts[did] + rho * x
 
     def apply_floor_pressure(self, dot_ids: List[int], drp: np.ndarray, floor: float = 0.05,
                               decay: float = 0.90):

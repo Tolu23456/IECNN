@@ -303,7 +303,9 @@ class IECNN:
                 "dominance":   float(dom),
                 "top_score":   float(surv[0].score) if surv else 0.0,
                 "entropy":     float(ent),
-                "stability":   float(conv_sum.get("stability", 0.0)),
+                "stability":   float(self.iter_ctrl.current_stability()),
+                "objective":   float(self.iter_ctrl.current_objective()),
+                "energy":      float(self.iter_ctrl.current_energy()),
                 "lr":          float(self.iter_ctrl.current_lr()),
                 "eug":         float(self.iter_ctrl.current_eug()),
                 "delta_u":     float(self.iter_ctrl.utility_acceleration()),
@@ -342,9 +344,18 @@ class IECNN:
             self._record_dot_outcomes(surv, candidates, assign, dots)
 
             # ── F17 Dot Reinforcement Pressure ───────────────────────────
-            delta_u = self.iter_ctrl.utility_acceleration()
+            # Dots now respond to normalized global objective J(t)
+            obj     = self.iter_ctrl.current_objective()
+            # Crude normalization for now: tanh(obj)
+            j_norm  = float(np.tanh(obj))
+
             dot_ids = [d.dot_id for d in dots]
-            drp     = self.dot_memory.drp_scores(dot_ids, eug_val, delta_u)
+            drp     = self.dot_memory.drp_scores(dot_ids, j_norm)
+
+            # ── F23 Memory Decay ─────────────────────────────────────────
+            from formulas.formulas import memory_plasticity
+            rho = memory_plasticity(self.iter_ctrl.current_stability())
+            self.dot_memory.apply_memory_decay(dot_ids, rho)
 
             # Step 1 — floor pressure on raw scores (gentle, catches near-zero)
             self.dot_memory.apply_floor_pressure(dot_ids, drp)
@@ -714,15 +725,16 @@ class IECNN:
         print(f"  IECNN  │  input: '{trunc}'")
         print(f"  {basemap}  │  dots: {len(dots)} ({type_str})")
         print(f"{'═'*74}")
-        print(f"  {'Rnd':>3}  {'cands':>5}  {'kept':>5}  {'cls':>4}  {'mic':>4}  "
-              f"{'dom':>6}  {'top':>7}  {'ent':>6}  {'stab':>6}  {'lr':>6}  {'eug':>7}")
+        print(f"  {'Rnd':>3}  {'cands':>5}  {'kept':>5}  {'cls':>4}  "
+              f"{'dom':>6}  {'obj':>7}  {'ent':>6}  {'stab':>6}  {'enrg':>6}  {'lr':>6}  {'eug':>7}")
         print(f"  {'─'*71}")
 
     def _print_round(self, r: Dict):
         eug = r.get("eug", float("nan"))
         eug_str = f"{eug:>+7.4f}" if eug == eug else "    n/a"
         print(f"  {r['round']:>3}  {r['candidates']:>5}  {r['filtered']:>5}  "
-              f"{r['clusters']:>4}  {r['micro']:>4}  "
-              f"{r['dominance']:>6.3f}  {r['top_score']:>7.4f}  "
+              f"{r['clusters']:>4}  "
+              f"{r['dominance']:>6.3f}  {r['objective']:>7.4f}  "
               f"{r['entropy']:>6.3f}  {r['stability']:>6.3f}  "
+              f"{r['energy']:>6.3f}  "
               f"{r['lr']:>6.4f}  {eug_str}")

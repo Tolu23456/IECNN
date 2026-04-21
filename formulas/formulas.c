@@ -250,6 +250,34 @@ float convergence_score_ultra(const float *preds, const float *confs,
     return base_c * (1.0f - repellent_weight * r_sim);
 }
 
+/* ── New Formulas F21–F26 ────────────────────────────────────────── */
+
+float global_energy(float entropy, float dominance, float instability,
+                    float alpha, float beta, float gamma) {
+    return alpha * entropy + beta * dominance + gamma * instability;
+}
+
+float system_objective(float convergence, float utility, float energy) {
+    return convergence + utility - energy;
+}
+
+float memory_plasticity(float stability) {
+    return 1.0f / (1.0f + expf(-stability));
+}
+
+float dot_fitness(float rd, float cd, float sd, float ud, float nd,
+                  float alpha, float beta, float gamma, float delta) {
+    return rd + alpha * cd + beta * sd + gamma * ud - delta * nd;
+}
+
+float stability_energy(float entropy, float instability, float lambda1, float lambda2) {
+    return 1.0f - (lambda1 * entropy + lambda2 * instability);
+}
+
+float exploration_pressure(float stability, float dominance) {
+    return (1.0f - stability) + (1.0f - dominance);
+}
+
 /* Fast Batch Similarity Score
  * Efficiently computes similarity between a batch of queries and a batch of targets.
  */

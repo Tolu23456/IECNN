@@ -54,6 +54,13 @@ def _load_lib():
             lib.cross_type_agreement.restype     = ctypes.c_float
             lib.adaptive_learning_rate.restype   = ctypes.c_float
             lib.hierarchical_convergence_score.restype = ctypes.c_float
+            # F21–F26
+            lib.global_energy.restype            = ctypes.c_float
+            lib.system_objective.restype         = ctypes.c_float
+            lib.memory_plasticity.restype        = ctypes.c_float
+            lib.dot_fitness.restype              = ctypes.c_float
+            lib.stability_energy.restype         = ctypes.c_float
+            lib.exploration_pressure.restype     = ctypes.c_float
             _lib = lib
         except Exception:
             _lib = None
@@ -366,28 +373,33 @@ def hierarchical_convergence_score(centroids: List[np.ndarray], scores: List[flo
 
 # ── Formula 16: Emergent Utility Gradient ────────────────────────────
 
-def emergent_utility_gradient(score_history: List[float]) -> float:
+def emergent_utility_gradient(score_history: List[float],
+                              entropy_history: Optional[List[float]] = None,
+                              stability_history: Optional[List[float]] = None,
+                              lambda1: float = 0.3,
+                              lambda2: float = 0.3) -> float:
     """
-    F16: U(t) = E[C_{t+1}(p)] - C_t(p)
+    FIXED F16: U(t) = ΔC + λ1·ΔH + λ2·ΔS
 
-    Estimates the expected convergence gain in the next round by
-    extrapolating the recent trend in top-cluster scores.
+    Measures improvement, structural change (entropy), and stability evolution.
 
-    Positive  → structure still improving; keep iterating.
-    Near-zero / negative → no future utility gain expected; can stop.
-
-    With 2 rounds: U = C_t - C_{t-1}  (simple delta)
-    With 3+ rounds: U = 0.7*(C_t-C_{t-1}) + 0.3*(C_{t-1}-C_{t-2})
-                    (recency-weighted to dampen transient spikes)
+    If history is short, falls back to simple score delta.
     """
     n = len(score_history)
     if n < 2:
-        return 1.0  # insufficient history — assume gain is still possible
-    delta = score_history[-1] - score_history[-2]
-    if n >= 3:
-        delta2 = score_history[-2] - score_history[-3]
-        delta = 0.7 * delta + 0.3 * delta2
-    return float(delta)
+        return 1.0
+
+    delta_c = score_history[-1] - score_history[-2]
+
+    delta_h = 0.0
+    if entropy_history and len(entropy_history) >= 2:
+        delta_h = entropy_history[-1] - entropy_history[-2]
+
+    delta_s = 0.0
+    if stability_history and len(stability_history) >= 2:
+        delta_s = stability_history[-1] - stability_history[-2]
+
+    return float(delta_c + lambda1 * delta_h + lambda2 * delta_s)
 
 
 # ── Formula 17: Dot Reinforcement Pressure ───────────────────────────
@@ -407,34 +419,22 @@ def amplify_pressure(pressure: float) -> float:
 def dot_reinforcement_pressure(
     convergence_contrib: float,
     specialization:      float,
-    eug:                 float,
-    delta_u:             float,
+    system_health:       float,  # Normalized J(t) / max|J|
     failure_rate:        float,
     lambda1: float = 0.40,
     lambda2: float = 0.20,
     lambda3: float = 0.30,
-    beta:    float = 0.50,
     lambda4: float = 0.10,
 ) -> float:
     """
-    F17: R_d(t) = λ1·C_d + λ2·S_d + λ3·U_norm·(1 + β·ΔU_norm) − λ4·N_d
+    FIXED F17: R_d(t) = λ1·C_d + λ2·S_d + λ3·J_norm − λ4·N_d
 
-    C_d       = convergence contribution (effectiveness score of dot d)
-    S_d       = specialization score (consistency of predictions)
-    U_norm    = tanh(eug × 5)  — normalized Emergent Utility Gradient (F16)
-    ΔU_norm   = tanh(delta_u × 5) — normalized utility acceleration
-    N_d       = failure_rate = 1 − effectiveness (penalty for low-quality dots)
-
-    Positive pressure → dot is rewarded (kept, reproduced)
-    Low pressure → dot decays toward removal or mutation
+    Now dots respond to global system health J(t), not just local slope.
     """
-    u_norm  = float(np.tanh(eug     * 5.0))
-    du_norm = float(np.tanh(delta_u * 5.0))
-    utility_term = u_norm * (1.0 + beta * du_norm)
     return float(
         lambda1 * convergence_contrib
         + lambda2 * specialization
-        + lambda3 * utility_term
+        + lambda3 * system_health
         - lambda4 * failure_rate
     )
 
@@ -517,6 +517,67 @@ def semantic_drift(input_latent: np.ndarray, output_latent: np.ndarray,
     """
     return float(np.clip(1.0 - similarity_score(input_latent, output_latent, alpha),
                          0.0, 1.0))
+
+
+# ── New Formulas F21–F26 ──────────────────────────────────────────
+
+def global_energy(entropy: float, dominance: float, instability: float,
+                  alpha: float = 0.2, beta: float = 0.2, gamma: float = 0.2) -> float:
+    """F21: E(t) = alpha*H(t) + beta*D(t) + gamma*||C_t - C_{t-1}||"""
+    lib = _load_lib()
+    if lib:
+        return float(lib.global_energy(
+            ctypes.c_float(entropy), ctypes.c_float(dominance), ctypes.c_float(instability),
+            ctypes.c_float(alpha), ctypes.c_float(beta), ctypes.c_float(gamma)
+        ))
+    return alpha * entropy + beta * dominance + gamma * instability
+
+def system_objective(convergence: float, utility: float, energy: float) -> float:
+    """F22: J(t) = C(t) + U(t) - E(t)"""
+    lib = _load_lib()
+    if lib:
+        return float(lib.system_objective(
+            ctypes.c_float(convergence), ctypes.c_float(utility), ctypes.c_float(energy)
+        ))
+    return convergence + utility - energy
+
+def memory_plasticity(stability: float) -> float:
+    """F23: rho(t) = sigmoid(stability(t))"""
+    lib = _load_lib()
+    if lib:
+        return float(lib.memory_plasticity(ctypes.c_float(stability)))
+    return 1.0 / (1.0 + np.exp(-stability))
+
+def dot_fitness(rd: float, cd: float, sd: float, ud: float, nd: float,
+                alpha: float = 0.2, beta: float = 0.2, gamma: float = 0.2, delta: float = 0.1) -> float:
+    """F24: F_d = R_d + alpha*C_d + beta*S_d + gamma*U_d - delta*N_d"""
+    lib = _load_lib()
+    if lib:
+        return float(lib.dot_fitness(
+            ctypes.c_float(rd), ctypes.c_float(cd), ctypes.c_float(sd), ctypes.c_float(ud), ctypes.c_float(nd),
+            ctypes.c_float(alpha), ctypes.c_float(beta), ctypes.c_float(gamma), ctypes.c_float(delta)
+        ))
+    return rd + alpha * cd + beta * sd + gamma * ud - delta * nd
+
+def stability_energy(entropy: float, instability: float,
+                     lambda1: float = 0.5, lambda2: float = 0.5) -> float:
+    """F25: S(t) = 1 - (lambda1*H(t) + lambda2*||C_t - C_{t-1}||)"""
+    lib = _load_lib()
+    if lib:
+        return float(lib.stability_energy(
+            ctypes.c_float(entropy), ctypes.c_float(instability),
+            ctypes.c_float(lambda1), ctypes.c_float(lambda2)
+        ))
+    return 1.0 - (lambda1 * entropy + lambda2 * instability)
+
+def exploration_pressure(stability: float, dominance: float) -> float:
+    """F26: X(t) = 1 - S(t) + (1 - D(t))"""
+    lib = _load_lib()
+    if lib:
+        return float(lib.exploration_pressure(
+            ctypes.c_float(stability), ctypes.c_float(dominance)
+        ))
+    return (1.0 - stability) + (1.0 - dominance)
 
 
 # ── Formula 20: Vocabulary Coverage Score ────────────────────────────
