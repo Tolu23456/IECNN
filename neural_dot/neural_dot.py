@@ -172,35 +172,6 @@ class NeuralDot:
         self.b_offset = rng.randn(feature_dim).astype(np.float32) * scale * 0.1
         self._rng = np.random.RandomState(seed + 1)
 
-    def predict(self, basemap, memory_hint=None, context_entropy=0.5, consensus=None):
-        lib = _load_lib()
-        sl, start, end = self._select_slice(basemap.matrix)
-
-        if self.dot_type == DotType.TEMPORAL: pooled = self._temporal_pool(sl)
-        elif self.dot_type == DotType.RELATIONAL: pooled = self._relational_pool(sl)
-        elif self.dot_type == DotType.LOGIC: pooled = self._logic_pool(sl)
-        else: pooled = np.mean(sl, axis=0)
-
-        focused = self._apply_dim_focus(pooled)
-        abstract = np.tanh(self.W @ focused + self.b_offset)
-        T = self.bias.effective_temperature(context_entropy)
-
-        results = []
-        for h in range(self.n_heads):
-            noise = self._rng.randn(self.feature_dim).astype(np.float32)
-            if lib:
-                out = np.zeros(self.feature_dim, dtype=np.float32)
-                lib.project_head(_fp(abstract)[0], _fp(self.head_projs[h])[0], _fp(self.b_offset)[0],
-                                 ctypes.c_int(self.feature_dim), ctypes.c_float(T), _fp(noise)[0], _fp(out)[0])
-                pred = out
-            else:
-                pred = np.tanh(self.head_projs[h] @ abstract + self.b_offset) + noise * T * 0.05
-
-            norm = np.linalg.norm(pred)
-            if norm > 1e-10: pred = pred / norm * np.sqrt(self.feature_dim)
-            results.append((pred, prediction_confidence(pred), {"dot_id": self.dot_id, "dot_type": _TYPE_NAMES[self.dot_type], "source": "original"}))
-        return results
-
     def _select_slice(self, matrix: np.ndarray):
         """
         Select a contiguous slice of the basemap matrix.
@@ -222,10 +193,14 @@ class NeuralDot:
         return matrix[start:end], start, end
 
     def _apply_dim_focus(self, v):
+        """
+        Soft Masking: focus on specific dimensions while preserving weak
+        signal from others to allow cross-feature interaction.
+        """
         lo, hi = _TYPE_DIM_RANGES[self.dot_type]
-        out = np.zeros_like(v)
-        out[lo:hi] = v[lo:hi]
-        return out
+        mask = np.ones_like(v) * 0.1 # Soft baseline (10% signal)
+        mask[lo:hi] = 1.0           # Strong focus
+        return v * mask
 
     # ── Pooling strategies ────────────────────────────────────────────
 
@@ -279,15 +254,26 @@ class NeuralDot:
         """
         Relational pooling: compute the difference between all token pairs,
         then average. Captures interaction patterns between tokens.
+        Optimized with vectorized matrix operations.
         """
         n = mat.shape[0]
         if n == 1: return mat[0]
-        diffs = []
-        for i in range(n):
-            for j in range(i+1, n):
-                diff = mat[i] - mat[j]
-                diffs.append(diff)
-        return np.mean(np.stack(diffs), axis=0)
+
+        # O(n^2) optimized using broadcasting: (n, 1, d) - (1, n, d) -> (n, n, d)
+        # We only need the upper triangle i < j, but averaging all pairs (i, j)
+        # where i != j is equivalent due to symmetry (i-j = -(j-i)).
+        # Summing (i-j) for all i,j gives 0. So we specifically want the mean of
+        # absolute or squared differences? No, the original logic was mean of (mat[i] - mat[j]).
+        # Actually, mean of (mat[i] - mat[j]) for all i < j is:
+        # sum_{i<j} (mat[i] - mat[j]) / (n*(n-1)/2)
+
+        # Efficient implementation:
+        # sum_{i<j} (mat[i] - mat[j]) = sum_{i} mat[i]*(n-1-i) - sum_{j} mat[j]*j
+        # where i is index from 0 to n-1.
+        coeffs = np.arange(n-1, -n, -2, dtype=np.float32)
+        total_diff = (mat * coeffs[:, None]).sum(axis=0)
+        num_pairs = n * (n - 1) / 2
+        return total_diff / num_pairs
 
     def _logic_pool(self, mat: np.ndarray) -> np.ndarray:
         """
@@ -360,10 +346,20 @@ class NeuralDot:
 
     def _project_head(self, v: np.ndarray, head: int, temperature: float) -> np.ndarray:
         """Project through head-specific matrix and add temperature noise."""
+        lib = _load_lib()
         H  = self.head_projs[head]
+        noise = self._rng.randn(self.feature_dim).astype(np.float32)
+
+        if lib:
+            out = np.zeros(self.feature_dim, dtype=np.float32)
+            lib.project_head(_fp(v)[0], _fp(H)[0], _fp(self.b_offset)[0],
+                             ctypes.c_int(self.feature_dim), ctypes.c_float(temperature),
+                             _fp(noise)[0], _fp(out)[0])
+            return out
+
+        # Fallback
         p  = np.tanh(H @ v + self.b_offset * (head + 1) * 0.1)
-        noise = self._rng.randn(len(p)).astype(np.float32) * temperature * 0.05
-        return p + noise
+        return p + noise * temperature * 0.05
 
     def _reason(self, v: np.ndarray, temperature: float,
                 consensus: Optional[np.ndarray] = None) -> np.ndarray:
