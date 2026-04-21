@@ -834,3 +834,44 @@ class BaseMapper:
         ctx[3] = sum(1.0 for _, t in window if t in ("word", "phrase")) / len(window)
 
         return np.clip(ctx, 0.0, 1.0)
+
+    def fit_contrastive(self, matching_pairs: List[Tuple[str, str]],
+                        mismatch_pairs: List[Tuple[str, str]],
+                        lr: float = 0.05):
+        """
+        Ultimate SOTA Upgrade: Contrastive Anchoring.
+        Explicitly pulls matching concepts closer and pushes mismatches apart
+        in the base vocabulary.
+        """
+        for a, b in matching_pairs:
+            if a in self._base_vocab and b in self._base_vocab:
+                ea, eb = self._base_vocab[a], self._base_vocab[b]
+                # Pull together
+                self._base_vocab[a] = ea + lr * (eb - ea)
+                self._base_vocab[b] = eb + lr * (ea - eb)
+                # Normalize
+                self._base_vocab[a] /= np.linalg.norm(self._base_vocab[a])
+                self._base_vocab[b] /= np.linalg.norm(self._base_vocab[b])
+
+        for a, b in mismatch_pairs:
+            if a in self._base_vocab and b in self._base_vocab:
+                ea, eb = self._base_vocab[a], self._base_vocab[b]
+                # Push apart
+                self._base_vocab[a] = ea - lr * (eb - ea)
+                self._base_vocab[b] = eb - lr * (ea - eb)
+                # Normalize
+                self._base_vocab[a] /= np.linalg.norm(self._base_vocab[a])
+                self._base_vocab[b] /= np.linalg.norm(self._base_vocab[b])
+
+    def shard_vocab(self, max_shard_size: int = 10000):
+        """Ultimate SOTA Scale: Vocabulary Sharding.
+        Splits the massive vocabulary into manageable shards to keep search fast.
+        """
+        if len(self._base_vocab) <= max_shard_size:
+            return [self._base_vocab]
+
+        items = list(self._base_vocab.items())
+        shards = []
+        for i in range(0, len(items), max_shard_size):
+            shards.append(dict(items[i:i + max_shard_size]))
+        return shards

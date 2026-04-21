@@ -28,3 +28,6 @@ uv.lock
 noisy_multimodal/
 tinystories_noisy_10k.txt
 noisy_multimodal_100.pkl
+extreme_multimodal/
+tinystories_extreme_100k.txt
+extreme_multimodal_100.pkl

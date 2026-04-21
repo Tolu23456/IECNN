@@ -64,3 +64,12 @@ void project_head(const float *v, const float *W, const float *b, int dim, float
         out[i] = tanhf(sum) + noise[i] * temperature * 0.05f;
     }
 }
+
+/* Dot Synergy: Multi-dot cross-query mechanism
+ * Dots can adjust their own representation based on another 'peer' representation.
+ */
+void apply_synergy_fast(float *v, const float *peer, int dim, float synergy_weight) {
+    for (int i = 0; i < dim; i++) {
+        v[i] = (1.0f - synergy_weight) * v[i] + synergy_weight * peer[i];
+    }
+}

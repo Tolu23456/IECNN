@@ -437,3 +437,37 @@ def dot_reinforcement_pressure(
         + lambda3 * utility_term
         - lambda4 * failure_rate
     )
+
+def convergence_score_ultra(predictions: List[np.ndarray], confidences: List[float],
+                           alpha: float = 0.7, repellent: Optional[np.ndarray] = None,
+                           repellent_weight: float = 0.2) -> float:
+    """F2 Ultra: base convergence score penalized by similarity to a repellent centroid."""
+    base_s = convergence_score(predictions, confidences, alpha)
+    if repellent is None or repellent_weight <= 0:
+        return base_s
+
+    mean_p = np.mean(np.stack(predictions), axis=0)
+    r_sim = similarity_score(mean_p, repellent, alpha)
+    return base_s * (1.0 - repellent_weight * r_sim)
+
+def apply_synergy(v: np.ndarray, peer: np.ndarray, weight: float = 0.1) -> np.ndarray:
+    """Apply synergy shift toward a peer vector."""
+    return (1.0 - weight) * v + weight * peer
+
+def batch_similarity(queries: np.ndarray, targets: np.ndarray, alpha: float = 0.7) -> np.ndarray:
+    """Batch similarity score: returns (n_q x n_t) similarity matrix."""
+    lib = _load_lib()
+    n_q, dim = queries.shape
+    n_t, _ = targets.shape
+    out = np.zeros((n_q, n_t), dtype=np.float32)
+    if lib:
+        import ctypes
+        lib.batch_similarity_fast(_fp(queries)[0], ctypes.c_int(n_q), _fp(targets)[0],
+                                 ctypes.c_int(n_t), ctypes.c_int(dim),
+                                 ctypes.c_float(alpha), _fp(out)[0])
+        return out
+    # Fallback
+    for i in range(n_q):
+        for j in range(n_t):
+            out[i, j] = similarity_score(queries[i], targets[j], alpha)
+    return out

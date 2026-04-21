@@ -37,3 +37,16 @@ void render_audio_fast(const float *latent, int sr, float duration, short *out_p
         out_pcm[i] = (short)(val * 32767.0f);
     }
 }
+
+/* Temporal Continuity for Video Generation
+ * Updates current frame based on previous frame and motion latent.
+ */
+void render_video_frame_fast(const float *prev_frame, const float *motion_latent,
+                            int width, int height, float alpha, unsigned char *out_rgb) {
+    for (int i = 0; i < width * height * 3; i++) {
+        float base = (float)prev_frame[i];
+        float shift = motion_latent[i % 256] * 10.0f; // Scale motion
+        float val = base + shift;
+        out_rgb[i] = (unsigned char)(val < 0 ? 0 : (val > 255 ? 255 : val));
+    }
+}
