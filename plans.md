@@ -7,6 +7,20 @@ Tracked ideas, fixes, and features. Mark items done with [x] as work completes.
 ## Done
 
 - [x] Migrate to Replit (Python 3.11, C extensions compiled via build.sh)
+- [x] Pillow installed (required by `decoding/decoder.py`; was crashing `generate`)
+- [x] Silent interactive REPL: `python main.py` shows only `> ` prompt; original showcase moved to `python main.py demo`
+- [x] Persistent brain across sessions: `save_brain()` / `load_brain()` on IECNN
+      - `global_brain.pkl` (vocab) + companion `.dots.pkl` / `.dotmem.pkl` /
+        `.clustmem.pkl` / `.evo.pkl` / `.meta.pkl`
+      - state_dict / load_state on DotMemory, ClusterMemory, DotEvolution
+      - auto-load on `IECNN.__init__`, auto-save after every interactive command
+- [x] `train_pass()` method on IECNN — real learning sweep over a sentence list
+      (records dot outcomes, runs evolution per sentence, updates cluster memory)
+- [x] `fit_file()` now runs vocab fit AND a learning pass (not just vocab)
+- [x] CLI `train <file> [--limit N]` subcommand
+- [x] Downloaded WikiText-2 corpus (`corpus_10k.txt`, 10 000 lines)
+- [x] First real learned brain saved: 30 sentences trained,
+      gen=30, active_dots=1156, max_eff=0.0472, cluster_memory ≈ 62 KB
 - [x] F16 Emergent Utility Gradient — replaces broken cluster-ID novelty_gain check
 - [x] F17 Dot Reinforcement Pressure (DRP) — within-call selection pressure
 - [x] Instability injection — Gaussian noise on refined vector when EUG stagnant
@@ -43,7 +57,8 @@ Tracked ideas, fixes, and features. Mark items done with [x] as work completes.
 ### Decoder quality
 - [ ] Beam search in Stage 2 of text decoder (width 3–5): keep top-N partial sequences instead of greedy argmax to reduce first-token errors
 - [ ] Add common function words to `_base_vocab` as guaranteed entries so short frequent words are always decodable even with small corpora
-- [ ] Expose `model.save()` / `model.load()` so trained vocab persists to disk between CLI sessions
+- [x] Expose `model.save()` / `model.load()` so trained vocab persists to disk between CLI sessions
+- [ ] Order-aware decoding: current text decoder picks tokens by embedding similarity only, with no notion of word order, so generations come out as thematic word salad. Consider adding a simple bigram/trigram statistic from the training corpus to bias next-token choice.
 
 ### Stopping condition tuning
 - [ ] Dynamic EUG threshold: scale threshold with round number
@@ -58,11 +73,23 @@ Tracked ideas, fixes, and features. Mark items done with [x] as work completes.
       temporal dots
 
 ### Memory system
-- [ ] Persistent dot state across CLI sessions (pickle DotMemory + evolution gen)
+- [x] Persistent dot state across CLI sessions (pickle DotMemory + evolution gen)
 - [ ] Make dot_id truly stable across evolution rounds (not positional index)
       so effectiveness history survives crossover/replacement
 - [ ] ClusterMemory pattern matching: use stored patterns to seed round 0
       centroid hints instead of zero-initialised vectors
+
+### Training scalability (BLOCKER for full 10k-line training)
+- [ ] **Prune `dot_memory` of dots with zero recorded outcomes.** Currently each
+      generation adds ~40 new dot IDs; after ~50 sentences the tracked pool
+      reaches ~2000 dots and the process gets OOM-killed mid-training.
+      Practical batch is ~30 sentences per `train` invocation right now.
+- [ ] Cap `dot_pool` save size — `global_brain.pkl.dots.pkl` is currently
+      ~336 MB after 30 sentences because every active dot serializes its
+      4× (256×256) head_proj matrices. Either persist only the live 64 dots
+      or quantize the head_projs.
+- [ ] Resume metadata: track cumulative trained-sentence count in `.meta.pkl`
+      so repeated `train` calls can skip already-seen lines.
 
 ---
 
