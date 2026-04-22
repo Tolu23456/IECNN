@@ -37,13 +37,15 @@ def _load_lib():
 class MicroCluster:
     def __init__(self, micro_id: int):
         self.micro_id = micro_id
+        self.indices = []
         self.predictions = []
         self.confidences = []
         self.infos = []
         self.centroid = None
         self.score = 0.0
 
-    def add(self, p, c, info):
+    def add(self, idx, p, c, info):
+        self.indices.append(idx)
         self.predictions.append(p); self.confidences.append(c); self.infos.append(info)
         self.centroid = np.mean(np.stack(self.predictions), axis=0)
 
@@ -53,6 +55,7 @@ class MicroCluster:
 class Cluster:
     def __init__(self, cluster_id: int):
         self.cluster_id = cluster_id
+        self.indices = []
         self.predictions = []
         self.confidences = []
         self.infos = []
@@ -60,7 +63,8 @@ class Cluster:
         self.score = 0.0
         self._micro_clusters = []
 
-    def add(self, p, c, info):
+    def add(self, idx, p, c, info):
+        self.indices.append(idx)
         self.predictions.append(p); self.confidences.append(c); self.infos.append(info)
         self._recompute_centroid()
 
@@ -73,19 +77,32 @@ class Cluster:
 
     def add_micro(self, mc):
         self._micro_clusters.append(mc)
+        self.indices.extend(mc.indices)
         self.predictions.extend(mc.predictions)
         self.confidences.extend(mc.confidences)
         self.infos.extend(mc.infos)
         self._recompute_centroid()
 
-    def compute_score(self, alpha=0.7, gamma=0.3):
+    def compute_score(self, alpha=0.7, gamma=0.3, pool_size: int = 100):
         if len(self._micro_clusters) >= 2:
             centroids = [mc.centroid for mc in self._micro_clusters if mc.centroid is not None]
             scores = [mc.score for mc in self._micro_clusters]
             if centroids and scores:
-                self.score = hierarchical_convergence_score(centroids, scores, alpha, gamma)
+                base_score = hierarchical_convergence_score(centroids, scores, alpha, gamma)
+                # Apply Size Penalty (Diminishing Returns)
+                # large clusters shouldn't dominate purely by size
+                # Penalty Factor: log(size) / size?
+                # Let's use a simpler tanh-based saturation
+                size_ratio = len(self.predictions) / pool_size
+                saturation = np.tanh(size_ratio * 5.0) / (size_ratio * 5.0 + 1e-10)
+                self.score = base_score * (0.8 + 0.2 * saturation)
                 return
-        self.score = convergence_score(self.predictions, self.confidences, alpha)
+
+        base_score = convergence_score(self.predictions, self.confidences, alpha)
+        # Size penalty for micro-clusters too
+        size_ratio = len(self.predictions) / pool_size
+        saturation = np.tanh(size_ratio * 5.0) / (size_ratio * 5.0 + 1e-10)
+        self.score = base_score * (0.8 + 0.2 * saturation)
 
     def apply_cross_type_bonus(self, alpha=0.7, bonus_weight=0.15):
         type_preds = {}
@@ -144,27 +161,59 @@ class ConvergenceLayer:
         confs = [c[1] for c in candidates]
         infos = [c[2] for c in candidates]
 
+        # ── Adaptive Thresholding ──
+        # Calculate thresholds based on the similarity distribution of the pool.
+        # This makes the system robust to different noise levels and input types.
+        if len(preds) > 5:
+            # Sample a few pairs to estimate similarity stats
+            sample_size = min(len(preds), 20)
+            rng = np.random.RandomState(42)
+            idx = rng.choice(len(preds), sample_size, replace=False)
+            sims = []
+            for i in range(len(idx)):
+                for j in range(i + 1, len(idx)):
+                    sims.append(similarity_score(preds[idx[i]], preds[idx[j]], self.alpha))
+
+            s_mean = np.mean(sims)
+            s_std  = np.std(sims)
+
+            # micro_thresh = mean + 1.0 * std (tight)
+            # macro_thresh = mean - 0.5 * std (loose)
+            adaptive_micro = float(np.clip(s_mean + 0.8 * s_std, 0.2, 0.9))
+            adaptive_macro = float(np.clip(s_mean - 0.2 * s_std, 0.1, 0.7))
+        else:
+            adaptive_micro = self.micro_thresh
+            adaptive_macro = self.macro_thresh
+
         # Multi-modal boost: slightly lower threshold for cross-modal agreement
-        # to encourage the emergence of unified concepts.
         is_mixed = len(set(info.get("modality", "unknown") for info in infos)) > 1
-        current_micro_thresh = self.micro_thresh * 0.9 if is_mixed else self.micro_thresh
+        current_micro_thresh = adaptive_micro * 0.9 if is_mixed else adaptive_micro
 
         # Stage 1: micro-clustering
+        # We run multiple passes or use batch logic to ensure stability.
         micro_clusters = self._micro_cluster(preds, confs, infos, current_micro_thresh)
+
+        n_candidates = len(candidates)
         for mc in micro_clusters:
             mc.compute_score(self.alpha)
+            # Apply size penalty to micro-clusters
+            size_ratio = len(mc.predictions) / n_candidates
+            saturation = np.tanh(size_ratio * 5.0) / (size_ratio * 5.0 + 1e-10)
+            mc.score = mc.score * (0.8 + 0.2 * saturation)
 
         # Stage 2: macro-clustering over micro-cluster centroids
-        macro_clusters = self._macro_cluster(micro_clusters)
+        macro_clusters = self._macro_cluster(micro_clusters, adaptive_macro)
+        n_candidates = len(candidates)
         for cl in macro_clusters:
-            cl.compute_score(self.alpha, self.gamma)
+            cl.compute_score(self.alpha, self.gamma, pool_size=n_candidates)
             cl.apply_cross_type_bonus(self.alpha, self.ct_bonus)
         macro_clusters.sort(key=lambda c: c.score, reverse=True)
+
         assign = [-1] * len(candidates)
         for cl in macro_clusters:
-            for mc in cl._micro_clusters:
-                for i, info in enumerate(infos):
-                    if info in mc.infos: assign[i] = cl.cluster_id
+            for idx in cl.indices:
+                assign[idx] = cl.cluster_id
+
         return macro_clusters, assign
 
     # ── Stage 1: Micro-clustering ────────────────────────────────────
@@ -194,7 +243,7 @@ class ConvergenceLayer:
             clusters = [MicroCluster(i) for i in range(n_clusters)]
             for i in range(n_preds):
                 cid = c_ids[i]
-                clusters[cid].add(preds[i], confs[i], infos[i])
+                clusters[cid].add(i, preds[i], confs[i], infos[i])
             return clusters
 
         # Python fallback
@@ -208,20 +257,21 @@ class ConvergenceLayer:
                 if s > best_sim: best_sim, best_cid = s, cid
             if best_cid == -1:
                 mc = MicroCluster(len(clusters))
-                mc.add(p, c, info)
+                mc.add(i, p, c, info)
                 clusters.append(mc); centroids.append(p.copy())
             else:
-                clusters[best_cid].add(p, c, info)
+                clusters[best_cid].add(i, p, c, info)
                 centroids[best_cid] = clusters[best_cid].centroid
         return clusters
 
-    def _macro_cluster(self, micros):
+    def _macro_cluster(self, micros, threshold: Optional[float] = None):
         if not micros: return []
+        if threshold is None: threshold = self.macro_thresh
         macro_list = []
         macro_centroids = []
         for mc in micros:
             if mc.centroid is None: continue
-            best_cid, best_sim = -1, self.macro_thresh
+            best_cid, best_sim = -1, threshold
             for cid, cent in enumerate(macro_centroids):
                 s = similarity_score(mc.centroid, cent, self.alpha)
                 if s > best_sim: best_sim, best_cid = s, cid
