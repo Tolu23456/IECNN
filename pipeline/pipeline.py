@@ -455,8 +455,12 @@ class IECNN:
         # delta_j is relative to some baseline or previous run
         self.cognition.update_aaf(final_j, lr=0.01)
 
-        # ── Layer 12: AGI Loop (World, Memory, Planning) ──────────────
+        # ── Layer 12: AGI Loop (World, Memory, Planning, Reasoning) ───
         agi_report = self.cognition.run_agi_loop(final_out, final_j)
+
+        # The AGI loop may update the final refined latent through reasoning
+        if agi_report.get("reasoned_latent") is not None:
+            final_out = agi_report["reasoned_latent"]
 
         if verbose:
             self._print_cognition_footer(cog_summary, agi_report)

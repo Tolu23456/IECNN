@@ -156,19 +156,27 @@ class IECNNDecoder:
             return Image.fromarray(img_arr)
 
         # Simple rendering based on the latent vector
-        # Map the 224-dim embedding to visual features
-        r_val = int(np.clip(latent[0] * 127 + 128, 0, 255))
-        g_val = int(np.clip(latent[1] * 127 + 128, 0, 255))
-        b_val = int(np.clip(latent[2] * 127 + 128, 0, 255))
+        # Python Fallback for upgraded rendering
+        r_val = latent[0] * 127.0 + 128.0
+        g_val = latent[1] * 127.0 + 128.0
+        b_val = latent[2] * 127.0 + 128.0
 
-        # Create a pattern
         for r in range(128):
+            rel_r = r / 128.0
             for c in range(128):
-                # Gradient based on latent
-                v = (np.sin(r/10.0 * latent[3]) + np.cos(c/10.0 * latent[4])) * 0.5 + 0.5
-                img_arr[r, c, 0] = np.clip(r_val * v, 0, 255)
-                img_arr[r, c, 1] = np.clip(g_val * v, 0, 255)
-                img_arr[r, c, 2] = np.clip(b_val * v, 0, 255)
+                rel_c = c / 128.0
+                val = 0.0
+                for i in range(8):
+                    freq_r = float(i + 1)
+                    freq_c = float(8 - i)
+                    phase = latent[16 + i] * np.pi
+                    amp = latent[8 + i]
+                    val += amp * np.sin(rel_r * 6.28 * freq_r + rel_c * 6.28 * freq_c + phase)
+
+                v = 0.5 + 0.5 * np.tanh(val)
+                img_arr[r, c, 0] = np.clip(r_val * v + latent[3] * 50, 0, 255)
+                img_arr[r, c, 1] = np.clip(g_val * v + latent[4] * 50, 0, 255)
+                img_arr[r, c, 2] = np.clip(b_val * v + latent[5] * 50, 0, 255)
 
         return Image.fromarray(img_arr)
 

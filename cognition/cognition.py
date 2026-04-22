@@ -16,6 +16,7 @@ from formulas.formulas import (
 from .world import WorldState
 from .planning import PlanningSystem
 from .memory import LongTermMemory
+from .reasoning import DeepReasoningLayer
 
 class CognitionLayer:
     """
@@ -35,6 +36,7 @@ class CognitionLayer:
         self.world = WorldState(feature_dim=feature_dim)
         self.planning = PlanningSystem(seed=seed)
         self.memory = LongTermMemory(feature_dim=feature_dim)
+        self.reasoning = DeepReasoningLayer(feature_dim=feature_dim, seed=seed)
 
         # F35: Self-Model (Persistent across runs)
         self.self_model = np.zeros(state_dim, dtype=np.float32)
@@ -178,6 +180,12 @@ class CognitionLayer:
         # Memory retrieval based on cognitive state
         associative_recall = self.memory.retrieve(self.last_csv)
 
+        # 5. Deep Reasoning (triggered by policy)
+        if self.last_policy[0] > 0.25: # task 0 is 'reasoning'
+            current_latent = self.reasoning.analyze(
+                current_latent, self.world, self.planning, self.last_policy
+            )
+
         # Consolidation if surprise was high
         if surprise > 0.5:
             # Predict next state (dummy prediction = last global vector)
@@ -187,7 +195,8 @@ class CognitionLayer:
         return {
             "surprise": surprise,
             "plan_score": plan_score,
-            "recall_norm": float(np.linalg.norm(associative_recall))
+            "recall_norm": float(np.linalg.norm(associative_recall)),
+            "reasoned_latent": current_latent
         }
 
     def save(self, path: str):

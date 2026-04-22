@@ -2,21 +2,43 @@
 #include <string.h>
 #include <stdlib.h>
 
-/* Fast image synthesis from latent */
+/* Upgraded Patch-Based Neural Rendering
+ * Uses 32 latent dimensions to drive a set of spatial basis functions.
+ */
 void render_image_fast(const float *latent, int width, int height, unsigned char *out_rgb) {
-    float r_v = latent[0] * 127.0f + 128.0f;
-    float g_v = latent[1] * 127.0f + 128.0f;
-    float b_v = latent[2] * 127.0f + 128.0f;
-    float l3 = latent[3];
-    float l4 = latent[4];
+    /* Latent dims 0-2: Base RGB */
+    float base_r = latent[0] * 127.0f + 128.0f;
+    float base_g = latent[1] * 127.0f + 128.0f;
+    float base_b = latent[2] * 127.0f + 128.0f;
 
     for (int r = 0; r < height; r++) {
         for (int c = 0; c < width; c++) {
-            float v = (sinf((float)r / 10.0f * l3) + cosf((float)c / 10.0f * l4)) * 0.5f + 0.5f;
+            float val = 0.0f;
+            float rel_r = (float)r / (float)height;
+            float rel_c = (float)c / (float)width;
+
+            /* Accumulate from 8 spatial basis functions (dims 8-15) */
+            for (int i = 0; i < 8; i++) {
+                float freq_r = (float)(i + 1);
+                float freq_c = (float)(8 - i);
+                float phase = latent[16 + i] * 3.14159f;
+                float amp = latent[8 + i];
+                val += amp * sinf(rel_r * 6.28f * freq_r + rel_c * 6.28f * freq_c + phase);
+            }
+
+            /* Add high-frequency texture (dims 24-31) */
+            for (int i = 0; i < 8; i++) {
+                float tx = sinf(rel_r * 50.0f * (float)(i+1)) * cosf(rel_c * 50.0f * (float)(8-i));
+                val += 0.2f * latent[24 + i] * tx;
+            }
+
+            float v = 0.5f + 0.5f * tanhf(val);
             int idx = (r * width + c) * 3;
-            float r_out = r_v * v;
-            float g_out = g_v * v;
-            float b_out = b_v * v;
+
+            float r_out = base_r * v + latent[3] * 50.0f;
+            float g_out = base_g * v + latent[4] * 50.0f;
+            float b_out = base_b * v + latent[5] * 50.0f;
+
             out_rgb[idx]     = (unsigned char)(r_out < 0 ? 0 : (r_out > 255 ? 255 : r_out));
             out_rgb[idx + 1] = (unsigned char)(g_out < 0 ? 0 : (g_out > 255 ? 255 : g_out));
             out_rgb[idx + 2] = (unsigned char)(b_out < 0 ? 0 : (b_out > 255 ? 255 : b_out));
