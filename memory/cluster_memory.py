@@ -178,3 +178,25 @@ class ClusterMemory:
         return (f"ClusterMemory(rounds={s['rounds_recorded']}, "
                 f"patterns={s['patterns_stored']}, "
                 f"stability={s['temporal_stability']:.3f})")
+
+    # ── Persistence ──────────────────────────────────────────────────
+
+    def state_dict(self) -> dict:
+        return {
+            "feature_dim":      self.feature_dim,
+            "max_patterns":     self.max_patterns,
+            "window_rounds":    self.window_rounds,
+            "pattern_library":  [(c.copy(), float(w)) for c, w in self._pattern_library],
+            "pattern_counts":   list(self._pattern_counts),
+        }
+
+    def load_state(self, state: dict):
+        self.feature_dim   = state.get("feature_dim", self.feature_dim)
+        self.max_patterns  = state.get("max_patterns", self.max_patterns)
+        self.window_rounds = state.get("window_rounds", self.window_rounds)
+        self._pattern_library = [
+            (np.asarray(c, dtype=np.float32), float(w))
+            for c, w in state.get("pattern_library", [])
+        ]
+        self._pattern_counts  = list(state.get("pattern_counts", []))
+        self._round_snapshots = []

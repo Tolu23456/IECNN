@@ -97,6 +97,7 @@ class IECNN:
 
         # Core components
         self.base_mapper = BaseMapper(feature_dim=feature_dim)
+        self.persistence_path = persistence_path
         if persistence_path:
             self.base_mapper.load(persistence_path)
             self.base_mapper.persistence_path = persistence_path
@@ -133,11 +134,140 @@ class IECNN:
         self._call_count: int = 0
         self._rng = np.random.RandomState(seed)
 
+        # Auto-load learned state (dots + memory + evolution) if present
+        if persistence_path:
+            try:
+                self.load_brain(persistence_path)
+            except FileNotFoundError:
+                pass
+            except Exception as e:
+                print(f"[IECNN] Could not load learned state: {e}")
+
     # ── Setup ────────────────────────────────────────────────────────
 
     def fit(self, texts: List[str]) -> "IECNN":
         """Discover word and phrase bases from a corpus."""
         self.base_mapper.fit(texts)
+        return self
+
+    def _learned_paths(self, persistence_path: str) -> dict:
+        base = persistence_path
+        return {
+            "dots":      base + ".dots.pkl",
+            "dotmem":    base + ".dotmem.pkl",
+            "clustmem":  base + ".clustmem.pkl",
+            "evo":       base + ".evo.pkl",
+            "meta":      base + ".meta.pkl",
+        }
+
+    def save_brain(self, persistence_path: Optional[str] = None) -> None:
+        """Persist all learned state: vocab + dot pool + memory + evolution."""
+        import pickle
+        from neural_dot.neural_dot import _NEXT_DOT_ID
+        path = persistence_path or self.persistence_path
+        if not path:
+            raise ValueError("No persistence_path set; cannot save brain.")
+        # 1. Vocabulary (existing)
+        self.base_mapper.save(path)
+        # 2. Dot pool, memories, evolution, and metadata
+        paths = self._learned_paths(path)
+        if self._dots is not None:
+            with open(paths["dots"], "wb") as fh:
+                pickle.dump(self._dots, fh, protocol=pickle.HIGHEST_PROTOCOL)
+        with open(paths["dotmem"], "wb") as fh:
+            pickle.dump(self.dot_memory.state_dict(), fh, protocol=pickle.HIGHEST_PROTOCOL)
+        with open(paths["clustmem"], "wb") as fh:
+            pickle.dump(self.cluster_memory.state_dict(), fh, protocol=pickle.HIGHEST_PROTOCOL)
+        with open(paths["evo"], "wb") as fh:
+            pickle.dump(self.evolution.state_dict(), fh, protocol=pickle.HIGHEST_PROTOCOL)
+        with open(paths["meta"], "wb") as fh:
+            pickle.dump({
+                "call_count":   self._call_count,
+                "next_dot_id":  _NEXT_DOT_ID,
+                "feature_dim":  self.feature_dim,
+                "num_dots":     self.num_dots,
+            }, fh, protocol=pickle.HIGHEST_PROTOCOL)
+
+    def load_brain(self, persistence_path: Optional[str] = None) -> None:
+        """Load all learned state previously written by save_brain()."""
+        import pickle
+        from neural_dot.neural_dot import set_next_dot_id
+        path = persistence_path or self.persistence_path
+        if not path:
+            raise ValueError("No persistence_path set; cannot load brain.")
+        paths = self._learned_paths(path)
+        if not os.path.exists(paths["meta"]):
+            raise FileNotFoundError(paths["meta"])
+        with open(paths["meta"], "rb") as fh:
+            meta = pickle.load(fh)
+        self._call_count = int(meta.get("call_count", 0))
+        if "next_dot_id" in meta:
+            set_next_dot_id(int(meta["next_dot_id"]))
+        if os.path.exists(paths["dots"]):
+            with open(paths["dots"], "rb") as fh:
+                self._dots = pickle.load(fh)
+        if os.path.exists(paths["dotmem"]):
+            with open(paths["dotmem"], "rb") as fh:
+                self.dot_memory.load_state(pickle.load(fh))
+        if os.path.exists(paths["clustmem"]):
+            with open(paths["clustmem"], "rb") as fh:
+                self.cluster_memory.load_state(pickle.load(fh))
+        if os.path.exists(paths["evo"]):
+            with open(paths["evo"], "rb") as fh:
+                self.evolution.load_state(pickle.load(fh))
+
+    def train_pass(self, sentences: List[str], max_iterations: int = 2,
+                   max_aim_variants: int = 1, verbose: bool = True,
+                   save_every: int = 500) -> "IECNN":
+        """
+        Run the full pipeline over each sentence so the dot pool, dot memory,
+        cluster memory, and evolution all get updated. This is what makes
+        the model actually 'learn' from the corpus (not just count vocab).
+
+        Uses reduced max_iterations / aim variants for speed during training.
+        """
+        import time
+        # Save & temporarily lower iteration / aim budgets for speed
+        orig_max_iter   = self.iter_ctrl.max_iterations
+        orig_max_aim    = self.aim.max_variants if hasattr(self.aim, "max_variants") else None
+        self.iter_ctrl.max_iterations = max_iterations
+        if orig_max_aim is not None:
+            self.aim.max_variants = max_aim_variants
+
+        n = len(sentences)
+        t0 = time.time()
+        try:
+            for i, sent in enumerate(sentences, 1):
+                if not sent:
+                    continue
+                try:
+                    self.run(sent, verbose=False)
+                except Exception as e:
+                    if verbose:
+                        print(f"\n[train] skip line {i}: {e}")
+                    continue
+                if verbose and (i % 25 == 0 or i == n):
+                    elapsed = time.time() - t0
+                    rate    = i / max(elapsed, 1e-6)
+                    eta     = (n - i) / max(rate, 1e-6)
+                    dm      = self.dot_memory.summary()
+                    print(f"\r[train] {i:>6}/{n}  "
+                          f"({rate:5.1f} ex/s, ETA {eta/60:5.1f}m)  "
+                          f"gen={self.evolution.generation:>3}  "
+                          f"mean_eff={dm['mean_eff']:.3f}  "
+                          f"max_eff={dm['max_eff']:.3f}",
+                          end="", flush=True)
+                if self.persistence_path and save_every and i % save_every == 0:
+                    self.save_brain(self.persistence_path)
+            if verbose:
+                print()
+        finally:
+            self.iter_ctrl.max_iterations = orig_max_iter
+            if orig_max_aim is not None:
+                self.aim.max_variants = orig_max_aim
+
+        if self.persistence_path:
+            self.save_brain(self.persistence_path)
         return self
 
     def fit_file(self, filepath: str, batch_size: int = 500,
@@ -186,9 +316,22 @@ class IECNN:
 
         if verbose:
             n_bases = len(self.base_mapper._base_vocab)
-            print(f"\n[IECNN] Training complete — {total_lines} lines "
+            print(f"\n[IECNN] Vocabulary fit — {total_lines} lines "
                   f"│ vocab: {n_bases} word/phrase bases")
+            print(f"[IECNN] Running learning pass over corpus to update dots…")
 
+        # ── Phase 2: real learning pass over the corpus ────────────────
+        # Read sentences once more so the dot pool, dot memory, cluster
+        # memory and evolution all actually update from the data.
+        sentences: List[str] = []
+        with open(filepath, "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                sentences.append(line)
+
+        self.train_pass(sentences, verbose=verbose)
         return self
 
     def _ensure_dots(self) -> list:

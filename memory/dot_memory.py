@@ -240,3 +240,39 @@ class DotMemory:
         s = self.summary()
         return (f"DotMemory(dots={self.num_dots}, active={s['active_dots']}, "
                 f"mean_eff={s['mean_eff']:.3f}, max_eff={s['max_eff']:.3f})")
+
+    # ── Persistence ──────────────────────────────────────────────────
+
+    def state_dict(self) -> dict:
+        return {
+            "num_dots":        self.num_dots,
+            "window_size":     self.window_size,
+            "lambda1":         self.lambda1,
+            "lambda2":         self.lambda2,
+            "lambda3":         self.lambda3,
+            "lambda4":         self.lambda4,
+            "beta":            self.beta,
+            "success_counts":  dict(self._success_counts),
+            "total_counts":    dict(self._total_counts),
+            "windows":         {k: list(v) for k, v in self._windows.items()},
+            "var_sums":        dict(self._var_sums),
+            "var_counts":      dict(self._var_counts),
+        }
+
+    def load_state(self, state: dict):
+        from collections import deque
+        self.num_dots    = state.get("num_dots", self.num_dots)
+        self.window_size = state.get("window_size", self.window_size)
+        self.lambda1 = state.get("lambda1", self.lambda1)
+        self.lambda2 = state.get("lambda2", self.lambda2)
+        self.lambda3 = state.get("lambda3", self.lambda3)
+        self.lambda4 = state.get("lambda4", self.lambda4)
+        self.beta    = state.get("beta", self.beta)
+        self._success_counts = dict(state.get("success_counts", {}))
+        self._total_counts   = dict(state.get("total_counts", {}))
+        self._windows = {
+            int(k): deque(v, maxlen=self.window_size)
+            for k, v in state.get("windows", {}).items()
+        }
+        self._var_sums   = dict(state.get("var_sums", {}))
+        self._var_counts = dict(state.get("var_counts", {}))

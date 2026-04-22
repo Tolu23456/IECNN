@@ -3,26 +3,23 @@
 IECNN CLI — Iterative Emergent Convergent Neural Network
 
 Usage:
-  python main.py                        # full interactive demo (train + encode + generate)
-  python main.py train <file>           # train on large text file, then interactive
-  python main.py generate "prompt"      # encode prompt → decode output text
+  python main.py                        # silent interactive prompt (no output until you ask)
+  python main.py train <file>           # train on a text file (vocab + dot learning), persists
+  python main.py generate "prompt"      # encode prompt then decode output text
   python main.py encode "text"          # encode text → 256-dim latent vector
   python main.py sim "text A" "text B"  # similarity between two texts
-  python main.py compare "a" "b" "c"   # n×n similarity table
+  python main.py compare "a" "b" "c"    # n×n similarity table
   python main.py memory                 # show dot memory and evolution state
+  python main.py demo                   # run the original 6-example showcase
   python main.py build                  # compile C extensions
 
-  Interactive commands (available in all interactive modes):
+  Interactive commands (available in interactive mode):
     generate <prompt>   encode prompt then decode output
-    train <filepath>    train on a text file (one sentence per line)
+    train <filepath>    train on a text file
     sim A | B           pairwise similarity
-    memory              dot memory + evolution state
+    encode <text>       encode text and show vector summary
+    memory              show dot memory + evolution state
     quit / q            exit
-
-Component folders:
-  aim/   basemapping/  convergence/  evaluation/
-  evolution/  formulas/  iteration/  memory/
-  neural_dot/  pipeline/  pruning/
 """
 
 import sys
@@ -33,7 +30,8 @@ from typing import List
 ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ROOT)
 
-BAR = "─" * 66
+BAR             = "─" * 66
+PERSISTENCE     = "global_brain.pkl"
 
 
 # ── Build C extensions ────────────────────────────────────────────────
@@ -54,72 +52,29 @@ def _build_c(force: bool = False):
         print("[IECNN] C extensions compiled successfully.")
 
 
-# ── Corpus ────────────────────────────────────────────────────────────
-CORPUS = [
+# Minimal seed corpus used only when no global_brain.pkl exists yet, so that
+# the BaseMapper has a few primitives to fall back on. This is NOT training.
+_SEED_CORPUS = [
+    "the quick brown fox jumps over the lazy dog",
     "neural networks learn patterns from data",
-    "iterative convergence finds stable representations",
-    "attention mechanisms focus on relevant features",
-    "base mapping converts text to structured matrices",
-    "neural dots predict independently without weight sharing",
-    "pruning removes weak candidate predictions",
-    "convergence groups similar predictions into clusters",
-    "the winning cluster emerges through agreement",
-    "learning updates the bias vector gradually",
-    "novelty gain measures when exploration is exhausted",
-    "dominant clusters satisfy the stopping condition",
-    "aim inversion challenges prediction assumptions",
-    "feature inversion flips dominant attribute signs",
-    "spatial inversion reverses dimension group ordering",
-    "context inversion swaps foreground and background roles",
-    "scale inversion rescales groups by inverse factors",
-    "abstraction inversion flips levels of understanding",
-    "relational inversion inverts block correlation structure",
-    "temporal inversion reverses sequential dimension order",
-    "compositional inversion decomposes and recombines vectors",
-    "the system pre-seeds letters a through z as primitives",
-    "unknown words compose their embedding from character bases",
-    "each token maps to exactly one matrix row",
-    "phrases are detected as single base units",
-    "the base vocabulary grows from corpus frequency",
-    "sinusoidal position encoding captures token order",
-    "frequency features encode how common a token is",
-    "modifier flags capture structural properties of tokens",
-    "semantic dots attend to meaning and content",
-    "structural dots focus on form and position",
-    "contextual dots view the full sequence globally",
-    "relational dots detect cross-token interaction patterns",
-    "temporal dots use position-weighted sequential pooling",
-    "global dots pool uniformly across all tokens",
-    "dot evolution selects effective dots for reproduction",
-    "dot memory tracks which predictions won past rounds",
-    "cluster memory records temporal stability across rounds",
-    "hierarchical convergence scores nested cluster structure",
-    "cross-type agreement rewards consensus among dot types",
-    "adaptive learning rate slows when convergence is near",
+    "a sentence is a sequence of words",
+    "letters and numbers compose all written text",
 ]
 
 
-def _make_model(verbose: bool = True):
+def _make_model(verbose: bool = False):
     from pipeline.pipeline import IECNN
     if verbose:
-        print(f"[IECNN] Initializing model...")
+        print("[IECNN] Loading model...")
     model = IECNN(
         feature_dim=256, num_dots=128, n_heads=4,
         max_iterations=12, evolve=True, seed=42,
-        persistence_path="global_brain.pkl"
+        persistence_path=PERSISTENCE,
     )
-    if verbose:
-        print(f"[IECNN] Fitting base vocabulary on {len(CORPUS)} corpus sentences...")
-    model.fit(CORPUS)
-    if model.base_mapper.persistence_path:
-        model.base_mapper.save(model.base_mapper.persistence_path)
-    if verbose:
-        bm = model.base_mapper
-        n_words  = sum(1 for t in bm._base_types.values() if t == "word")
-        n_phrase = sum(1 for t in bm._base_types.values() if t == "phrase")
-        print(f"[IECNN] Vocab: {n_words} word bases, {n_phrase} phrase bases, "
-              f"{len(bm._primitive_embeddings)} primitives (a-z + 0-9 + punct)")
-        print()
+    # Only seed the vocab if absolutely empty (first ever run, no brain on disk)
+    if not model.base_mapper.is_fitted:
+        model.fit(_SEED_CORPUS)
+        model.save_brain()
     return model
 
 
@@ -146,13 +101,14 @@ def cmd_encode(text: str):
         print(f"  Quality      : {m.convergence_quality:.4f}")
         print(f"  Entropy      : {m.cluster_entropy:.4f}")
         print(f"  Stability    : {m.temporal_stability:.4f}")
+    model.save_brain()
 
 
 def cmd_similarity(texts: List[str]):
     _build_c()
     if len(texts) < 2:
         print("Need at least two texts."); return
-    model = _make_model(verbose=False)
+    model = _make_model()
     from formulas.formulas import similarity_score
     vecs = [(t, model.encode(t)) for t in texts]
     print(f"\n{BAR}")
@@ -167,7 +123,7 @@ def cmd_similarity(texts: List[str]):
 
 def cmd_compare(texts: List[str]):
     _build_c()
-    model = _make_model(verbose=False)
+    model = _make_model()
     print(f"\n  Computing {len(texts)}×{len(texts)} similarity matrix...")
     mat = model.compare(texts)
     labels = [t[:20] for t in texts]
@@ -182,7 +138,7 @@ def cmd_compare(texts: List[str]):
 
 def cmd_memory(model=None):
     _build_c()
-    if model is None: model = _make_model(verbose=False)
+    if model is None: model = _make_model()
     status = model.memory_status()
     dm = status["dot_memory"]
     cm = status["cluster_memory"]
@@ -190,35 +146,136 @@ def cmd_memory(model=None):
     print(f"\n{BAR}")
     print("  IECNN Memory & Evolution State")
     print(BAR)
-    print(f"  Calls completed  : {status['call_count']}")
-    print(f"  Active dots      : {dm['active_dots']} / {dm['num_dots']}")
+    print(f"  Calls completed   : {status['call_count']}")
+    print(f"  Active dots       : {dm['active_dots']} / {dm['num_dots']}")
     print(f"  Mean effectiveness: {dm['mean_eff']:.4f}")
     print(f"  Max effectiveness : {dm['max_eff']:.4f}")
-    print(f"  Top 5 dots       : {dm['top5']}")
-    print(f"  Cluster patterns : {cm['patterns_stored']}")
+    print(f"  Top 5 dots        : {dm['top5']}")
+    print(f"  Cluster patterns  : {cm['patterns_stored']}")
     print(f"  Temporal stability: {cm['temporal_stability']:.4f}")
-    print(f"  Evolution gen    : {ev['generation']}")
-    print(f"  Evo top_eff      : {ev['top_dot_eff']:.4f}")
-    print(f"  Evo mean_eff     : {ev['mean_eff']:.4f}")
+    print(f"  Evolution gen     : {ev['generation']}")
+    print(f"  Evo top_eff       : {ev['top_dot_eff']:.4f}")
+    print(f"  Evo mean_eff      : {ev['mean_eff']:.4f}")
+
+
+def cmd_train(filepath: str, limit: int = 0):
+    _build_c()
+    if not os.path.exists(filepath):
+        print(f"[IECNN] Corpus not found: {filepath}")
+        return
+    model = _make_model()
+    if limit > 0:
+        # Read up to `limit` non-empty lines and write to a temp file
+        tmp = filepath + f".limit{limit}.tmp"
+        kept = 0
+        with open(filepath, "r", encoding="utf-8", errors="replace") as src, \
+             open(tmp, "w", encoding="utf-8") as dst:
+            for line in src:
+                line = line.strip()
+                if not line or line.startswith("#"): continue
+                dst.write(line + "\n")
+                kept += 1
+                if kept >= limit:
+                    break
+        print(f"[IECNN] Training on first {kept} lines of {filepath}")
+        model.fit_file(tmp, verbose=True)
+        try: os.remove(tmp)
+        except OSError: pass
+    else:
+        model.fit_file(filepath, verbose=True)
+    print(f"[IECNN] Brain saved to {PERSISTENCE} (+ companion files).")
+    cmd_memory(model)
+
+
+def cmd_generate_oneshot(prompt: str):
+    _build_c()
+    model = _make_model()
+    print(f"[IECNN] Generating from: '{prompt}'")
+    out = model.generate(prompt)
+    print(f"  Output: {out}")
+    model.save_brain()
+
+
+def _interactive_loop(model):
+    """Quiet REPL: nothing happens until the user types something."""
+    from formulas.formulas import similarity_score
+    print(f"  IECNN ready. Type a prompt, or 'help' for commands. Ctrl-D to exit.")
+    while True:
+        try:
+            user = input("\n  > ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\n  Goodbye."); break
+        if not user:
+            continue
+        low = user.lower()
+        if low in ("q", "quit", "exit"):
+            print("  Goodbye."); break
+        if low in ("help", "?"):
+            print("  Commands:")
+            print("    generate <prompt>   encode prompt then decode output")
+            print("    encode <text>       encode and show vector summary")
+            print("    sim A | B           pairwise similarity")
+            print("    train <filepath>    train on a text file")
+            print("    memory              show dot memory + evolution state")
+            print("    quit / q            exit")
+            continue
+        if low == "memory":
+            cmd_memory(model); continue
+        if low.startswith("sim ") and "|" in user:
+            parts = user[4:].split("|", 1)
+            va = model.encode(parts[0].strip())
+            vb = model.encode(parts[1].strip())
+            print(f"  Similarity: {similarity_score(va, vb):+.4f}")
+            model.save_brain(); continue
+        if low.startswith("generate "):
+            prompt = user[9:].strip()
+            if not prompt: print("  Usage: generate <prompt>"); continue
+            print("  [generating...]", end="", flush=True)
+            out = model.generate(prompt)
+            print(f"\r  Output: {out}            ")
+            model.save_brain(); continue
+        if low.startswith("encode "):
+            text = user[7:].strip()
+            if not text: print("  Usage: encode <text>"); continue
+            res = model.run(text, verbose=False)
+            v = res.output
+            print(f"  norm={np.linalg.norm(v):.3f}  rounds={res.summary['rounds']}  "
+                  f"stop='{res.stop_reason}'")
+            print(f"  first8: {np.round(v[:8], 3)}")
+            model.save_brain(); continue
+        if low.startswith("train "):
+            fpath = user[6:].strip()
+            if not fpath: print("  Usage: train <filepath>"); continue
+            try:
+                model.fit_file(fpath, verbose=True)
+            except FileNotFoundError as e:
+                print(f"  Error: {e}")
+            continue
+        # Default: treat raw input as a prompt to generate text from
+        print("  [generating...]", end="", flush=True)
+        out = model.generate(user)
+        print(f"\r  Output: {out}            ")
+        model.save_brain()
+
+
+def cmd_interactive():
+    _build_c()
+    model = _make_model()
+    _interactive_loop(model)
 
 
 def cmd_demo():
+    """Original showcase: 6 examples + similarity matrix + formula dump."""
     _build_c()
-
     print()
     print("╔" + "═"*64 + "╗")
     print("║     IECNN — Iterative Emergent Convergent Neural Network     ║")
     print("╠" + "═"*64 + "╣")
-    print("║  Novel architecture: neural dots + convergence learning       ║")
-    print("║  No backpropagation. No fixed layers. Emergent agreement.     ║")
-    print("╠" + "═"*64 + "╣")
-    print("║  Layers: Input → BaseMap → Dots (6 types, 4 heads) → AIM    ║")
-    print("║          → Prune → Converge (2-level) → Iterate → Output    ║")
+    print("║  Novel architecture: neural dots + convergence learning      ║")
+    print("║  No backpropagation. No fixed layers. Emergent agreement.    ║")
     print("╚" + "═"*64 + "╝")
     print()
-
     model = _make_model(verbose=True)
-
     EXAMPLES = [
         "neural networks learn from data iteratively",
         "the base mapping converts words to structured matrices",
@@ -227,11 +284,9 @@ def cmd_demo():
         "dot evolution selects the most effective prediction units",
         "relational inversion discovers cross-token structure",
     ]
-
     print(BAR)
     print("  Full Pipeline Run — 6 example inputs")
     print(BAR)
-
     results = []
     for text in EXAMPLES:
         res = model.run(text, verbose=True)
@@ -241,132 +296,11 @@ def cmd_demo():
         q  = f"{m.convergence_quality:.3f}" if m else "n/a"
         print(f"  → rounds={sm['rounds']:>2}  stop='{res.stop_reason:<22}'  "
               f"norm={np.linalg.norm(res.output):.3f}  quality={q}")
-
-    print(f"\n{BAR}")
-    print("  Pairwise Similarity Matrix (6 examples)")
-    print(BAR)
-    from formulas.formulas import similarity_score
-    labels = [t[:28] for t, _, _ in results]
-    vecs   = [v for _, v, _ in results]
-    for i in range(len(results)):
-        for j in range(i+1, len(results)):
-            s = similarity_score(vecs[i], vecs[j])
-            print(f"  [{i}]×[{j}] {s:+.4f}  │  {labels[i]!r} ↔ {labels[j]!r}")
-
-    print(f"\n{BAR}")
-    print("  BaseMapping — token type demo")
-    print(BAR)
-    bm = model.base_mapper
-    for tok in ["convergence", "iecnn", "xyz123", "a", "neural networks", "42"]:
-        bmap = bm.transform(tok)
-        typ  = bmap.token_types[0] if bmap.token_types else "?"
-        embed_n = np.linalg.norm(bmap.matrix[0, :224])
-        print(f"  '{tok:<20}' → type='{typ:<10}'  embed_norm={embed_n:.4f}")
-
     print(f"\n{BAR}")
     print("  Memory & Evolution State (after 6 calls)")
     print(BAR)
     cmd_memory(model)
-
-    print(f"\n{BAR}")
-    print("  Dot Type Distribution")
-    print(BAR)
-    dots = model._dots or []
-    dist = model.dot_gen.type_distribution(dots)
-    for dt, cnt in sorted(dist.items(), key=lambda x: -x[1]):
-        bar = "█" * cnt
-        print(f"  {dt:<12} {cnt:>3}  {bar}")
-
-    print(f"\n{BAR}")
-    print("  BaseMapping Design")
-    print(BAR)
-    print("  ‣ a-z, 0-9, punctuation → pre-seeded primitive bases (always available)")
-    print("  ‣ Corpus words/phrases  → 'word'/'phrase' bases (stable embeddings)")
-    print("  ‣ Unknown words         → 'composed' (ONE row, built from char bases)")
-    print("  ‣ Each token = ONE row  — words are NEVER split into character rows")
-    print("  ‣ Feature vector: [224 embed | 8 pos | 4 freq | 16 flags | 4 ctx]")
-
-    print(f"\n{BAR}")
-    print("  Formula Summary (F1–F20)")
-    print(BAR)
-    formulas = [
-        ("F1",  "Similarity Score",            "S(p,q) = α·cos(p,q) + (1-α)·A(p,q)"),
-        ("F2",  "Convergence Score",           "C(k) = mean_sim(k) · mean_conf(k)"),
-        ("F3",  "Attention",                   "softmax(QK^T/√d_k)·V"),
-        ("F4",  "AIM Transform",               "p̂ = Attention(Q, K, I(p))"),
-        ("F5",  "Pruning Threshold",           "keep k ⟺ C(k) > τ"),
-        ("F6",  "Prediction Confidence",       "c(p) = tanh(||p||/√d)"),
-        ("F7",  "Sampling Temperature",        "P(v) ∝ exp(score(v)/T)"),
-        ("F8",  "Bias Vector Update",          "b_{t+1} = b_t + η(w_t - b_t)"),
-        ("F9",  "Dominance Score",             "Dominance = C(k*)/ΣC(k)"),
-        ("F10", "Dot Specialization",          "mean pairwise S of a dot's predictions"),
-        ("F11", "Cluster Entropy",             "H_C = -Σ p_k log p_k  [normalized]"),
-        ("F12", "Temporal Stability",          "TS(t) = S(centroid_t, centroid_{t-1})"),
-        ("F13", "Cross-Type Agreement",        "CDA = mean S(centroid_a, centroid_b)"),
-        ("F14", "Adaptive Learning Rate",      "η(t) = η_0 · (1 - 0.8·dom²)"),
-        ("F15", "Hierarchical Conv. Score",    "HC(K) = mean_score · (1+γ·cross_sim)"),
-        ("F16", "Emergent Utility Gradient",   "U(t) = E[C_{t+1}(p)] - C_t(p)"),
-        ("F17", "Dot Reinforcement Pressure",  "R_d = λ1·C_d + λ2·S_d + λ3·U_n·(1+β·ΔU) - λ4·N_d"),
-        ("F18", "Cross-Modal Binding",         "CMB(t,v) = S(t,v) × (1 + 0.3·modal_diversity)"),
-        ("F19", "Semantic Drift",              "SD(z_in, z_out) = 1 − S(z_in, z_out)"),
-        ("F20", "Vocabulary Coverage",         "VC = |known_tokens| / |total_tokens|"),
-    ]
-    for fid, name, formula in formulas:
-        print(f"  {fid:<4} {name:<28} {formula}")
-
-    print(f"\n{BAR}")
-    print("  Interactive — type text to encode  │  Commands:")
-    print("    sim A | B          compute similarity between A and B")
-    print("    generate <prompt>  encode prompt then decode back to text")
-    print("    train <filepath>   train on a large text file (one line per sentence)")
-    print("    memory             show dot memory and evolution state")
-    print("    quit / q           exit")
-    print(BAR)
-    while True:
-        try:
-            user = input("\n  > ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print("\n  Goodbye."); break
-        if not user: continue
-        if user.lower() in ("q", "quit", "exit"):
-            print("  Goodbye."); break
-
-        if user.lower() == "memory":
-            cmd_memory(model); continue
-
-        if user.lower().startswith("sim ") and "|" in user:
-            parts = user[4:].split("|", 1)
-            from formulas.formulas import similarity_score
-            va = model.encode(parts[0].strip())
-            vb = model.encode(parts[1].strip())
-            print(f"  Similarity: {similarity_score(va, vb):+.4f}")
-            continue
-
-        if user.lower().startswith("generate "):
-            prompt = user[9:].strip()
-            if not prompt:
-                print("  Usage: generate <prompt>"); continue
-            print("  [generating...]", end="", flush=True)
-            out = model.generate(prompt)
-            print(f"\r  Output: {out}")
-            continue
-
-        if user.lower().startswith("train "):
-            fpath = user[6:].strip()
-            if not fpath:
-                print("  Usage: train <filepath>"); continue
-            try:
-                model.fit_file(fpath, verbose=True)
-            except FileNotFoundError as e:
-                print(f"  Error: {e}")
-            continue
-
-        res = model.run(user, verbose=True)
-        m   = res.metrics
-        q   = f"{m.convergence_quality:.3f}" if m else "n/a"
-        print(f"  → norm={np.linalg.norm(res.output):.3f}  "
-              f"rounds={res.summary['rounds']}  stop='{res.stop_reason}'  "
-              f"quality={q}")
+    model.save_brain()
 
 
 # ── Entry ─────────────────────────────────────────────────────────────
@@ -374,13 +308,18 @@ def cmd_demo():
 if __name__ == "__main__":
     args = sys.argv[1:]
     if not args:
-        cmd_demo()
+        cmd_interactive()
     elif args[0] == "build":
         cmd_build()
+    elif args[0] == "demo":
+        cmd_demo()
+    elif args[0] == "memory":
+        cmd_memory()
     elif args[0] == "encode" and len(args) >= 2:
         cmd_encode(" ".join(args[1:]))
+    elif args[0] == "generate" and len(args) >= 2:
+        cmd_generate_oneshot(" ".join(args[1:]))
     elif args[0] == "sim" and len(args) >= 2:
-        # Supports: python main.py sim "a" "b"  or  python main.py sim "a" | "b"
         all_text = " ".join(args[1:])
         if "|" in all_text:
             parts = all_text.split("|", 1)
@@ -391,41 +330,15 @@ if __name__ == "__main__":
             print("Usage: python main.py sim 'text A' 'text B'")
     elif args[0] == "compare" and len(args) >= 3:
         cmd_compare(args[1:])
-    elif args[0] == "memory":
-        _build_c(); cmd_memory()
     elif args[0] == "train" and len(args) >= 2:
+        # python main.py train <file> [--limit N]
         filepath = args[1]
-        _build_c()
-        from pipeline.pipeline import IECNN
-        model = IECNN()
-        model.fit_file(filepath, verbose=True)
-        print("[IECNN] Model ready. Starting interactive mode...")
-        # Drop into interactive loop after training
-        from formulas.formulas import similarity_score
-        while True:
-            try:
-                user = input("\n  > ").strip()
-            except (EOFError, KeyboardInterrupt):
-                print("\n  Goodbye."); break
-            if not user or user.lower() in ("q", "quit", "exit"):
-                break
-            if user.lower().startswith("generate "):
-                prompt = user[9:].strip()
-                print("  [generating...]", end="", flush=True)
-                out = model.generate(prompt)
-                print(f"\r  Output: {out}")
-            else:
-                res = model.run(user, verbose=True)
-                m   = res.metrics
-                q   = f"{m.convergence_quality:.3f}" if m else "n/a"
-                print(f"  → norm={np.linalg.norm(res.output):.3f}  "
-                      f"rounds={res.summary['rounds']}  quality={q}")
-    elif args[0] == "generate" and len(args) >= 2:
-        prompt = " ".join(args[1:])
-        _build_c()
-        model = _make_model(verbose=False)
-        print(f"[IECNN] Generating from: '{prompt}'")
-        out = model.generate(prompt)
-        print(f"  Output: {out}")
+        limit = 0
+        if "--limit" in args:
+            i = args.index("--limit")
+            if i + 1 < len(args):
+                try: limit = int(args[i+1])
+                except ValueError: limit = 0
+        cmd_train(filepath, limit=limit)
     else:
         print(__doc__)

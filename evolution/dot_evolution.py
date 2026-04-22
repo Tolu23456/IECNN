@@ -225,6 +225,38 @@ class DotEvolution:
                     dot.dot_type = new_type
         return dots
 
+    # ── Persistence ──────────────────────────────────────────────────
+
+    def state_dict(self) -> dict:
+        return {
+            "generation": int(self._generation),
+            "rng_state":  self._rng.get_state(),
+            "config":     {
+                "keep_fraction":      self.config.keep_fraction,
+                "clone_fraction":     self.config.clone_fraction,
+                "crossover_fraction": self.config.crossover_fraction,
+                "random_fraction":    self.config.random_fraction,
+                "bias_noise_std":     self.config.bias_noise_std,
+                "weight_noise_std":   self.config.weight_noise_std,
+                "tournament_size":    self.config.tournament_size,
+                "min_generations":    self.config.min_generations,
+            },
+        }
+
+    def load_state(self, state: dict):
+        self._generation = int(state.get("generation", 0))
+        rng_state = state.get("rng_state")
+        if rng_state is not None:
+            try:
+                self._rng.set_state(rng_state)
+            except Exception:
+                pass
+        cfg = state.get("config")
+        if cfg:
+            for k, v in cfg.items():
+                if hasattr(self.config, k):
+                    setattr(self.config, k, v)
+
     def stats(self, memory: DotMemory, dot_ids: Optional[List[int]] = None) -> dict:
         eff = memory.all_effectivenesses(dot_ids)
         return {

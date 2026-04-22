@@ -11,8 +11,9 @@ implementing a novel neural architecture. It runs entirely in the terminal
 ## Running the App
 
 ```bash
-python main.py                          # full interactive demo (recommended)
-python main.py train data/corpus.txt    # train on large text file, then interactive
+python main.py                          # silent interactive REPL (just a "> " prompt)
+python main.py demo                     # original full showcase output
+python main.py train corpus.txt --limit N   # train on text file (one sent/line)
 python main.py generate "prompt"        # encode prompt → decode output text
 python main.py encode "text"            # encode → 256-dim latent
 python main.py sim "text A" "text B"    # cosine similarity
@@ -21,8 +22,37 @@ python main.py memory                   # dot memory + evolution state
 python main.py build                    # (re)compile C extensions
 ```
 
-The workflow is configured to run `python main.py` via the Replit workflow named
-"Start application".
+The workflow `Start application` runs `python main.py` (silent REPL).
+
+## Persistent Brain (Learning State)
+
+The model now persists its learning across runs. On startup, `IECNN` auto-loads
+brain files if present; on every interactive command (`encode`, `sim`, `generate`,
+`train`, …) it auto-saves them.
+
+Files (next to `global_brain.pkl`):
+
+| file | contents |
+|---|---|
+| `global_brain.pkl` | vocabulary / base mapper |
+| `global_brain.pkl.dots.pkl` | live neural dot pool (features + head projections) |
+| `global_brain.pkl.dotmem.pkl` | per-dot effectiveness, success/total counts, prediction windows |
+| `global_brain.pkl.clustmem.pkl` | learned pattern library + round snapshots |
+| `global_brain.pkl.evo.pkl` | evolution generation counter + history |
+| `global_brain.pkl.meta.pkl` | misc state (cumulative trained sentence count, etc.) |
+
+To train more, run `python main.py train corpus_10k.txt --limit 30` repeatedly —
+each call advances `evolution.generation`, expands `cluster_memory`, and
+reinforces dots that landed in winning clusters.
+
+### Known training-cost caveat
+Each evolved generation adds ~40 new dot IDs to `dot_memory`/`dot_pool`
+(40% kept + 60% replaced from the live pool of 64). Around ~50 sentences,
+total tracked dots reach ~2k and process memory exceeds ~1 GB, which can
+get the process OOM-killed in constrained environments. Practical training
+batch in this Replit env is **~30 sentences per `train` invocation**;
+re-invoke to continue. Long-term fix: prune `dot_memory` of dots with
+zero recorded outcomes (TODO).
 
 ---
 
