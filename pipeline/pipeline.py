@@ -619,6 +619,8 @@ class IECNN:
             # Use a wider std when EUG is stagnant (more exploration needed)
             eff          = self.dot_memory.all_effectivenesses(dot_ids)
             mutation_std = 0.10 if abs(eug_val) < 0.01 else 0.05
+
+            # Stable dot_id preservation: mutate in-place if effectiveness is low
             dots         = self.evolution.mutate_weak_dots(dots, eff,
                                                            mutation_std=mutation_std)
 
@@ -805,35 +807,62 @@ class IECNN:
 
     def _reflect(self, output: np.ndarray, dots: list, basemap: BaseMap) -> np.ndarray:
         """
-        Self-Correction: Veto/Refine output based on logical consistency.
-        Uses LOGIC and SEMANTIC dots to 're-predict' from the final output.
+        Counterfactual Reasoning Layer (v2):
+        Resolves semantic contradictions by simulating alternative interpretations.
+
+        1. Identifies 'veto' dots (LOGIC/SEMANTIC) that strongly disagree with the output.
+        2. For each veto, runs an AIM inversion to see if a counterfactual
+           interpretation provides a better fit for the conflicting dots.
+        3. Fuses the most consistent counterfactuals back into the final output.
         """
         # Select specialized dots for reflection
         veto_dots = [d for d in dots if d.dot_type in (DotType.LOGIC, DotType.SEMANTIC)]
         if not veto_dots:
             return output
 
-        # Sample a few dots
-        sample_size = min(10, len(veto_dots))
+        # Sample a few dots for efficiency
+        sample_size = min(12, len(veto_dots))
         idx = self._rng.choice(len(veto_dots), sample_size, replace=False)
         selected = [veto_dots[i] for i in idx]
 
-        # Each selected dot 'critiques' the output by measuring its
-        # consistency with the original basemap.
         corrections = []
+
         for dot in selected:
-            # We treat the final output as a 'prediction' and see if the dot agrees
-            preds = dot.predict(basemap, memory_hint=output, context_entropy=0.1)
+            # Get dot's internal predictions for the current output context
+            preds = dot.predict(basemap, memory_hint=output, context_entropy=0.05)
+
             for p, conf, _ in preds:
                 sim = similarity_score(output, p, self.alpha)
-                if sim < 0.4: # Potential contradiction
-                    # Add a correction nudge toward the dot's perspective
-                    corrections.append(conf * (p - output))
+
+                # If dot strongly disagrees (sim < 0.35), simulate counterfactuals
+                if sim < 0.35:
+                    # 1. Choose inversion type based on dot's requested inversion or default to feature
+                    inv_type = dot.dot_type.name.lower() if hasattr(dot, "requested_inversion") and dot.requested_inversion else "feature"
+
+                    # 2. Transform the dot's prediction using AIM to explore 'the other side'
+                    # We use the internal dispatch from aim.aim
+                    from aim.aim import _apply_inversion
+                    p_inv = _apply_inversion(inv_type, p, basemap.matrix, self._rng)
+
+                    # p_hat = Attention(output, context, Invert(p))
+                    from formulas.formulas import aim_transform
+                    ctx2d = basemap.matrix.reshape(1, -1) if basemap.matrix.ndim == 1 else basemap.matrix
+                    p_hat = aim_transform(p, ctx2d, lambda _: p_inv)
+
+                    # 3. If the counterfactual interpretation aligns better with the rest of the context
+                    # or resolves the contradiction, we use it as a correction signal.
+                    hat_sim = similarity_score(output, p_hat, self.alpha)
+                    if hat_sim > sim:
+                        # The inverted interpretation is more plausible than the direct contradiction
+                        corrections.append(conf * (p_hat - output))
+                    else:
+                        # Direct correction (nudge toward dot's original prediction)
+                        corrections.append(conf * (p - output))
 
         if corrections:
-            # Apply weighted corrections
+            # Apply weighted corrections (conservative blend to maintain stability)
             nudge = np.mean(np.stack(corrections), axis=0)
-            return output + 0.2 * nudge
+            return output + 0.15 * nudge
 
         return output
 

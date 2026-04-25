@@ -34,4 +34,12 @@ void mean_pool(const float *matrix, int n_rows, int dim, float *out);
 void attention_pool(const float *matrix, const float *query,
                     int n_rows, int dim, float sharpness, float *out);
 
+/* One-pass cooccurrence smoothing for the entire vocabulary.
+ * embeddings: (n_words x embed_dim) matrix
+ * neighbor_indices: (n_words x n_neighbors_per_word) matrix of neighbor indices
+ * neighbor_weights: (n_words x n_neighbors_per_word) matrix of neighbor weights (normalized)
+ */
+void cooccurrence_smooth(float *embeddings, const int *neighbor_indices, const float *neighbor_weights,
+                         int n_words, int n_neighbors_per_word, int embed_dim, float alpha);
+
 #endif
