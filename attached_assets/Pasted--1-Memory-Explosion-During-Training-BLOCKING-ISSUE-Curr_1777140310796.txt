@@ -1,0 +1,157 @@
+### 1. **Memory Explosion During Training** (BLOCKING ISSUE)
+**Current Problem:** After ~30 sentences, dot_memory grows to ~2,000+ dots and the process gets OOM-killed. The `global_brain.pkl.dots.pkl` reaches **336 MB** after minimal training.
+
+**Fix:**
+```python
+# In dot_memory.py - Add pruning mechanism
+def prune_inactive_dots(self, min_outcomes=2):
+    """Remove dots with zero recorded outcomes (garbage collection)"""
+    active = {dot_id for dot_id, outcomes in self.data.items() 
+              if len(outcomes) >= min_outcomes}
+    self.data = {k: v for k, v in self.data.items() if k in active}
+    return len(self.data)
+
+# Call after evolution: self.dot_memory.prune_inactive_dots()
+```
+
+**Also:** Quantize head projection matrices (F32 → F16) or persist only top 64 elite dots, not all 128+.
+
+### 2. **Head Projection Matrix Bloat**
+**Current:** Each dot stores 4 × (256×256) matrices = 1 MB per dot.
+
+**Solution:**
+- Implement **SVD-based compression**: Store only top-k singular vectors (e.g., k=32)
+- Reduce F32 to F16 dtype in saved files
+- Add a `compress()` method to `neural_dot.py`:
+```python
+def compress(self, rank=32):
+    """Compress head projections using truncated SVD"""
+    U, s, Vt = np.linalg.svd(self.head_proj[i], full_matrices=False)
+    self.head_proj[i] = U[:, :rank] @ np.diag(s[:rank])  # Store rank-32 version
+```
+
+---
+
+## 🚀 **Priority 2: Decoder Quality** (Blocking usability)
+
+### 3. **Text Generation is "Word Salad"** 
+**Issue:** Current greedy decoder has no notion of word order. Outputs are thematic but incoherent.
+
+**Fixes (in order of impact):**
+
+**A) Beam Search in Stage 2:**
+```python
+# decoding/decoder.py - replace greedy argmax with beam search
+def beam_search_decode(self, latent, beam_width=3, max_tokens=12):
+    """Keep top-3 partial sequences instead of greedy 1-best"""
+    beams = [(np.zeros(self.feature_dim), "", 0.0)]  # (state, text, score)
+    
+    for _ in range(max_tokens):
+        candidates = []
+        for state, text, score in beams:
+            for token_id in range(vocab_size):
+                new_state = self._update_state(state, token_id)
+                new_score = score + self._log_prob(new_state, token_id)
+                candidates.append((new_state, text + token, new_score))
+        
+        # Keep top-k by score
+        beams = sorted(candidates, key=lambda x: x[2], reverse=True)[:beam_width]
+    
+    return beams[0][1]  # Return best sequence
+```
+---
+
+## 📊 **Priority 3: Evaluation & Benchmarking**
+
+### 4. **No Quantitative Evaluation**
+**Add benchmarks:**
+```python
+# evaluation/benchmarks.py
+def benchmark_sts(model, sts_pairs):
+    """Evaluate on STS (Semantic Textual Similarity) benchmark"""
+    predictions = []
+    for sent1, sent2, human_score in sts_pairs:
+        pred = model.similarity(sent1, sent2)
+        predictions.append(pred)
+    
+    correlation = np.corrcoef(predictions, [s for _, _, s in sts_pairs])[0, 1]
+    return correlation
+
+def benchmark_retrieval(model, queries, corpus, top_k=10):
+    """Mean Reciprocal Rank (MRR) for document retrieval"""
+    mrr_scores = []
+    for query, relevant_docs in queries:
+        query_vec = model.encode(query)
+        corpus_vecs = np.stack([model.encode(doc) for doc in corpus])
+        scores = (corpus_vecs @ query_vec).argsort()[::-1]
+        
+        for rank, idx in enumerate(scores[:top_k]):
+            if idx in relevant_docs:
+                mrr_scores.append(1.0 / (rank + 1))
+                break
+    
+    return np.mean(mrr_scores)
+```
+
+---
+
+## 🏗️ **Priority 4: Architecture & Code Quality**
+
+### 5. **Simplify and Unify C-Python Interface**
+**Current:** 7 separate C extensions compiled independently. Error handling is brittle.
+
+**Refactor:**
+```bash
+# build.sh - centralize compilation with consistent error handling
+#!/bin/bash
+set -e
+
+compile_extension() {
+    local src=$1 dst=$2
+    echo "[build] Compiling $src → $dst"
+    gcc -O3 -shared -fPIC -lm -march=native \
+        -Wall -Wextra -Werror \
+        -o "$dst" "$src" ${@:3}
+    [ -f "$dst" ] || exit 1
+}
+
+compile_extension "formulas/formulas.c" "formulas/formulas_c.so"
+compile_extension "basemapping/basemapping.c" "basemapping/basemapping_c.so" \
+    "formulas/formulas.c"
+# ... etc
+```
+
+### 6. **Add Type Hints & Documentation**
+Only ~30% of functions have type hints. Add them consistently:
+```python
+# neural_dot/neural_dot.py
+from typing import Tuple, List, Optional
+from numpy.typing import NDArray
+
+def predict(self, basemap: BaseMap, 
+            memory_hint: Optional[NDArray] = None,
+            context_entropy: float = 0.5) -> List[Tuple[NDArray, float, Dict]]:
+    """
+    Predict from basemap using memory hints.
+    
+    Args:
+        basemap: Input token map
+        memory_hint: Recent centroid from DotMemory (optional)
+        context_entropy: Adaptive temperature parameter (0.0-1.0)
+    
+    Returns:
+        List of (prediction, confidence, metadata) tuples
+    """
+```
+
+### 7. **Move Utilities to Shared Module**
+Many helper functions duplicated across files (`_split_sentences`, similarity scoring, etc.)
+
+```python
+# utils/common.py
+def split_sentences(text: str) -> List[str]:
+    """Normalize sentence splitting across codebase"""
+    return re.split(r'(?<=[.!?])\s+', text.strip())
+
+# Then import: from utils.common import split_sentences
+```
