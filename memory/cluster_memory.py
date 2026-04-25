@@ -152,15 +152,12 @@ class ClusterMemory:
         After a successful convergence, store the winning centroid as a pattern.
         If a similar pattern already exists, update its weight.
 
-        When phase coding is enabled and a phase is provided, similarity to
-        existing patterns is phase-aware (so e.g. 'dog bites man' and
-        'man bites dog' won't collapse into the same pattern slot just
-        because their feature centroids look alike).
+        In Phase-Coded Mode, 'centroid' is a complex vector.
         """
         n = np.linalg.norm(centroid)
         if n < 1e-10:
             return
-        c_norm = centroid / n
+        c_norm = (centroid / n).astype(np.complex64) if np.iscomplexobj(centroid) else (centroid / n).astype(np.complex64)
 
         # Make sure parallel arrays stay in lock-step length, even on legacy
         # state that predates phase tracking.
@@ -169,13 +166,9 @@ class ClusterMemory:
 
         # Check if similar pattern exists
         for i, (pat, w) in enumerate(self._pattern_library):
-            if self.phase_coding and phase is not None:
-                pat_phase, pat_conc = self._pattern_phase(i)
-                sim = phase_aware_similarity(c_norm, pat,
-                                             phase_a=phase, phase_b=pat_phase,
-                                             concentration=pat_conc, alpha=alpha)
-            else:
-                sim = similarity_score(c_norm, pat, alpha)
+            # Complex similarity handles phase automatically
+            sim = similarity_score(c_norm, pat, alpha)
+
             if sim > 0.85:
                 # Update existing pattern (exponential moving average)
                 self._pattern_library[i] = (
@@ -183,18 +176,13 @@ class ClusterMemory:
                     w * 0.9 + score * 0.1,
                 )
                 self._pattern_counts[i] += 1
-                if self.phase_coding and phase is not None:
-                    self._accum_phase(i, phase)
                 return
 
         # Add new pattern
         self._pattern_library.append((c_norm, score))
         self._pattern_counts.append(1)
-        if self.phase_coding and phase is not None:
-            re = float(np.cos(phase)); im = float(np.sin(phase))
-            self._pattern_phase_acc.append((re, im, 1))
-        else:
-            self._pattern_phase_acc.append(None)
+        # We don't need a separate phase_acc if the vector itself is complex
+        self._pattern_phase_acc.append(None)
 
         # Trim to max_patterns by keeping highest-weighted
         if len(self._pattern_library) > self.max_patterns:

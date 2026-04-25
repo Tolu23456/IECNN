@@ -63,6 +63,16 @@ class DotMemory:
             self._total_counts[dot_id] = 0.0
             self._phase_acc[dot_id] = (0.0, 0.0, 0)
 
+    def record_phase_sample(self, dot_id: int, phase: float):
+        """Record a phase sample for a dot (e.g. from winning a token slot)."""
+        self._ensure_id(dot_id)
+        re_s, im_s, cnt = self._phase_acc.get(dot_id, (0.0, 0.0, 0))
+        self._phase_acc[dot_id] = (
+            re_s + float(np.cos(phase)),
+            im_s + float(np.sin(phase)),
+            cnt + 1,
+        )
+
     def record(self, dot_id: int, prediction: np.ndarray, in_winner: bool,
                phase: Optional[float] = None):
         """Record whether a dot's prediction ended in the winning cluster.

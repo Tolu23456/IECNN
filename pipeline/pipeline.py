@@ -125,7 +125,7 @@ class IECNN:
         # Memory and evolution
         self.dot_memory      = DotMemory(num_dots)
         if phase_coding:
-            self.dot_memory.phase_bonus_weight = 0.30
+            self.dot_memory.phase_bonus_weight = 0.50 # Boosted for new task
         self.cluster_memory  = ClusterMemory(feature_dim, phase_coding=phase_coding)
         self.evolution       = DotEvolution(EvolutionConfig(), seed)
         self.evaluator       = IECNNMetrics(alpha)
@@ -464,6 +464,11 @@ class IECNN:
 
         basemap  = self.base_mapper.transform(input_data, mode=mode)
 
+        # ── Phase-Coded Encoding: walk the token stream once ──
+        # Assign phases to dots based on the token position they 'win'
+        if self.phase_coding:
+            self._apply_phase_coding(basemap)
+
         # ── Layer 2.5: Working Memory Injection ──────────────────
         # If we have a working memory from the previous call, blend it
         # into the initial basemap to provide narrative context.
@@ -725,6 +730,36 @@ class IECNN:
             master_centroid = master_centroid / n * np.sqrt(self.feature_dim)
 
         return master_centroid
+
+    def _apply_phase_coding(self, basemap: BaseMap):
+        """
+        Walk the token stream and assign phases to dots.
+        The dot that 'wins' (most similar) a token position t gets phase 2pi * t / L.
+        """
+        dots = self._ensure_dots()
+        n_tokens = len(basemap.tokens)
+        if n_tokens == 0: return
+
+        for t, token_vec in enumerate(basemap.matrix):
+            phase = 2.0 * np.pi * t / n_tokens
+
+            # Simple competition: which dot's base projection fits this token best?
+            best_dot = None
+            best_sim = -1.0
+
+            for dot in dots:
+                # Use a simplified projection for fast phase assignment
+                # Use only EMBED_DIM for semantic/structural alignment
+                sim = similarity_score(token_vec[:EMBED_DIM], dot.W[:EMBED_DIM, 0], self.alpha)
+                if sim > best_sim:
+                    best_sim = sim
+                    best_dot = dot
+
+            if best_dot:
+                # Assign phase to dot for this run
+                best_dot.current_phase = phase
+                # Record this phase sample in dot memory for fitness
+                self.dot_memory.record_phase_sample(best_dot.dot_id, phase)
 
     def _split_sentences(self, text: str) -> List[str]:
         """Simple heuristic sentence splitter."""

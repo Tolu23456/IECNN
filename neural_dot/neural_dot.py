@@ -154,6 +154,9 @@ class NeuralDot:
         self.bias        = bias or BiasVector.from_dot_type(dot_type)
         self.dot_type    = dot_type
         self.n_heads     = n_heads
+
+        # Phase-Coded state
+        self.current_phase: float = 0.0
         self.max_heads   = 8 # Potential for growth
         # Generation in which this dot was created. Used by the pruner to
         # avoid killing newly-born dots before they have had a chance to
@@ -490,20 +493,27 @@ class NeuralDot:
             raw  = self._project_head(abstract, h, T)
             norm = np.linalg.norm(raw)
             pred = raw / norm * np.sqrt(self.feature_dim) if norm > 1e-10 else raw
-            conf = prediction_confidence(pred)
+
+            # Phase-Coded Activation: dot activation is complex-valued
+            # It uses the phase it acquired from the input stream.
+            # Fall back to slice_phase if current_phase is not set (legacy/default).
+            p_phase = self.current_phase if self.current_phase != 0.0 else slice_phase
+            complex_pred = pred.astype(np.complex64) * np.exp(1j * p_phase)
+
+            conf = prediction_confidence(complex_pred)
             info = {
                 "dot_id":    self.dot_id,
                 "dot_type":  _TYPE_NAMES[self.dot_type],
                 "head":      h,
                 "slice":     (start, end),
-                "phase":     slice_phase,
+                "phase":     p_phase,
                 "bias":      self.bias,
                 "source":    "original",
                 "inversion_type": None,
                 "modality":  modality,
                 "requested_inversion": requested_inversion,
             }
-            results.append((pred, conf, info))
+            results.append((complex_pred, conf, info))
         return results
 
     def __repr__(self):

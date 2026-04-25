@@ -96,13 +96,30 @@ def _load_lib():
 
 
 def _fp(arr: np.ndarray):
-    a = np.ascontiguousarray(arr, dtype=np.float32)
+    """
+    Convert array to float32 pointer for C library.
+    Handles complex arrays by taking the real part.
+    """
+    if np.iscomplexobj(arr):
+        # We take the real part for legacy C-path functions that don't support complex math.
+        # This prevents hard crashes while keeping the logic mostly functional.
+        a = np.ascontiguousarray(np.real(arr), dtype=np.float32)
+    else:
+        a = np.ascontiguousarray(arr, dtype=np.float32)
     return a.ctypes.data_as(ctypes.POINTER(ctypes.c_float)), a
 
 
 # ── Formula 1 helpers ────────────────────────────────────────────────
 
 def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
+    """Cosine similarity. Supports complex vectors via Re(<a,b>)/(||a||*||b||)."""
+    if np.iscomplexobj(a) or np.iscomplexobj(b):
+        na = np.linalg.norm(a); nb = np.linalg.norm(b)
+        if na < 1e-10 or nb < 1e-10: return 0.0
+        # For complex vectors, we use the real part of the normalized inner product
+        # which represents phase-aware alignment.
+        return float(np.real(np.vdot(a, b)) / (na * nb))
+
     lib = _load_lib()
     a32 = np.ascontiguousarray(a, np.float32)
     b32 = np.ascontiguousarray(b, np.float32)
@@ -115,6 +132,14 @@ def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
 
 
 def agreement_strength(a: np.ndarray, b: np.ndarray) -> float:
+    """Agreement strength. Supports complex vectors."""
+    if np.iscomplexobj(a) or np.iscomplexobj(b):
+        na = np.linalg.norm(a); nb = np.linalg.norm(b)
+        if na < 1e-10 or nb < 1e-10: return 0.0
+        ndot = float(np.real(np.vdot(a, b)) / (na * nb))
+        strength = (na + nb) / 2.0
+        return float(np.tanh(strength / np.sqrt(len(a))) * ((ndot + 1.0) / 2.0))
+
     lib = _load_lib()
     a32 = np.ascontiguousarray(a, np.float32)
     b32 = np.ascontiguousarray(b, np.float32)
@@ -131,6 +156,9 @@ def agreement_strength(a: np.ndarray, b: np.ndarray) -> float:
 
 def similarity_score(a: np.ndarray, b: np.ndarray, alpha: float = 0.7) -> float:
     """Formula 1: S(p_i, p_j) = alpha*cos(p_i,p_j) + (1-alpha)*A(p_i,p_j)"""
+    if np.iscomplexobj(a) or np.iscomplexobj(b):
+        return alpha * cosine_similarity(a, b) + (1.0 - alpha) * agreement_strength(a, b)
+
     lib = _load_lib()
     a32 = np.ascontiguousarray(a, np.float32)
     b32 = np.ascontiguousarray(b, np.float32)
@@ -186,8 +214,19 @@ def convergence_score(predictions: List[np.ndarray], confidences: List[float],
     n = len(predictions)
     if n == 0: return 0.0
     if n == 1: return float(confidences[0]) if confidences else 0.5
+
+    # Complex-aware pure python path to avoid C-acceleration casting warnings
+    is_complex = any(np.iscomplexobj(p) for p in predictions)
+    if is_complex:
+        total = 0.0
+        for i in range(n):
+            for j in range(n):
+                total += similarity_score(predictions[i], predictions[j], alpha)
+        return (total / (n * n)) * float(np.mean(confidences))
+
     lib  = _load_lib()
-    stk  = np.ascontiguousarray(np.stack(predictions), np.float32)
+    # Explicitly take real part if accidentally passed complex to C path
+    stk  = np.ascontiguousarray(np.real(np.stack(predictions)), np.float32)
     cfx  = np.ascontiguousarray(confidences, np.float32)
     dim  = stk.shape[1]
     if lib:
@@ -203,6 +242,9 @@ def convergence_score(predictions: List[np.ndarray], confidences: List[float],
 
 def prediction_confidence(p: np.ndarray) -> float:
     """tanh(||p|| / sqrt(dim)) — normalized L2 norm as confidence."""
+    if np.iscomplexobj(p):
+        return float(np.tanh(np.linalg.norm(p) / np.sqrt(len(p))))
+
     lib = _load_lib()
     p32 = np.ascontiguousarray(p, np.float32)
     if lib:
@@ -327,8 +369,17 @@ def dot_specialization_score(predictions: List[np.ndarray], alpha: float = 0.7) 
     """
     n = len(predictions)
     if n <= 1: return 1.0
+
+    if any(np.iscomplexobj(p) for p in predictions):
+        total, count = 0.0, 0
+        for i in range(n):
+            for j in range(i+1, n):
+                total += similarity_score(predictions[i], predictions[j], alpha)
+                count += 1
+        return total / count if count > 0 else 1.0
+
     lib = _load_lib()
-    stk = np.ascontiguousarray(np.stack(predictions), np.float32)
+    stk = np.ascontiguousarray(np.real(np.stack(predictions)), np.float32)
     dim = stk.shape[1]
     if lib:
         fs, _ = _fp(stk)
@@ -370,6 +421,10 @@ def temporal_stability(c_curr: np.ndarray, c_prev: np.ndarray,
                        alpha: float = 0.7) -> float:
     """F12: TS(t) = S(centroid_t, centroid_{t-1})"""
     if c_curr is None or c_prev is None: return 0.0
+
+    if np.iscomplexobj(c_curr) or np.iscomplexobj(c_prev):
+        return similarity_score(c_curr, c_prev, alpha)
+
     lib = _load_lib()
     a32 = np.ascontiguousarray(c_curr, np.float32)
     b32 = np.ascontiguousarray(c_prev, np.float32)
@@ -388,6 +443,14 @@ def cross_type_agreement(type_centroids: Dict[str, np.ndarray],
     vals = list(type_centroids.values())
     n    = len(vals)
     if n < 2: return 1.0
+
+    if any(np.iscomplexobj(v) for v in vals):
+        total, count = 0.0, 0
+        for i in range(n):
+            for j in range(i+1, n):
+                total += similarity_score(vals[i], vals[j], alpha); count += 1
+        return total / count if count > 0 else 1.0
+
     lib  = _load_lib()
     stk  = np.ascontiguousarray(np.stack(vals), np.float32)
     dim  = stk.shape[1]
@@ -420,8 +483,16 @@ def hierarchical_convergence_score(centroids: List[np.ndarray], scores: List[flo
     """F15: HC(K) = mean_score * (1 + gamma * cross_cluster_similarity)"""
     n = len(centroids)
     if n == 0: return 0.0
+
+    if any(np.iscomplexobj(c) for c in centroids):
+        mean_s = np.mean(scores)
+        cross = sum(similarity_score(centroids[i], centroids[j], alpha)
+                    for i in range(n) for j in range(i+1, n))
+        pairs = n * (n-1) / 2
+        return float(mean_s * (1.0 + gamma * (cross / pairs if pairs > 0 else 0.0)))
+
     lib = _load_lib()
-    stk = np.ascontiguousarray(np.stack(centroids), np.float32)
+    stk = np.ascontiguousarray(np.real(np.stack(centroids)), np.float32)
     sc  = np.ascontiguousarray(scores, np.float32)
     dim = stk.shape[1]
     if lib:

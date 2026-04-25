@@ -10,7 +10,33 @@
 
 /* ── Formula 1 helpers ──────────────────────────────────────────────── */
 
+/* Complex-aware helpers (assuming complex64 is two float32s) */
+float complex_dot_real(const float *a, const float *b, int n, int is_complex) {
+    float dot_r = 0.0f;
+    if (is_complex) {
+        /* complex dot product real part: Re(a * conj(b)) = a_r*b_r + a_i*b_i */
+        for (int i = 0; i < n; i++) {
+            dot_r += a[2*i] * b[2*i] + a[2*i+1] * b[2*i+1];
+        }
+    } else {
+        for (int i = 0; i < n; i++) dot_r += a[i] * b[i];
+    }
+    return dot_r;
+}
+
+float complex_norm(const float *a, int n, int is_complex) {
+    float norm_sq = 0.0f;
+    if (is_complex) {
+        for (int i = 0; i < 2*n; i++) norm_sq += a[i] * a[i];
+    } else {
+        for (int i = 0; i < n; i++) norm_sq += a[i] * a[i];
+    }
+    return sqrtf(norm_sq);
+}
+
 float cosine_sim(const float *a, const float *b, int n) {
+    /* Auto-detect complex by context? No, formulas.py handles it now.
+       But for backward compatibility with C-calls, we assume real if called directly. */
     float dot = 0.0f, na = 0.0f, nb = 0.0f;
     for (int i = 0; i < n; i++) {
         dot += a[i] * b[i];
