@@ -157,7 +157,14 @@ class DotMemory:
         w = self._windows[dot_id]
         if len(w) == 0:
             return None
-        return np.mean(np.stack(list(w)), axis=0).astype(np.float32)
+
+        # In phase-coded mode, windows may contain complex vectors
+        stack = np.stack(list(w))
+        mean_v = np.mean(stack, axis=0)
+
+        if np.iscomplexobj(mean_v):
+            return mean_v.astype(np.complex64)
+        return mean_v.astype(np.float32)
 
     def rankings(self, dot_ids: Optional[List[int]] = None) -> List[Tuple[int, float]]:
         """Return list of (dot_id, fitness) sorted highest first."""

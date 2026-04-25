@@ -257,15 +257,27 @@ def prediction_confidence(p: np.ndarray) -> float:
 
 def attention(Q: np.ndarray, K: np.ndarray, V: np.ndarray) -> np.ndarray:
     """Attention(Q,K,V) = softmax(QK^T / sqrt(d_k)) V"""
+    # Complex-aware pure python path
+    if np.iscomplexobj(Q) or np.iscomplexobj(K) or np.iscomplexobj(V):
+        if Q.ndim == 1: Q = Q.reshape(1, -1)
+        if K.ndim == 1: K = K.reshape(1, -1)
+        if V.ndim == 1: V = V.reshape(1, -1)
+        d_k = K.shape[-1]
+        # Use complex dot product (vdot) for scores if complex
+        scores = np.real(Q @ K.conj().T) / np.sqrt(d_k)
+        scores -= np.max(scores, axis=-1, keepdims=True)
+        w = np.exp(scores); w /= w.sum(axis=-1, keepdims=True) + 1e-10
+        return (w @ V).flatten()
+
     lib = _load_lib()
     if Q.ndim == 1: Q = Q.reshape(1, -1)
     if K.ndim == 1: K = K.reshape(1, -1)
     if V.ndim == 1: V = V.reshape(1, -1)
     seq_len, dim = K.shape
     if Q.shape[0] == 1 and lib:
-        Q32 = np.ascontiguousarray(Q[0], np.float32)
-        K32 = np.ascontiguousarray(K, np.float32)
-        V32 = np.ascontiguousarray(V, np.float32)
+        Q32 = np.ascontiguousarray(np.real(Q[0]), np.float32)
+        K32 = np.ascontiguousarray(np.real(K), np.float32)
+        V32 = np.ascontiguousarray(np.real(V), np.float32)
         out = np.zeros(dim, np.float32)
         fq, _q = _fp(Q32); fk, _k = _fp(K32); fv, _v = _fp(V32)
         fo, _o = _fp(out)
@@ -452,7 +464,7 @@ def cross_type_agreement(type_centroids: Dict[str, np.ndarray],
         return total / count if count > 0 else 1.0
 
     lib  = _load_lib()
-    stk  = np.ascontiguousarray(np.stack(vals), np.float32)
+    stk  = np.ascontiguousarray(np.real(np.stack(vals)), np.float32)
     dim  = stk.shape[1]
     if lib:
         fs, _ = _fp(stk)

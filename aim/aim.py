@@ -93,7 +93,7 @@ class InversionType:
 def _invert_feature(p: np.ndarray) -> np.ndarray:
     """Negate dimensions whose |value| exceeds the mean absolute value."""
     lib = _load_lib()
-    p32 = np.ascontiguousarray(p, np.float32)
+    p32 = np.ascontiguousarray(np.real(p), np.float32)
     out = np.zeros_like(p32)
     if lib:
         fp_, _p = _fp(p32); fo, _o = _fp(out)
@@ -107,7 +107,7 @@ def _invert_feature(p: np.ndarray) -> np.ndarray:
 def _invert_context(p: np.ndarray) -> np.ndarray:
     """Swap high-activation and low-activation halves."""
     lib = _load_lib()
-    p32 = np.ascontiguousarray(p, np.float32)
+    p32 = np.ascontiguousarray(np.real(p), np.float32)
     out = np.zeros_like(p32)
     if lib:
         fp_, _p = _fp(p32); fo, _o = _fp(out)
@@ -122,7 +122,7 @@ def _invert_context(p: np.ndarray) -> np.ndarray:
 def _invert_spatial(p: np.ndarray) -> np.ndarray:
     """Reverse the ordering of equal-size dimension groups."""
     lib = _load_lib()
-    p32 = np.ascontiguousarray(p, np.float32)
+    p32 = np.ascontiguousarray(np.real(p), np.float32)
     out = np.zeros_like(p32)
     if lib:
         fp_, _p = _fp(p32); fo, _o = _fp(out)
@@ -138,7 +138,7 @@ def _invert_spatial(p: np.ndarray) -> np.ndarray:
 def _invert_scale(p: np.ndarray) -> np.ndarray:
     """Rescale dimension quarters by inverse factors, then renormalize."""
     lib = _load_lib()
-    p32 = np.ascontiguousarray(p, np.float32)
+    p32 = np.ascontiguousarray(np.real(p), np.float32)
     out = np.zeros_like(p32)
     if lib:
         fp_, _p = _fp(p32); fo, _o = _fp(out)
@@ -156,12 +156,12 @@ def _invert_scale(p: np.ndarray) -> np.ndarray:
 def _invert_abstraction(p: np.ndarray, ctx: Optional[np.ndarray] = None) -> np.ndarray:
     """Flip between levels of understanding using context projection."""
     lib = _load_lib()
-    p32 = np.ascontiguousarray(p, np.float32)
+    p32 = np.ascontiguousarray(np.real(p), np.float32)
     out = np.zeros_like(p32)
     if lib:
         fp_, _p = _fp(p32); fo, _o = _fp(out)
         if ctx is not None:
-            ctx32 = np.ascontiguousarray(ctx.flatten()[:len(p32)], np.float32)
+            ctx32 = np.ascontiguousarray(np.real(ctx.flatten()[:len(p32)]), np.float32)
             if len(ctx32) < len(p32):
                 ctx32 = np.pad(ctx32, (0, len(p32)-len(ctx32)))
             fc, _c = _fp(ctx32)
@@ -184,7 +184,7 @@ def _invert_abstraction(p: np.ndarray, ctx: Optional[np.ndarray] = None) -> np.n
 def _invert_noise(p: np.ndarray, rng: np.random.RandomState) -> np.ndarray:
     """Suppress dominant features; add small structured noise."""
     lib = _load_lib()
-    p32 = np.ascontiguousarray(p, np.float32)
+    p32 = np.ascontiguousarray(np.real(p), np.float32)
     out = np.zeros_like(p32)
     seed = int(rng.randint(0, 2**31))
     if lib:
@@ -218,7 +218,8 @@ def _invert_relational(p: np.ndarray) -> np.ndarray:
     G   = np.zeros((nb, nb), np.float32)
     for i in range(nb):
         for j in range(nb):
-            G[i, j] = float(np.dot(blocks[i], blocks[j]))
+            # Use real part of complex inner product
+            G[i, j] = float(np.real(np.vdot(blocks[i], blocks[j])))
 
     # Find dominant block (largest off-diagonal contribution)
     dom = np.argmax(np.sum(np.abs(G), axis=1) - np.abs(np.diag(G)))
@@ -226,8 +227,10 @@ def _invert_relational(p: np.ndarray) -> np.ndarray:
     out = p.copy()
     for i in range(nb):
         if i != dom:
-            proj = (np.dot(blocks[dom], blocks[i]) /
-                    (np.dot(blocks[dom], blocks[dom]) + 1e-10)) * blocks[dom]
+            # Complex-aware projection
+            dot_val = np.vdot(blocks[dom], blocks[i])
+            self_dot = np.vdot(blocks[dom], blocks[dom])
+            proj = (dot_val / (self_dot + 1e-10)) * blocks[dom]
             out[i*bs:(i+1)*bs] -= 2.0 * proj
     return out
 
@@ -270,7 +273,7 @@ def _invert_compositional(p: np.ndarray) -> np.ndarray:
     cols = n // rows
 
     try:
-        mat = p.reshape(rows, cols).astype(np.float64)
+        mat = np.real(p).reshape(rows, cols).astype(np.float64)
         U, s, Vt = np.linalg.svd(mat, full_matrices=False)
         k = min(len(s), max(2, len(s) // 2))
         # Permute: rotate singular vectors by k//2 positions
