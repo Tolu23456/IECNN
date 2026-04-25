@@ -87,6 +87,7 @@ class IECNN:
                  base_lr:               float = 0.10,
                  evolve:                bool  = True,
                  persistence_path:      Optional[str] = None,
+                 phase_coding:          bool  = False,
                  seed:                  int   = 42):
         self.feature_dim = feature_dim
         self.num_dots    = num_dots
@@ -94,6 +95,7 @@ class IECNN:
         self.alpha       = alpha
         self.seed        = seed
         self.do_evolve   = evolve
+        self.phase_coding = phase_coding
 
         # Core components
         self.base_mapper = BaseMapper(feature_dim=feature_dim)
@@ -122,7 +124,7 @@ class IECNN:
 
         # Memory and evolution
         self.dot_memory      = DotMemory(num_dots)
-        self.cluster_memory  = ClusterMemory(feature_dim)
+        self.cluster_memory  = ClusterMemory(feature_dim, phase_coding=phase_coding)
         self.evolution       = DotEvolution(EvolutionConfig(), seed)
         self.evaluator       = IECNNMetrics(alpha)
 
@@ -186,6 +188,7 @@ class IECNN:
                 "next_dot_id":  _NEXT_DOT_ID,
                 "feature_dim":  self.feature_dim,
                 "num_dots":     self.num_dots,
+                "phase_coding": self.phase_coding,
             }, fh, protocol=pickle.HIGHEST_PROTOCOL)
 
     def load_brain(self, persistence_path: Optional[str] = None) -> None:
@@ -203,6 +206,14 @@ class IECNN:
         self._call_count = int(meta.get("call_count", 0))
         if "next_dot_id" in meta:
             set_next_dot_id(int(meta["next_dot_id"]))
+        # If the saved brain was trained with phase coding, propagate the
+        # flag so we don't silently corrupt phase accumulators on the next
+        # commit_pattern call. If the constructor explicitly enabled phase
+        # coding for a legacy (no-phase) brain, that's also fine — new
+        # patterns will start accumulating phase from this point onward.
+        if "phase_coding" in meta:
+            self.phase_coding = bool(meta["phase_coding"]) or self.phase_coding
+            self.cluster_memory.phase_coding = self.phase_coding
         if os.path.exists(paths["dots"]):
             with open(paths["dots"], "rb") as fh:
                 self._dots = pickle.load(fh)
@@ -641,7 +652,13 @@ class IECNN:
         self.working_memory = final_out.copy()
 
         if top_cluster:
-            self.cluster_memory.commit_pattern(final_out, top_cluster.score, self.alpha)
+            top_phase = None
+            if self.phase_coding:
+                mp, mc = top_cluster.mean_phase()
+                if mc > 0.0:
+                    top_phase = mp
+            self.cluster_memory.commit_pattern(final_out, top_cluster.score,
+                                               alpha=self.alpha, phase=top_phase)
         if self.do_evolve:
             self._dots = self.evolution.evolve(dots, self.dot_memory)
             # Joint prune: drop dots that have lived long enough to prove

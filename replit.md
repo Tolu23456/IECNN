@@ -78,6 +78,42 @@ python main.py prune --min-outcomes 5 --min-age 3     # stricter culling
 `python main.py memory` also prints per-file brain sizes and a dry-run
 prune preview so you can see how much would be reclaimed.
 
+## Phase-coded dots (experimental, opt-in)
+
+Pass `--phase-coding` on any CLI command (or before any interactive
+session) to enable IECNN-native phase-coherence binding. Each prediction
+gets a `phase ∈ [0, 2π)` derived from the slice center within the
+current basemap. Cluster memory accumulates per-pattern circular
+statistics (mean phase + concentration) and uses a phase-aware
+similarity (`formulas.phase_aware_similarity`) for both pattern matching
+on commit and nearest-neighbor lookup. The intent is to let the model
+distinguish patterns that share content but differ in position
+("dog bites man" vs "man bites dog") without bolting on softmax
+attention.
+
+Backward compatibility:
+
+- Existing 162 MB brains load unchanged with phase coding disabled.
+- The flag is persisted in `meta.pkl`. Once you enable it, subsequent
+  runs without the flag will still load in phase-coded mode (the saved
+  state wins).
+- Phase data is stored as a parallel list of `(re_sum, im_sum, count)`
+  tuples (one per pattern slot, or None for legacy/disabled patterns).
+  ClusterMemory pickle format is otherwise unchanged.
+
+Files touched: `neural_dot/neural_dot.py` (predict info), `convergence/
+convergence.py` (`Cluster.mean_phase`), `formulas/formulas.py`
+(`phase_aware_similarity`), `memory/cluster_memory.py` (per-pattern
+phase tracking + phase-aware match), `pipeline/pipeline.py`
+(constructor flag, `commit_pattern` call, meta persistence).
+
+The current slice keeps activation vectors real-valued — only the
+binding mechanism is novel. A follow-up could promote dot evolution to
+reward narrow phase distributions per dot, which is what would drive
+positional specialization to *emerge* rather than just be tracked.
+
+---
+
 For long full-pipeline training runs, periodic pruning is built in:
 
 ```bash

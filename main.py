@@ -19,6 +19,12 @@ Usage:
   python main.py demo                   # run the original 6-example showcase
   python main.py build                  # compile C extensions
 
+  Global flag (any subcommand or interactive mode):
+  --phase-coding      enable IECNN-native phase-coherence binding so cluster
+                      memory can distinguish patterns with the same content
+                      but different positions ("dog bites man" vs
+                      "man bites dog"). Persists in the brain meta file.
+
   Interactive commands (available in interactive mode):
     generate <prompt>   encode prompt then decode output
     train <filepath>    train on a text file
@@ -69,6 +75,9 @@ _SEED_CORPUS = [
 ]
 
 
+_PHASE_CODING = False
+
+
 def _make_model(verbose: bool = False):
     from pipeline.pipeline import IECNN
     if verbose:
@@ -77,6 +86,7 @@ def _make_model(verbose: bool = False):
         feature_dim=256, num_dots=128, n_heads=4,
         max_iterations=12, evolve=True, seed=42,
         persistence_path=PERSISTENCE,
+        phase_coding=_PHASE_CODING,
     )
     # Only seed the vocab if absolutely empty (first ever run, no brain on disk)
     if not model.base_mapper.is_fitted:
@@ -411,6 +421,9 @@ def cmd_demo():
 
 if __name__ == "__main__":
     args = sys.argv[1:]
+    if "--phase-coding" in args:
+        _PHASE_CODING = True
+        args = [a for a in args if a != "--phase-coding"]
     if not args:
         cmd_interactive()
     elif args[0] == "build":

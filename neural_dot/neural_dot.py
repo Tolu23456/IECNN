@@ -456,6 +456,8 @@ class NeuralDot:
           list of (prediction, confidence, info) — one per head
         """
         sl, start, end = self._select_slice(basemap.matrix)
+        n_tokens = max(int(basemap.matrix.shape[0]), 1)
+        slice_phase = float(2.0 * np.pi * ((start + end) * 0.5) / n_tokens)
         # Determine dominant modality of the slice
         mod_flags = sl[:, 248:252]
         mod_counts = np.sum(mod_flags, axis=0)
@@ -494,6 +496,7 @@ class NeuralDot:
                 "dot_type":  _TYPE_NAMES[self.dot_type],
                 "head":      h,
                 "slice":     (start, end),
+                "phase":     slice_phase,
                 "bias":      self.bias,
                 "source":    "original",
                 "inversion_type": None,

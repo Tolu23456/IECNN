@@ -19,7 +19,7 @@ from collections import deque
 
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from formulas.formulas import similarity_score
+from formulas.formulas import similarity_score, phase_aware_similarity
 
 
 class RoundSnapshot:
@@ -53,10 +53,11 @@ class ClusterMemory:
     """
 
     def __init__(self, feature_dim: int = 256, max_patterns: int = 128,
-                 window_rounds: int = 10):
+                 window_rounds: int = 10, phase_coding: bool = False):
         self.feature_dim   = feature_dim
         self.max_patterns  = max_patterns
         self.window_rounds = window_rounds
+        self.phase_coding  = phase_coding
 
         # Per-call timeline
         self._round_snapshots: List[RoundSnapshot] = []
@@ -64,6 +65,10 @@ class ClusterMemory:
         # Cross-call pattern library: stable patterns that recur
         self._pattern_library: List[Tuple[np.ndarray, float]] = []  # (centroid, weight)
         self._pattern_counts: List[int] = []
+        # Parallel to _pattern_library: each entry is either None (no phase
+        # data, e.g. legacy patterns or phase coding disabled) or a tuple
+        # (re_sum, im_sum, count) accumulating circular statistics.
+        self._pattern_phase_acc: List[Optional[Tuple[float, float, int]]] = []
 
     # ── Within-call recording ────────────────────────────────────────
 
@@ -118,45 +123,102 @@ class ClusterMemory:
 
     # ── Cross-call pattern library ───────────────────────────────────
 
-    def commit_pattern(self, centroid: np.ndarray, score: float, alpha: float = 0.7):
+    def _pattern_phase(self, idx: int) -> Tuple[Optional[float], float]:
+        """Return (mean_phase, concentration) for pattern idx, or (None, 0.0)."""
+        acc = self._pattern_phase_acc[idx] if idx < len(self._pattern_phase_acc) else None
+        if acc is None:
+            return (None, 0.0)
+        re_s, im_s, cnt = acc
+        if cnt <= 0:
+            return (None, 0.0)
+        mean = float(np.arctan2(im_s, re_s))
+        conc = float(np.sqrt(re_s * re_s + im_s * im_s) / cnt)
+        return (mean, conc)
+
+    def _accum_phase(self, idx: int, phase: float):
+        """Add a sample to pattern idx's circular accumulator."""
+        re = float(np.cos(phase)); im = float(np.sin(phase))
+        cur = self._pattern_phase_acc[idx] if idx < len(self._pattern_phase_acc) else None
+        if cur is None:
+            self._pattern_phase_acc[idx] = (re, im, 1)
+        else:
+            r0, i0, c0 = cur
+            self._pattern_phase_acc[idx] = (r0 + re, i0 + im, c0 + 1)
+
+    def commit_pattern(self, centroid: np.ndarray, score: float,
+                       alpha: float = 0.7,
+                       phase: Optional[float] = None):
         """
         After a successful convergence, store the winning centroid as a pattern.
         If a similar pattern already exists, update its weight.
+
+        When phase coding is enabled and a phase is provided, similarity to
+        existing patterns is phase-aware (so e.g. 'dog bites man' and
+        'man bites dog' won't collapse into the same pattern slot just
+        because their feature centroids look alike).
         """
         n = np.linalg.norm(centroid)
         if n < 1e-10:
             return
         c_norm = centroid / n
 
+        # Make sure parallel arrays stay in lock-step length, even on legacy
+        # state that predates phase tracking.
+        while len(self._pattern_phase_acc) < len(self._pattern_library):
+            self._pattern_phase_acc.append(None)
+
         # Check if similar pattern exists
         for i, (pat, w) in enumerate(self._pattern_library):
-            if similarity_score(c_norm, pat, alpha) > 0.85:
+            if self.phase_coding and phase is not None:
+                pat_phase, pat_conc = self._pattern_phase(i)
+                sim = phase_aware_similarity(c_norm, pat,
+                                             phase_a=phase, phase_b=pat_phase,
+                                             concentration=pat_conc, alpha=alpha)
+            else:
+                sim = similarity_score(c_norm, pat, alpha)
+            if sim > 0.85:
                 # Update existing pattern (exponential moving average)
                 self._pattern_library[i] = (
                     (0.8 * pat + 0.2 * c_norm),
                     w * 0.9 + score * 0.1,
                 )
                 self._pattern_counts[i] += 1
+                if self.phase_coding and phase is not None:
+                    self._accum_phase(i, phase)
                 return
 
         # Add new pattern
         self._pattern_library.append((c_norm, score))
         self._pattern_counts.append(1)
+        if self.phase_coding and phase is not None:
+            re = float(np.cos(phase)); im = float(np.sin(phase))
+            self._pattern_phase_acc.append((re, im, 1))
+        else:
+            self._pattern_phase_acc.append(None)
 
         # Trim to max_patterns by keeping highest-weighted
         if len(self._pattern_library) > self.max_patterns:
             order = np.argsort([w for _, w in self._pattern_library])[::-1]
-            self._pattern_library = [self._pattern_library[i] for i in order[:self.max_patterns]]
-            self._pattern_counts  = [self._pattern_counts[i] for i in order[:self.max_patterns]]
+            keep = list(order[:self.max_patterns])
+            self._pattern_library   = [self._pattern_library[i]   for i in keep]
+            self._pattern_counts    = [self._pattern_counts[i]    for i in keep]
+            self._pattern_phase_acc = [self._pattern_phase_acc[i] for i in keep]
 
-    def closest_pattern(self, query: np.ndarray, alpha: float = 0.7) -> Optional[np.ndarray]:
+    def closest_pattern(self, query: np.ndarray, alpha: float = 0.7,
+                        query_phase: Optional[float] = None) -> Optional[np.ndarray]:
         """Return the closest known pattern to `query`, or None."""
         if not self._pattern_library:
             return None
         q = query / (np.linalg.norm(query) + 1e-10)
         best_sim, best_pat = -1.0, None
-        for pat, _ in self._pattern_library:
-            s = similarity_score(q, pat, alpha)
+        for i, (pat, _) in enumerate(self._pattern_library):
+            if self.phase_coding and query_phase is not None:
+                pat_phase, pat_conc = self._pattern_phase(i)
+                s = phase_aware_similarity(q, pat,
+                                           phase_a=query_phase, phase_b=pat_phase,
+                                           concentration=pat_conc, alpha=alpha)
+            else:
+                s = similarity_score(q, pat, alpha)
             if s > best_sim:
                 best_sim, best_pat = s, pat
         return best_pat if best_sim > 0.3 else None
@@ -186,17 +248,32 @@ class ClusterMemory:
             "feature_dim":      self.feature_dim,
             "max_patterns":     self.max_patterns,
             "window_rounds":    self.window_rounds,
+            "phase_coding":     self.phase_coding,
             "pattern_library":  [(c.copy(), float(w)) for c, w in self._pattern_library],
             "pattern_counts":   list(self._pattern_counts),
+            "pattern_phase_acc": [
+                None if acc is None else (float(acc[0]), float(acc[1]), int(acc[2]))
+                for acc in self._pattern_phase_acc
+            ],
         }
 
     def load_state(self, state: dict):
         self.feature_dim   = state.get("feature_dim", self.feature_dim)
         self.max_patterns  = state.get("max_patterns", self.max_patterns)
         self.window_rounds = state.get("window_rounds", self.window_rounds)
+        # Don't override phase_coding from state — the IECNN constructor sets
+        # it intentionally; legacy state simply has no phase data.
         self._pattern_library = [
             (np.asarray(c, dtype=np.float32), float(w))
             for c, w in state.get("pattern_library", [])
         ]
         self._pattern_counts  = list(state.get("pattern_counts", []))
+        loaded_phases = state.get("pattern_phase_acc", [])
+        self._pattern_phase_acc = [
+            None if acc is None else (float(acc[0]), float(acc[1]), int(acc[2]))
+            for acc in loaded_phases
+        ]
+        # Pad missing entries (legacy pickles) so parallel arrays stay aligned.
+        while len(self._pattern_phase_acc) < len(self._pattern_library):
+            self._pattern_phase_acc.append(None)
         self._round_snapshots = []

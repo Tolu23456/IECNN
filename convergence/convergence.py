@@ -124,6 +124,31 @@ class Cluster:
             counts[m] = counts.get(m, 0) + 1
         return counts
 
+    def mean_phase(self) -> Tuple[float, float]:
+        """
+        Circular mean and concentration of member phases.
+
+        Returns (mean_phase_radians, concentration in [0, 1]).
+        Concentration of 1.0 means all members agree on a single phase;
+        0.0 means uniformly spread. Returns (0.0, 0.0) if no members carry
+        a 'phase' key (i.e. phase coding is disabled or this is legacy data).
+        """
+        re_sum = 0.0
+        im_sum = 0.0
+        n = 0
+        for info in self.infos:
+            ph = info.get("phase")
+            if ph is None:
+                continue
+            re_sum += float(np.cos(ph))
+            im_sum += float(np.sin(ph))
+            n += 1
+        if n == 0:
+            return (0.0, 0.0)
+        mean = float(np.arctan2(im_sum, re_sum))
+        conc = float(np.sqrt(re_sum * re_sum + im_sum * im_sum) / n)
+        return (mean, conc)
+
     def __repr__(self):
         return (f"Cluster(id={self.cluster_id}, size={self.size}, "
                 f"score={self.score:.4f}, micro={self.num_micro})")

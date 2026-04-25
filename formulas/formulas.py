@@ -112,6 +112,44 @@ def similarity_score(a: np.ndarray, b: np.ndarray, alpha: float = 0.7) -> float:
     return alpha * cosine_similarity(a32, b32) + (1.0 - alpha) * agreement_strength(a32, b32)
 
 
+def phase_aware_similarity(a: np.ndarray, b: np.ndarray,
+                           phase_a: Optional[float] = None,
+                           phase_b: Optional[float] = None,
+                           concentration: float = 1.0,
+                           alpha: float = 0.7,
+                           phase_weight: float = 0.5) -> float:
+    """
+    IECNN-native phase-coherence-modulated similarity.
+
+    Two activations that look similar in feature space but originated at
+    different positions in the input stream are scored as less similar than
+    plain cosine alone would suggest. This is what lets cluster memory
+    distinguish 'dog bites man' from 'man bites dog' without bolting on
+    softmax attention.
+
+    Args:
+        a, b           — feature vectors (real-valued, dim = feature_dim)
+        phase_a, phase_b — circular phase in radians, or None for legacy data
+        concentration  — phase concentration of the matched pattern in [0, 1].
+                         A pattern with low concentration has a fuzzy phase
+                         and shouldn't be penalized harshly for phase mismatch.
+        alpha          — feature-space alpha forwarded to similarity_score
+        phase_weight   — max weight given to the phase-coherence factor when
+                         concentration = 1.0. With phase_weight = 0.5, a
+                         perfectly concentrated pattern gets at most a
+                         50/50 blend of feature similarity and phase coherence.
+
+    Falls back to plain similarity_score when either phase is missing or the
+    pattern's phase concentration is too low to be meaningful.
+    """
+    base = similarity_score(a, b, alpha)
+    if phase_a is None or phase_b is None or concentration < 0.05:
+        return base
+    coh = 0.5 * (1.0 + float(np.cos(phase_a - phase_b)))
+    w = max(0.0, min(1.0, phase_weight * concentration))
+    return float(base * (1.0 - w + w * coh))
+
+
 # ── Formula 2: Convergence Score ────────────────────────────────────
 
 def convergence_score(predictions: List[np.ndarray], confidences: List[float],
