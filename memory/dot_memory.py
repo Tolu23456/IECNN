@@ -49,15 +49,28 @@ class DotMemory:
         self._var_sums: Dict[int, np.ndarray] = {}
         self._var_counts: Dict[int, int] = {}
 
+        # Per-dot circular phase accumulator: (re_sum, im_sum, count)
+        # Populated only when phase coding is active and predictions carry phase.
+        self._phase_acc: Dict[int, Tuple[float, float, int]] = {}
+        # Multiplier on fitness for narrowly phase-concentrated dots; 0 disables.
+        self.phase_bonus_weight: float = 0.0
+
     def _ensure_id(self, dot_id: int):
         if dot_id not in self._windows:
             self._windows[dot_id] = deque(maxlen=self.window_size)
             self._var_counts[dot_id] = 0
             self._success_counts[dot_id] = 0.0
             self._total_counts[dot_id] = 0.0
+            self._phase_acc[dot_id] = (0.0, 0.0, 0)
 
-    def record(self, dot_id: int, prediction: np.ndarray, in_winner: bool):
-        """Record whether a dot's prediction ended in the winning cluster."""
+    def record(self, dot_id: int, prediction: np.ndarray, in_winner: bool,
+               phase: Optional[float] = None):
+        """Record whether a dot's prediction ended in the winning cluster.
+
+        If `phase` (radians) is provided, also accumulate it into the dot's
+        circular phase distribution. A narrow distribution (high concentration)
+        means the dot fires consistently from the same positional slot.
+        """
         self._ensure_id(dot_id)
 
         self._total_counts[dot_id] += 1.0
@@ -71,6 +84,32 @@ class DotMemory:
             stack = np.stack(list(self._windows[dot_id]))
             self._var_sums[dot_id] = np.var(stack, axis=0)
         self._var_counts[dot_id] += 1
+
+        if phase is not None:
+            re_s, im_s, cnt = self._phase_acc.get(dot_id, (0.0, 0.0, 0))
+            self._phase_acc[dot_id] = (
+                re_s + float(np.cos(phase)),
+                im_s + float(np.sin(phase)),
+                cnt + 1,
+            )
+
+    def phase_concentration(self, dot_id: int) -> float:
+        """Resultant length R/n of the dot's circular phase distribution.
+
+        Returns 0.0 when no phase samples have been recorded — this disables
+        any phase-related bonus for dots that have never seen phase data.
+        Returns ~1.0 when the dot fires from a single positional slice.
+        """
+        re_s, im_s, cnt = self._phase_acc.get(dot_id, (0.0, 0.0, 0))
+        if cnt < 1:
+            return 0.0
+        return float(np.sqrt(re_s * re_s + im_s * im_s) / cnt)
+
+    def all_phase_concentrations(self, dot_ids: List[int]) -> np.ndarray:
+        out = np.zeros(len(dot_ids), dtype=np.float32)
+        for i, did in enumerate(dot_ids):
+            out[i] = self.phase_concentration(did)
+        return out
 
     def effectiveness(self, dot_id: int) -> float:
         """Fraction of predictions that entered the winning cluster (0.5 prior)."""
@@ -133,6 +172,12 @@ class DotMemory:
             fit[i] = dot_fitness(
                 rd=float(drp[i]), cd=float(eff[i]), sd=spec, ud=float(eff[i]), nd=1.0 - float(eff[i])
             )
+        # Phase-narrowness bonus: dots with a tightly concentrated phase
+        # distribution get a multiplicative boost. Inactive when bonus weight
+        # is 0 or when the dot has no phase samples (concentration == 0.0).
+        if self.phase_bonus_weight > 0.0:
+            conc = self.all_phase_concentrations(dot_ids)
+            fit = fit * (1.0 + self.phase_bonus_weight * conc)
         return fit
 
     # ── Dot Reinforcement Pressure (F17) ─────────────────────────────
@@ -222,7 +267,8 @@ class DotMemory:
         """
         keep = set(int(i) for i in keep_ids)
         for store in (self._success_counts, self._total_counts,
-                      self._windows, self._var_sums, self._var_counts):
+                      self._windows, self._var_sums, self._var_counts,
+                      self._phase_acc):
             for did in list(store.keys()):
                 if int(did) not in keep:
                     del store[did]
@@ -238,6 +284,7 @@ class DotMemory:
         self._windows.clear()
         self._var_sums.clear()
         self._var_counts.clear()
+        self._phase_acc.clear()
 
     def summary(self, current_dot_ids: Optional[List[int]] = None) -> dict:
         eff = self.all_effectivenesses(current_dot_ids)
@@ -260,18 +307,20 @@ class DotMemory:
 
     def state_dict(self) -> dict:
         return {
-            "num_dots":        self.num_dots,
-            "window_size":     self.window_size,
-            "lambda1":         self.lambda1,
-            "lambda2":         self.lambda2,
-            "lambda3":         self.lambda3,
-            "lambda4":         self.lambda4,
-            "beta":            self.beta,
-            "success_counts":  dict(self._success_counts),
-            "total_counts":    dict(self._total_counts),
-            "windows":         {k: list(v) for k, v in self._windows.items()},
-            "var_sums":        dict(self._var_sums),
-            "var_counts":      dict(self._var_counts),
+            "num_dots":           self.num_dots,
+            "window_size":        self.window_size,
+            "lambda1":            self.lambda1,
+            "lambda2":            self.lambda2,
+            "lambda3":            self.lambda3,
+            "lambda4":            self.lambda4,
+            "beta":               self.beta,
+            "phase_bonus_weight": float(self.phase_bonus_weight),
+            "success_counts":     dict(self._success_counts),
+            "total_counts":       dict(self._total_counts),
+            "windows":            {k: list(v) for k, v in self._windows.items()},
+            "var_sums":           dict(self._var_sums),
+            "var_counts":         dict(self._var_counts),
+            "phase_acc":          {int(k): tuple(v) for k, v in self._phase_acc.items()},
         }
 
     def load_state(self, state: dict):
@@ -283,6 +332,7 @@ class DotMemory:
         self.lambda3 = state.get("lambda3", self.lambda3)
         self.lambda4 = state.get("lambda4", self.lambda4)
         self.beta    = state.get("beta", self.beta)
+        self.phase_bonus_weight = float(state.get("phase_bonus_weight", self.phase_bonus_weight))
         self._success_counts = dict(state.get("success_counts", {}))
         self._total_counts   = dict(state.get("total_counts", {}))
         self._windows = {
@@ -291,3 +341,7 @@ class DotMemory:
         }
         self._var_sums   = dict(state.get("var_sums", {}))
         self._var_counts = dict(state.get("var_counts", {}))
+        self._phase_acc  = {
+            int(k): (float(v[0]), float(v[1]), int(v[2]))
+            for k, v in state.get("phase_acc", {}).items()
+        }

@@ -124,6 +124,8 @@ class IECNN:
 
         # Memory and evolution
         self.dot_memory      = DotMemory(num_dots)
+        if phase_coding:
+            self.dot_memory.phase_bonus_weight = 0.30
         self.cluster_memory  = ClusterMemory(feature_dim, phase_coding=phase_coding)
         self.evolution       = DotEvolution(EvolutionConfig(), seed)
         self.evaluator       = IECNNMetrics(alpha)
@@ -220,6 +222,12 @@ class IECNN:
         if os.path.exists(paths["dotmem"]):
             with open(paths["dotmem"], "rb") as fh:
                 self.dot_memory.load_state(pickle.load(fh))
+            # Reflect current phase_coding setting onto the dot memory so a
+            # brain trained without phase coding still gets the bonus enabled
+            # when re-launched with --phase-coding (and vice-versa is harmless
+            # because the bonus is multiplied by zero-concentration anyway).
+            if self.phase_coding and self.dot_memory.phase_bonus_weight <= 0.0:
+                self.dot_memory.phase_bonus_weight = 0.30
         if os.path.exists(paths["clustmem"]):
             with open(paths["clustmem"], "rb") as fh:
                 self.cluster_memory.load_state(pickle.load(fh))
@@ -862,7 +870,8 @@ class IECNN:
             in_winner = (i < len(assignments) and assignments[i] in win_cid)
             dot_id = info.get("dot_id", -1)
             if dot_id >= 0:
-                self.dot_memory.record(dot_id, pred, in_winner)
+                self.dot_memory.record(dot_id, pred, in_winner,
+                                       phase=info.get("phase"))
 
     def _learn_bias(self, surviving: List[Cluster], candidates: List[Tuple],
                     assignments: List[int]):

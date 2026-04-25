@@ -104,13 +104,34 @@ Backward compatibility:
 Files touched: `neural_dot/neural_dot.py` (predict info), `convergence/
 convergence.py` (`Cluster.mean_phase`), `formulas/formulas.py`
 (`phase_aware_similarity`), `memory/cluster_memory.py` (per-pattern
-phase tracking + phase-aware match), `pipeline/pipeline.py`
-(constructor flag, `commit_pattern` call, meta persistence).
+phase tracking + phase-aware match), `memory/dot_memory.py` (per-dot
+circular phase accumulator + fitness bonus, see below),
+`pipeline/pipeline.py` (constructor flag, `commit_pattern` call, phase
+forwarded into `dot_memory.record`, meta persistence).
 
-The current slice keeps activation vectors real-valued — only the
-binding mechanism is novel. A follow-up could promote dot evolution to
-reward narrow phase distributions per dot, which is what would drive
-positional specialization to *emerge* rather than just be tracked.
+### Phase-narrowness fitness bonus
+
+When `--phase-coding` is on, `DotMemory.phase_bonus_weight` is set to
+`0.30`. Each prediction's slice phase is forwarded into
+`dot_memory.record(...)` and accumulated as a circular distribution
+`(re_sum, im_sum, count)` per dot. The dot's phase concentration is the
+resultant length `R/n ∈ [0, 1]` — `1.0` means the dot has only ever
+fired from a single positional slice, `0.0` means uniformly spread or
+no samples.
+
+In `all_fitness_scores`, the F24 fitness is multiplied by
+`(1 + phase_bonus_weight * concentration)`. So a fully phase-specialist
+dot gets up to a 30% fitness boost at selection time, which propagates
+into `DotEvolution.evolve()` (elites, tournament selection, mutation
+parents). This is the selection pressure that turns phase coding from a
+tracked metadata channel into an emergent positional binding mechanism:
+dots that consistently fire from the same slot survive and reproduce.
+
+Backward compat for the bonus: dots with no phase samples have
+concentration `0.0`, so the multiplier is `1.0` — legacy dots are
+unaffected. Brains saved without the flag load with
+`phase_bonus_weight=0.0`; if you re-launch them with `--phase-coding`,
+the pipeline restores it to `0.30`.
 
 ---
 
