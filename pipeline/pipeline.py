@@ -216,7 +216,8 @@ class IECNN:
             with open(paths["evo"], "rb") as fh:
                 self.evolution.load_state(pickle.load(fh))
 
-    def prune_dots(self, min_outcomes: int = 2, min_age_gens: int = 2) -> dict:
+    def prune_dots(self, min_outcomes: int = 2, min_age_gens: int = 2,
+                   dry_run: bool = False) -> dict:
         """
         Joint pruner for dot pool + dot memory.
 
@@ -228,11 +229,16 @@ class IECNN:
         the surviving id set, which also removes orphaned history left
         behind by previous generations of dead dots.
 
+        When `dry_run=True`, no state is mutated — only the stats dict is
+        returned so callers can preview the impact.
+
         Returns a small stats dict for logging.
         """
         if not self._dots:
             return {"removed_dots": 0, "removed_history": 0,
-                    "kept_dots": 0, "kept_history": 0}
+                    "kept_dots": 0, "kept_history": 0,
+                    "generation": int(self.evolution.generation),
+                    "dry_run": dry_run}
 
         current_gen = int(self.evolution.generation)
         before_dots = len(self._dots)
@@ -251,16 +257,22 @@ class IECNN:
         if not survivors and self._dots:
             survivors = [self._dots[0]]
 
-        self._dots = survivors
         keep_ids = [d.dot_id for d in survivors]
-        self.dot_memory.prune(keep_ids)
+        keep_set = set(int(i) for i in keep_ids)
+        kept_history = sum(1 for did in self.dot_memory._total_counts
+                           if int(did) in keep_set)
+
+        if not dry_run:
+            self._dots = survivors
+            self.dot_memory.prune(keep_ids)
 
         return {
             "removed_dots":    before_dots - len(survivors),
             "kept_dots":       len(survivors),
-            "removed_history": before_hist - len(self.dot_memory._total_counts),
-            "kept_history":    len(self.dot_memory._total_counts),
+            "removed_history": before_hist - kept_history,
+            "kept_history":    kept_history,
             "generation":      current_gen,
+            "dry_run":         dry_run,
         }
 
     def train_pass(self, sentences: List[str], max_iterations: int = 2,

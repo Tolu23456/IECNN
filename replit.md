@@ -67,6 +67,17 @@ Two mechanisms now cap on-disk and in-memory growth:
 The previous "~30 sentences per `train` invocation" cap should now be
 substantially relaxed; re-measure before pushing further.
 
+To compact the brain manually without running an encode:
+
+```bash
+python main.py prune                                  # apply default prune
+python main.py prune --dry-run                        # preview only, no writes
+python main.py prune --min-outcomes 5 --min-age 3     # stricter culling
+```
+
+`python main.py memory` also prints per-file brain sizes and a dry-run
+prune preview so you can see how much would be reclaimed.
+
 ---
 
 ## Dependencies

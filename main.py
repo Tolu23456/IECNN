@@ -10,6 +10,8 @@ Usage:
   python main.py sim "text A" "text B"  # similarity between two texts
   python main.py compare "a" "b" "c"    # n×n similarity table
   python main.py memory                 # show dot memory and evolution state
+  python main.py prune [--dry-run]      # compact the brain (drop dead dots + orphans)
+                       [--min-outcomes N] [--min-age N]
   python main.py demo                   # run the original 6-example showcase
   python main.py build                  # compile C extensions
 
@@ -19,6 +21,7 @@ Usage:
     sim A | B           pairwise similarity
     encode <text>       encode text and show vector summary
     memory              show dot memory + evolution state
+    prune               compact the brain (drop dead dots + orphans)
     quit / q            exit
 """
 
@@ -136,6 +139,26 @@ def cmd_compare(texts: List[str]):
         print(f"  {labels[i]:<{col_w}}  {row_str}")
 
 
+def _human_bytes(n: int) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024.0:
+            return f"{n:6.1f} {unit}"
+        n /= 1024.0
+    return f"{n:6.1f} TB"
+
+
+def _brain_files() -> list:
+    """Return [(path, size_bytes)] for all brain companion files that exist."""
+    suffixes = ["", ".dots.pkl", ".dotmem.pkl", ".clustmem.pkl",
+                ".evo.pkl", ".meta.pkl"]
+    out = []
+    for s in suffixes:
+        p = PERSISTENCE + s
+        if os.path.exists(p):
+            out.append((p, os.path.getsize(p)))
+    return out
+
+
 def cmd_memory(model=None):
     _build_c()
     if model is None: model = _make_model()
@@ -143,10 +166,12 @@ def cmd_memory(model=None):
     dm = status["dot_memory"]
     cm = status["cluster_memory"]
     ev = status["evolution"]
+    pool_size = len(model._dots) if model._dots else 0
     print(f"\n{BAR}")
     print("  IECNN Memory & Evolution State")
     print(BAR)
     print(f"  Calls completed   : {status['call_count']}")
+    print(f"  Live dot pool     : {pool_size}")
     print(f"  Active dots       : {dm['active_dots']} / {dm['num_dots']}")
     print(f"  Mean effectiveness: {dm['mean_eff']:.4f}")
     print(f"  Max effectiveness : {dm['max_eff']:.4f}")
@@ -156,6 +181,54 @@ def cmd_memory(model=None):
     print(f"  Evolution gen     : {ev['generation']}")
     print(f"  Evo top_eff       : {ev['top_dot_eff']:.4f}")
     print(f"  Evo mean_eff      : {ev['mean_eff']:.4f}")
+    files = _brain_files()
+    if files:
+        total = sum(sz for _, sz in files)
+        print(f"\n  Brain on disk     : {_human_bytes(total).strip()} total")
+        for p, sz in files:
+            print(f"    {os.path.basename(p):<32} {_human_bytes(sz)}")
+    # Dry-run prune preview so the user can see how much would be reclaimed
+    preview = model.prune_dots(dry_run=True)
+    if preview["removed_dots"] or preview["removed_history"]:
+        print(f"\n  Prune preview     : would drop {preview['removed_dots']} dots "
+              f"and {preview['removed_history']} history records")
+        print(f"                      (run `prune` to apply)")
+
+
+def cmd_prune(dry_run: bool = False, min_outcomes: int = 2, min_age_gens: int = 2):
+    _build_c()
+    model = _make_model()
+    before_files = _brain_files()
+    before_total = sum(sz for _, sz in before_files)
+
+    stats = model.prune_dots(min_outcomes=min_outcomes,
+                              min_age_gens=min_age_gens,
+                              dry_run=dry_run)
+
+    print(f"\n{BAR}")
+    print(f"  IECNN Brain Prune  {'(DRY RUN)' if dry_run else ''}")
+    print(BAR)
+    print(f"  Generation        : {stats['generation']}")
+    print(f"  min_outcomes      : {min_outcomes}")
+    print(f"  min_age_gens      : {min_age_gens}")
+    print(f"  Dots removed      : {stats['removed_dots']}  (kept {stats['kept_dots']})")
+    print(f"  History removed   : {stats['removed_history']}  (kept {stats['kept_history']})")
+    print(f"  Brain on disk now : {_human_bytes(before_total).strip()}")
+
+    if dry_run:
+        print(f"\n  Dry run — no files modified. Re-run without --dry-run to apply.")
+        return
+
+    if stats['removed_dots'] == 0 and stats['removed_history'] == 0:
+        print(f"  Nothing to prune; brain is already compact.")
+        return
+
+    model.save_brain()
+    after_files = _brain_files()
+    after_total = sum(sz for _, sz in after_files)
+    saved = before_total - after_total
+    print(f"  Brain on disk new : {_human_bytes(after_total).strip()} "
+          f"(saved {_human_bytes(saved).strip()})")
 
 
 def cmd_train(filepath: str, limit: int = 0):
@@ -217,10 +290,21 @@ def _interactive_loop(model):
             print("    sim A | B           pairwise similarity")
             print("    train <filepath>    train on a text file")
             print("    memory              show dot memory + evolution state")
+            print("    prune [dry]         compact the brain (drop dead dots + orphans)")
             print("    quit / q            exit")
             continue
         if low == "memory":
             cmd_memory(model); continue
+        if low in ("prune", "prune --dry-run", "prune dry-run", "prune dry"):
+            dry = "dry" in low
+            stats = model.prune_dots(dry_run=dry)
+            tag = " (dry run)" if dry else ""
+            print(f"  Prune{tag}: dropped {stats['removed_dots']} dots, "
+                  f"{stats['removed_history']} history records "
+                  f"(kept {stats['kept_dots']} dots).")
+            if not dry and (stats['removed_dots'] or stats['removed_history']):
+                model.save_brain()
+            continue
         if low.startswith("sim ") and "|" in user:
             parts = user[4:].split("|", 1)
             va = model.encode(parts[0].strip())
@@ -315,6 +399,21 @@ if __name__ == "__main__":
         cmd_demo()
     elif args[0] == "memory":
         cmd_memory()
+    elif args[0] == "prune":
+        dry = "--dry-run" in args
+        min_outcomes = 2
+        min_age = 2
+        if "--min-outcomes" in args:
+            i = args.index("--min-outcomes")
+            if i + 1 < len(args):
+                try: min_outcomes = int(args[i+1])
+                except ValueError: pass
+        if "--min-age" in args:
+            i = args.index("--min-age")
+            if i + 1 < len(args):
+                try: min_age = int(args[i+1])
+                except ValueError: pass
+        cmd_prune(dry_run=dry, min_outcomes=min_outcomes, min_age_gens=min_age)
     elif args[0] == "encode" and len(args) >= 2:
         cmd_encode(" ".join(args[1:]))
     elif args[0] == "generate" and len(args) >= 2:
