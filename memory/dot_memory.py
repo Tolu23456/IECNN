@@ -212,6 +212,21 @@ class DotMemory:
             did = dot_ids[idx]
             self._success_counts[did] = max(0.0, self._success_counts.get(did, 0.0) * decay)
 
+    def prune(self, keep_ids):
+        """
+        Drop all per-dot records whose dot_id is not in `keep_ids`.
+
+        Used by the joint dot_pool / dot_memory pruner to evict orphaned
+        history left behind by dead dots. This is the change that actually
+        shrinks .dotmem.pkl on disk.
+        """
+        keep = set(int(i) for i in keep_ids)
+        for store in (self._success_counts, self._total_counts,
+                      self._windows, self._var_sums, self._var_counts):
+            for did in list(store.keys()):
+                if int(did) not in keep:
+                    del store[did]
+
     def reset_round(self):
         """Call between iterations — does NOT erase long-term history."""
         pass  # Long-term counts accumulate; only per-round state is tracked in pipeline

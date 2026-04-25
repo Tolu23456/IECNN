@@ -45,14 +45,27 @@ To train more, run `python main.py train corpus_10k.txt --limit 30` repeatedly �
 each call advances `evolution.generation`, expands `cluster_memory`, and
 reinforces dots that landed in winning clusters.
 
-### Known training-cost caveat
-Each evolved generation adds ~40 new dot IDs to `dot_memory`/`dot_pool`
-(40% kept + 60% replaced from the live pool of 64). Around ~50 sentences,
-total tracked dots reach ~2k and process memory exceeds ~1 GB, which can
-get the process OOM-killed in constrained environments. Practical training
-batch in this Replit env is **~30 sentences per `train` invocation**;
-re-invoke to continue. Long-term fix: prune `dot_memory` of dots with
-zero recorded outcomes (TODO).
+### Brain-size controls (April 2026)
+Two mechanisms now cap on-disk and in-memory growth:
+
+1. **Float16 weight storage.** `NeuralDot.__getstate__` / `__setstate__`
+   serialize `W`, `Q_basis`, `b_offset` and all `head_projs` as float16 and
+   restore them as float32 at load time. Runtime math is unchanged. This
+   alone takes the dot pool from ~641 MB → ~161 MB on disk (~4× shrink
+   vs the legacy float64 layout).
+2. **Joint pruner.** `IECNN.prune_dots(min_outcomes=2, min_age_gens=2)` runs
+   automatically after every `evolution.evolve(...)` call. A dot is removed
+   when it is BOTH old enough (current_gen - birth_generation >= min_age_gens)
+   AND has fewer than `min_outcomes` recorded predictions. Surviving ids
+   are then used to prune orphan history out of `dot_memory` so
+   `.dotmem.pkl` no longer grows unboundedly across generations.
+
+`NeuralDot` instances now carry a `birth_generation` attribute, set by
+`DotEvolution._mutate`, `_crossover`, and the random-diversity branch of
+`evolve()`. Legacy pickles without this field default to generation 0.
+
+The previous "~30 sentences per `train` invocation" cap should now be
+substantially relaxed; re-measure before pushing further.
 
 ---
 

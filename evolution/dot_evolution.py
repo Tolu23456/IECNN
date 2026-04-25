@@ -126,6 +126,7 @@ class DotEvolution:
                     bias=BiasVector.random(self._rng),
                     dot_type=DotType(self._rng.randint(0, len(DotType.__members__))),
                     seed=int(self._rng.randint(0, 2**31)),
+                    birth_generation=self._generation + 1,
                 )
                 new_pool[slot] = new_dot
             except StopIteration:
@@ -171,6 +172,7 @@ class DotEvolution:
             bias=BiasVector.from_array(new_b),
             dot_type=dot.dot_type,
             seed=int(self._rng.randint(0, 2**31)),
+            birth_generation=self._generation + 1,
         )
         # Mutate weights slightly
         child.W = dot.W + self._rng.randn(*dot.W.shape).astype(np.float32) * cfg.weight_noise_std
@@ -190,6 +192,7 @@ class DotEvolution:
             bias=BiasVector.from_array(b_arr),
             dot_type=p1.dot_type,
             seed=int(self._rng.randint(0, 2**31)),
+            birth_generation=self._generation + 1,
         )
         # Uniform row-wise crossover on W matrix
         mask = self._rng.rand(p1.W.shape[0]) > 0.5

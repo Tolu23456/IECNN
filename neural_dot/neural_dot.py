@@ -147,13 +147,18 @@ class NeuralDot:
                  bias: Optional[BiasVector] = None,
                  dot_type: DotType = DotType.SEMANTIC,
                  n_heads: int = N_HEADS,
-                 seed: Optional[int] = None):
+                 seed: Optional[int] = None,
+                 birth_generation: int = 0):
         self.dot_id      = dot_id if dot_id is not None else get_next_dot_id()
         self.feature_dim = feature_dim
         self.bias        = bias or BiasVector.from_dot_type(dot_type)
         self.dot_type    = dot_type
         self.n_heads     = n_heads
         self.max_heads   = 8 # Potential for growth
+        # Generation in which this dot was created. Used by the pruner to
+        # avoid killing newly-born dots before they have had a chance to
+        # accumulate outcome statistics.
+        self.birth_generation = int(birth_generation)
 
         seed = seed if seed is not None else dot_id * 31 + 7
         rng  = np.random.RandomState(seed)
@@ -171,6 +176,50 @@ class NeuralDot:
         self.Q_basis = rng.randn(feature_dim, feature_dim).astype(np.float32) * scale
         self.b_offset = rng.randn(feature_dim).astype(np.float32) * scale * 0.1
         self._rng = np.random.RandomState(seed + 1)
+
+    # ── Pickle: store large weight matrices as float16 to halve disk size.
+    # Runtime keeps float32 (no math change); only the on-disk representation
+    # is compressed. Backward-compatible with pre-compression pickles.
+    _F16_KEYS = ("W", "Q_basis", "b_offset")
+
+    @staticmethod
+    def _to_f16(arr):
+        if isinstance(arr, np.ndarray) and np.issubdtype(arr.dtype, np.floating):
+            return arr.astype(np.float16)
+        return arr
+
+    @staticmethod
+    def _to_f32(arr):
+        if isinstance(arr, np.ndarray) and np.issubdtype(arr.dtype, np.floating) and arr.dtype != np.float32:
+            return arr.astype(np.float32)
+        return arr
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        for k in self._F16_KEYS:
+            if k in state:
+                state[k] = self._to_f16(state[k])
+        if "head_projs" in state and isinstance(state["head_projs"], list):
+            state["head_projs"] = [self._to_f16(h) for h in state["head_projs"]]
+        state["_f16_compressed"] = True
+        return state
+
+    def __setstate__(self, state):
+        state.pop("_f16_compressed", None)
+        # Backfill defaults for fields added after some pickles were written.
+        state.setdefault("birth_generation", 0)
+        state.setdefault("max_heads", 8)
+        self.__dict__.update(state)
+        # Always normalize to float32 at runtime regardless of how it was saved
+        # (legacy pickles stored float64; new pickles store float16).
+        for k in self._F16_KEYS:
+            if k in self.__dict__:
+                self.__dict__[k] = self._to_f32(self.__dict__[k])
+        hp = self.__dict__.get("head_projs")
+        if isinstance(hp, list):
+            self.__dict__["head_projs"] = [self._to_f32(h) for h in hp]
+        if "_rng" not in self.__dict__:
+            self.__dict__["_rng"] = np.random.RandomState(int(self.dot_id) * 31 + 8)
 
     def predict(self, basemap, memory_hint=None, context_entropy=0.5, consensus=None):
         lib = _load_lib()

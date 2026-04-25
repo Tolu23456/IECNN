@@ -216,6 +216,53 @@ class IECNN:
             with open(paths["evo"], "rb") as fh:
                 self.evolution.load_state(pickle.load(fh))
 
+    def prune_dots(self, min_outcomes: int = 2, min_age_gens: int = 2) -> dict:
+        """
+        Joint pruner for dot pool + dot memory.
+
+        A dot is removed when it is BOTH:
+          - old enough (current_gen - birth_generation >= min_age_gens), and
+          - has accumulated fewer than `min_outcomes` recorded predictions.
+
+        After culling dead dots from `self._dots`, dot_memory is pruned to
+        the surviving id set, which also removes orphaned history left
+        behind by previous generations of dead dots.
+
+        Returns a small stats dict for logging.
+        """
+        if not self._dots:
+            return {"removed_dots": 0, "removed_history": 0,
+                    "kept_dots": 0, "kept_history": 0}
+
+        current_gen = int(self.evolution.generation)
+        before_dots = len(self._dots)
+        before_hist = len(self.dot_memory._total_counts)
+
+        survivors = []
+        for d in self._dots:
+            birth = int(getattr(d, "birth_generation", 0))
+            age = current_gen - birth
+            outcomes = self.dot_memory._total_counts.get(d.dot_id, 0.0)
+            # Newborns and dots with enough recorded outcomes survive.
+            if age < min_age_gens or outcomes >= min_outcomes:
+                survivors.append(d)
+
+        # Always keep at least one dot to avoid a degenerate empty pool.
+        if not survivors and self._dots:
+            survivors = [self._dots[0]]
+
+        self._dots = survivors
+        keep_ids = [d.dot_id for d in survivors]
+        self.dot_memory.prune(keep_ids)
+
+        return {
+            "removed_dots":    before_dots - len(survivors),
+            "kept_dots":       len(survivors),
+            "removed_history": before_hist - len(self.dot_memory._total_counts),
+            "kept_history":    len(self.dot_memory._total_counts),
+            "generation":      current_gen,
+        }
+
     def train_pass(self, sentences: List[str], max_iterations: int = 2,
                    max_aim_variants: int = 1, verbose: bool = True,
                    save_every: int = 500) -> "IECNN":
@@ -561,6 +608,10 @@ class IECNN:
             self.cluster_memory.commit_pattern(final_out, top_cluster.score, self.alpha)
         if self.do_evolve:
             self._dots = self.evolution.evolve(dots, self.dot_memory)
+            # Joint prune: drop dots that have lived long enough to prove
+            # themselves useless, and drop their history from dot_memory so
+            # the on-disk brain stops growing unboundedly.
+            self.prune_dots()
         self._call_count += 1
 
         result = IECNNResult(
