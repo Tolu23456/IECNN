@@ -277,13 +277,21 @@ class IECNN:
 
     def train_pass(self, sentences: List[str], max_iterations: int = 2,
                    max_aim_variants: int = 1, verbose: bool = True,
-                   save_every: int = 500) -> "IECNN":
+                   save_every: int = 500,
+                   prune_every: int = 0,
+                   prune_min_outcomes: int = 2,
+                   prune_min_age_gens: int = 2) -> "IECNN":
         """
         Run the full pipeline over each sentence so the dot pool, dot memory,
         cluster memory, and evolution all get updated. This is what makes
         the model actually 'learn' from the corpus (not just count vocab).
 
         Uses reduced max_iterations / aim variants for speed during training.
+
+        When `prune_every > 0`, an explicit `prune_dots(...)` is called every
+        N sentences (and once before each periodic save_brain). This bounds
+        on-disk growth during long training runs even if the per-evolve
+        auto-prune is too lenient for the chosen cadence.
         """
         import time
         # Save & temporarily lower iteration / aim budgets for speed
@@ -316,7 +324,20 @@ class IECNN:
                           f"mean_eff={dm['mean_eff']:.3f}  "
                           f"max_eff={dm['max_eff']:.3f}",
                           end="", flush=True)
+                # Periodic deep prune (in addition to the per-evolve auto-prune).
+                if prune_every and i % prune_every == 0:
+                    stats = self.prune_dots(min_outcomes=prune_min_outcomes,
+                                            min_age_gens=prune_min_age_gens)
+                    if verbose and (stats["removed_dots"] or stats["removed_history"]):
+                        print(f"\n[train] prune @ {i}: "
+                              f"-{stats['removed_dots']} dots, "
+                              f"-{stats['removed_history']} history "
+                              f"(kept {stats['kept_dots']} dots)")
                 if self.persistence_path and save_every and i % save_every == 0:
+                    # Always prune right before a save so the file we write is compact.
+                    if prune_every:
+                        self.prune_dots(min_outcomes=prune_min_outcomes,
+                                        min_age_gens=prune_min_age_gens)
                     self.save_brain(self.persistence_path)
             if verbose:
                 print()
@@ -326,6 +347,9 @@ class IECNN:
                 self.aim.max_variants = orig_max_aim
 
         if self.persistence_path:
+            if prune_every:
+                self.prune_dots(min_outcomes=prune_min_outcomes,
+                                min_age_gens=prune_min_age_gens)
             self.save_brain(self.persistence_path)
         return self
 

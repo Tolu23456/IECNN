@@ -78,6 +78,17 @@ python main.py prune --min-outcomes 5 --min-age 3     # stricter culling
 `python main.py memory` also prints per-file brain sizes and a dry-run
 prune preview so you can see how much would be reclaimed.
 
+For long full-pipeline training runs, periodic pruning is built in:
+
+```bash
+python main.py train corpus.txt --evolve --prune-every 100
+```
+
+`--evolve` switches from vocab-only `fit_file` to `train_pass` (which
+actually evolves the dot pool); `--prune-every N` runs an explicit
+prune every N sentences and again right before each periodic save, so
+the brain file size stays bounded no matter how long training goes.
+
 ---
 
 ## Dependencies

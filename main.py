@@ -12,6 +12,10 @@ Usage:
   python main.py memory                 # show dot memory and evolution state
   python main.py prune [--dry-run]      # compact the brain (drop dead dots + orphans)
                        [--min-outcomes N] [--min-age N]
+  python main.py train <file> [--limit N] [--evolve] [--prune-every N]
+                                        # vocab-only by default; --evolve runs
+                                        # full pipeline; --prune-every keeps
+                                        # disk size bounded during long runs
   python main.py demo                   # run the original 6-example showcase
   python main.py build                  # compile C extensions
 
@@ -231,14 +235,30 @@ def cmd_prune(dry_run: bool = False, min_outcomes: int = 2, min_age_gens: int = 
           f"(saved {_human_bytes(saved).strip()})")
 
 
-def cmd_train(filepath: str, limit: int = 0):
+def cmd_train(filepath: str, limit: int = 0, evolve: bool = False,
+              prune_every: int = 0):
     _build_c()
     if not os.path.exists(filepath):
         print(f"[IECNN] Corpus not found: {filepath}")
         return
     model = _make_model()
-    if limit > 0:
-        # Read up to `limit` non-empty lines and write to a temp file
+
+    def _read_lines(path, cap=0):
+        out = []
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#"): continue
+                out.append(line)
+                if cap and len(out) >= cap: break
+        return out
+
+    if evolve:
+        sentences = _read_lines(filepath, limit)
+        print(f"[IECNN] Full-pipeline training on {len(sentences)} lines"
+              f"{f' (prune every {prune_every})' if prune_every else ''}")
+        model.train_pass(sentences, verbose=True, prune_every=prune_every)
+    elif limit > 0:
         tmp = filepath + f".limit{limit}.tmp"
         kept = 0
         with open(filepath, "r", encoding="utf-8", errors="replace") as src, \
@@ -430,14 +450,22 @@ if __name__ == "__main__":
     elif args[0] == "compare" and len(args) >= 3:
         cmd_compare(args[1:])
     elif args[0] == "train" and len(args) >= 2:
-        # python main.py train <file> [--limit N]
+        # python main.py train <file> [--limit N] [--evolve] [--prune-every N]
         filepath = args[1]
         limit = 0
+        prune_every = 0
+        evolve = "--evolve" in args
         if "--limit" in args:
             i = args.index("--limit")
             if i + 1 < len(args):
                 try: limit = int(args[i+1])
                 except ValueError: limit = 0
-        cmd_train(filepath, limit=limit)
+        if "--prune-every" in args:
+            i = args.index("--prune-every")
+            if i + 1 < len(args):
+                try: prune_every = int(args[i+1])
+                except ValueError: prune_every = 0
+            evolve = True
+        cmd_train(filepath, limit=limit, evolve=evolve, prune_every=prune_every)
     else:
         print(__doc__)
