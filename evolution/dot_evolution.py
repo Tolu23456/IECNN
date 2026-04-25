@@ -31,6 +31,7 @@ class EvolutionConfig:
     weight_noise_std: float = 0.01   # std of Gaussian noise added to weights during mutation
     tournament_size:  int   = 4      # k for tournament selection
     min_generations:  int   = 3      # minimum calls before evolution kicks in
+    max_dot_pool_size: int  = 1000   # Hard cap to prevent OOM
 
 
 class DotEvolution:
@@ -57,6 +58,12 @@ class DotEvolution:
         Returns a new list of NeuralDot objects (same length as `dots`).
         """
         from neural_dot.neural_dot import NeuralDot, BiasVector, DotType
+
+        # 0. Pool Culling: if memory is tracking too many dead dots, prune it.
+        # This keeps the save files compact.
+        if len(memory._total_counts) > self.config.max_dot_pool_size * 2:
+            current_ids = [d.dot_id for d in dots]
+            memory.prune(current_ids)
 
         n = len(dots)
         if n == 0:
@@ -87,7 +94,7 @@ class DotEvolution:
 
         new_pool = [None] * n
 
-        # 1. Elites — keep unchanged
+        # 1. Elites — keep unchanged (same dot_id)
         for idx in elite_indices:
             new_pool[idx] = dots[idx]
 
@@ -157,7 +164,11 @@ class DotEvolution:
         return best_idx
 
     def _mutate(self, dot, cfg: EvolutionConfig):
-        """Clone a dot with Gaussian noise added to its bias and weights. Gets a new unique ID."""
+        """Clone a dot with Gaussian noise added to its bias and weights.
+
+        Experimental Stable Mutation: The child gets a new ID but we record
+        its parentage in the metadata for lineage tracking.
+        """
         from neural_dot.neural_dot import NeuralDot, BiasVector
 
         # Mutate bias
@@ -177,6 +188,11 @@ class DotEvolution:
         # Mutate weights slightly
         child.W = dot.W + self._rng.randn(*dot.W.shape).astype(np.float32) * cfg.weight_noise_std
         child.b_offset = dot.b_offset + self._rng.randn(*dot.b_offset.shape).astype(np.float32) * cfg.weight_noise_std * 0.1
+
+        # Record lineage
+        child.metadata = getattr(dot, "metadata", {}).copy()
+        child.metadata["parent_id"] = dot.dot_id
+        child.metadata["lineage_depth"] = child.metadata.get("lineage_depth", 0) + 1
         return child
 
     def _crossover(self, p1, p2):

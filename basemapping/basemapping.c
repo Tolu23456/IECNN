@@ -92,3 +92,49 @@ void attention_pool(const float *matrix, const float *query,
 
     free(scores);
 }
+
+/* ── Cooccurrence Smoothing pass ─────────────────────────────────── */
+void cooccurrence_smooth(float *embeddings, const int *neighbor_indices, const float *neighbor_weights,
+                         int n_words, int n_neighbors_per_word, int embed_dim, float alpha) {
+    float *updates = (float *)malloc(n_words * embed_dim * sizeof(float));
+    if (updates == NULL) return;
+
+    float *delta = (float *)malloc(embed_dim * sizeof(float));
+    if (delta == NULL) {
+        free(updates);
+        return;
+    }
+
+    for (int i = 0; i < n_words; i++) {
+        float *new_emb = updates + i * embed_dim;
+        memset(delta, 0, embed_dim * sizeof(float));
+
+        int has_neighbors = 0;
+        for (int k = 0; k < n_neighbors_per_word; k++) {
+            int idx = neighbor_indices[i * n_neighbors_per_word + k];
+            if (idx < 0) continue;
+
+            has_neighbors = 1;
+            float w = neighbor_weights[i * n_neighbors_per_word + k];
+            const float *nb = embeddings + idx * embed_dim;
+            for (int d = 0; d < embed_dim; d++) {
+                delta[d] += w * nb[d];
+            }
+        }
+
+        if (has_neighbors) {
+            normalize_vector(delta, embed_dim);
+            const float *old_emb = embeddings + i * embed_dim;
+            for (int d = 0; d < embed_dim; d++) {
+                new_emb[d] = (1.0f - alpha) * old_emb[d] + alpha * delta[d];
+            }
+            normalize_vector(new_emb, embed_dim);
+        } else {
+            memcpy(new_emb, embeddings + i * embed_dim, embed_dim * sizeof(float));
+        }
+    }
+
+    memcpy(embeddings, updates, n_words * embed_dim * sizeof(float));
+    free(delta);
+    free(updates);
+}

@@ -32,35 +32,63 @@ def _load_lib():
         try:
             lib = ctypes.CDLL(so_path)
             # F1 helpers
+            lib.cosine_sim.argtypes = [ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float), ctypes.c_int]
             lib.cosine_sim.restype               = ctypes.c_float
+            lib.agreement_str.argtypes = [ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float), ctypes.c_int]
             lib.agreement_str.restype            = ctypes.c_float
+            lib.similarity_score.argtypes = [ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float), ctypes.c_int, ctypes.c_float]
             lib.similarity_score.restype         = ctypes.c_float
             # F2
+            lib.convergence_score.argtypes = [ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float), ctypes.c_int, ctypes.c_int, ctypes.c_float]
             lib.convergence_score.restype        = ctypes.c_float
             # F6
+            lib.prediction_confidence.argtypes = [ctypes.POINTER(ctypes.c_float), ctypes.c_int]
             lib.prediction_confidence.restype    = ctypes.c_float
             # F8
+            lib.bias_vector_update.argtypes = [ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float), ctypes.c_int, ctypes.c_float, ctypes.POINTER(ctypes.c_float)]
             lib.bias_vector_update.restype       = None
             # F9
+            lib.dominance_score.argtypes = [ctypes.c_float, ctypes.POINTER(ctypes.c_float), ctypes.c_int]
             lib.dominance_score.restype          = ctypes.c_float
             # Batch ops
+            lib.pairwise_similarity_matrix.argtypes = [ctypes.POINTER(ctypes.c_float), ctypes.c_int, ctypes.c_int, ctypes.c_float, ctypes.POINTER(ctypes.c_float)]
             lib.pairwise_similarity_matrix.restype = None
+            lib.similarity_vs_all.argtypes = [ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float), ctypes.c_int, ctypes.c_int, ctypes.c_float, ctypes.POINTER(ctypes.c_float)]
             lib.similarity_vs_all.restype        = None
+            lib.attention_single.argtypes = [ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float), ctypes.c_int, ctypes.c_int, ctypes.POINTER(ctypes.c_float)]
             lib.attention_single.restype         = None
             # F10–F15
+            lib.dot_specialization_score.argtypes = [ctypes.POINTER(ctypes.c_float), ctypes.c_int, ctypes.c_int, ctypes.c_float]
             lib.dot_specialization_score.restype = ctypes.c_float
+            lib.cluster_entropy.argtypes = [ctypes.POINTER(ctypes.c_float), ctypes.c_int]
             lib.cluster_entropy.restype          = ctypes.c_float
+            lib.temporal_stability.argtypes = [ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float), ctypes.c_int, ctypes.c_float]
             lib.temporal_stability.restype       = ctypes.c_float
+            lib.cross_type_agreement.argtypes = [ctypes.POINTER(ctypes.c_float), ctypes.c_int, ctypes.c_int, ctypes.c_float]
             lib.cross_type_agreement.restype     = ctypes.c_float
+            lib.adaptive_learning_rate.argtypes = [ctypes.c_float, ctypes.c_float]
             lib.adaptive_learning_rate.restype   = ctypes.c_float
+            lib.hierarchical_convergence_score.argtypes = [ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float), ctypes.c_int, ctypes.c_int, ctypes.c_float, ctypes.c_float]
             lib.hierarchical_convergence_score.restype = ctypes.c_float
             # F21–F26
+            lib.global_energy.argtypes = [ctypes.c_float, ctypes.c_float, ctypes.c_float, ctypes.c_float, ctypes.c_float, ctypes.c_float]
             lib.global_energy.restype            = ctypes.c_float
+            lib.system_objective.argtypes = [ctypes.c_float, ctypes.c_float, ctypes.c_float]
             lib.system_objective.restype         = ctypes.c_float
+            lib.memory_plasticity.argtypes = [ctypes.c_float]
             lib.memory_plasticity.restype        = ctypes.c_float
+            lib.dot_fitness.argtypes = [ctypes.c_float, ctypes.c_float, ctypes.c_float, ctypes.c_float, ctypes.c_float, ctypes.c_float, ctypes.c_float, ctypes.c_float, ctypes.c_float]
             lib.dot_fitness.restype              = ctypes.c_float
+            lib.stability_energy.argtypes = [ctypes.c_float, ctypes.c_float, ctypes.c_float, ctypes.c_float]
             lib.stability_energy.restype         = ctypes.c_float
+            lib.exploration_pressure.argtypes = [ctypes.c_float, ctypes.c_float]
             lib.exploration_pressure.restype     = ctypes.c_float
+
+            # Ultra and Batch
+            lib.convergence_score_ultra.argtypes = [ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float), ctypes.c_int, ctypes.c_int, ctypes.c_float, ctypes.POINTER(ctypes.c_float), ctypes.c_float]
+            lib.convergence_score_ultra.restype = ctypes.c_float
+            lib.batch_similarity_fast.argtypes = [ctypes.POINTER(ctypes.c_float), ctypes.c_int, ctypes.POINTER(ctypes.c_float), ctypes.c_int, ctypes.c_int, ctypes.c_float, ctypes.POINTER(ctypes.c_float)]
+            lib.batch_similarity_fast.restype = None
             _lib = lib
         except Exception:
             _lib = None

@@ -59,11 +59,37 @@ def _load_lib():
     if os.path.exists(so_path):
         try:
             _lib = ctypes.CDLL(so_path)
-            _lib.compose_from_chars.restype     = None
+            # Define argtypes and restypes for safety
+            _lib.compose_from_chars.argtypes = [
+                ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float),
+                ctypes.c_int, ctypes.c_int, ctypes.POINTER(ctypes.c_float)
+            ]
+            _lib.compose_from_chars.restype = None
+
+            _lib.sinusoidal_position_enc.argtypes = [
+                ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.POINTER(ctypes.c_float)
+            ]
             _lib.sinusoidal_position_enc.restype = None
-            _lib.normalize_vector.restype       = None
-            _lib.mean_pool.restype              = None
-            _lib.attention_pool.restype         = None
+
+            _lib.normalize_vector.argtypes = [ctypes.POINTER(ctypes.c_float), ctypes.c_int]
+            _lib.normalize_vector.restype = None
+
+            _lib.mean_pool.argtypes = [
+                ctypes.POINTER(ctypes.c_float), ctypes.c_int, ctypes.c_int, ctypes.POINTER(ctypes.c_float)
+            ]
+            _lib.mean_pool.restype = None
+
+            _lib.attention_pool.argtypes = [
+                ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float),
+                ctypes.c_int, ctypes.c_int, ctypes.c_float, ctypes.POINTER(ctypes.c_float)
+            ]
+            _lib.attention_pool.restype = None
+
+            _lib.cooccurrence_smooth.argtypes = [
+                ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_float),
+                ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_float
+            ]
+            _lib.cooccurrence_smooth.restype = None
         except Exception:
             _lib = None
     return _lib
@@ -213,8 +239,9 @@ class BaseMapper:
         # Discovered bases (words + phrases learned from corpus)
         self._word_freq:  Counter = Counter()
         self._ngram_freq: Counter = Counter()
+        self._subword_freq: Counter = Counter()        # Dynamic subwords (BPE-like)
         self._base_vocab: Dict[str, np.ndarray] = {}  # token → embedding
-        self._base_types: Dict[str, str] = {}          # token → 'word'|'phrase'
+        self._base_types: Dict[str, str] = {}          # token → 'word'|'phrase'|'subword'
 
         # Cooccurrence: token → {neighbor_token: count}
         # neighbor_token can be a word string or a specialized sensory key
@@ -231,6 +258,7 @@ class BaseMapper:
         state = {
             "word_freq":  self._word_freq,
             "ngram_freq": self._ngram_freq,
+            "subword_freq": self._subword_freq,
             "base_vocab": self._base_vocab,
             "base_types": self._base_types,
             "cooc":       self._cooc,
@@ -247,6 +275,7 @@ class BaseMapper:
             state = pickle.load(f)
         self._word_freq  = state.get("word_freq", Counter())
         self._ngram_freq = state.get("ngram_freq", Counter())
+        self._subword_freq = state.get("subword_freq", Counter())
         self._base_vocab = state.get("base_vocab", {})
         self._base_types = state.get("base_types", {})
         self._cooc       = state.get("cooc", {})
@@ -257,7 +286,7 @@ class BaseMapper:
 
     def fit(self, texts: List[str]) -> "BaseMapper":
         """
-        Discover word and phrase bases from a corpus, build embeddings,
+        Discover word, phrase, and subword bases from a corpus, build embeddings,
         then apply cooccurrence smoothing to give distributional grounding.
         """
         for text in texts:
@@ -265,6 +294,14 @@ class BaseMapper:
             self._word_freq.update(toks)
             for n in range(self.ngram_range[0], self.ngram_range[1] + 1):
                 self._ngram_freq.update(self._ngrams(toks, n))
+
+            # Dynamic subword discovery: find frequent internal character sequences
+            for tok in toks:
+                if len(tok) > 3:
+                    for sublen in range(3, min(len(tok), 6)):
+                        for start in range(len(tok) - sublen + 1):
+                            sub = tok[start:start+sublen]
+                            self._subword_freq[sub] += 1
 
             # Collect cooccurrence within cooc_window
             for i, tok in enumerate(toks):
@@ -288,6 +325,13 @@ class BaseMapper:
                 self._base_vocab[ng] = self._build_embedding(ng, "phrase")
                 self._base_types[ng] = "phrase"
 
+        # Register subword bases (BPE-like discovery)
+        for sub, cnt in self._subword_freq.most_common(self.max_vocab_size // 4):
+            if cnt >= self.min_base_freq * 2 and sub not in self._base_vocab:
+                # Subwords get their own stable embedding
+                self._base_vocab[sub] = _stable_embedding(sub, EMBED_DIM)
+                self._base_types[sub] = "subword"
+
         # Cooccurrence smoothing pass: blend each word's embedding with a
         # weighted average of its top-5 most frequent neighbor embeddings.
         # This gives distributional semantic grounding (words that appear
@@ -302,31 +346,83 @@ class BaseMapper:
         One-pass cooccurrence enrichment with Sensory Grounding.
         Blends word embeddings toward both textual neighbors AND sensory centroids.
         """
+        lib = _load_lib()
+        words = [w for w, t in self._base_types.items() if t == "word"]
+        if not words: return
+
+        if lib:
+            word_to_idx = {w: i for i, w in enumerate(words)}
+            n_words = len(words)
+            n_neighbors = 5
+
+            embeddings = np.ascontiguousarray(np.stack([self._base_vocab[w] for w in words]), dtype=np.float32)
+            nb_indices = np.full((n_words, n_neighbors), -1, dtype=np.int32)
+            nb_weights = np.zeros((n_words, n_neighbors), dtype=np.float32)
+
+            for i, w in enumerate(words):
+                neighbors = self._cooc.get(w, Counter())
+                total = float(sum(neighbors.values()))
+                if total < 1e-10: continue
+
+                for k, (other, cnt) in enumerate(neighbors.most_common(n_neighbors)):
+                    if other in word_to_idx:
+                        nb_indices[i, k] = word_to_idx[other]
+                        nb_weights[i, k] = cnt / total
+
+            lib.cooccurrence_smooth(
+                embeddings.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+                nb_indices.ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
+                nb_weights.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+                ctypes.c_int(n_words),
+                ctypes.c_int(n_neighbors),
+                ctypes.c_int(EMBED_DIM),
+                ctypes.c_float(self.cooc_alpha)
+            )
+
+            # Post-C smoothing: Handle Sensory Grounding manually as it's sparse
+            if sensory_hints:
+                for i, w in enumerate(words):
+                    if w in sensory_hints:
+                        s_vec = sensory_hints[w][:EMBED_DIM]
+                        if len(s_vec) < EMBED_DIM:
+                            s_vec = np.pad(s_vec, (0, EMBED_DIM - len(s_vec)))
+                        sn = np.linalg.norm(s_vec)
+                        if sn > 1e-10:
+                            # Stronger blend for sensory evidence (2.0 factor)
+                            embeddings[i] = (1.0 - self.cooc_alpha) * embeddings[i] + self.cooc_alpha * (s_vec / sn)
+                            en = np.linalg.norm(embeddings[i])
+                            if en > 1e-10: embeddings[i] /= en
+
+            for i, w in enumerate(words):
+                self._base_vocab[w] = embeddings[i].copy()
+            return
+
+        # Python Fallback
         updates: Dict[str, np.ndarray] = {}
-        for w, emb in self._base_vocab.items():
-            if self._base_types.get(w) == "phrase":
-                continue
+        for w in words:
+            emb = self._base_vocab[w]
             neighbors = self._cooc.get(w, Counter())
-            if not neighbors:
-                continue
 
             total = float(sum(neighbors.values()))
             delta = np.zeros(EMBED_DIM, dtype=np.float32)
             count = 0
 
-            # Textual Grounding
-            for other, cnt in neighbors.most_common(5):
-                if isinstance(other, str) and other in self._base_vocab:
-                    delta += (cnt / total) * self._base_vocab[other]
-                    count += 1
+            # 1. Textual Grounding
+            if neighbors:
+                for other, cnt in neighbors.most_common(5):
+                    if isinstance(other, str) and other in self._base_vocab:
+                        delta += (cnt / total) * self._base_vocab[other]
+                        count += 1
 
-            # Sensory Grounding (if hints provided for words like 'red', 'loud', etc.)
+            # 2. Sensory Grounding
             if sensory_hints and w in sensory_hints:
-                sensory_vec = sensory_hints[w][:EMBED_DIM]
-                if len(sensory_vec) < EMBED_DIM:
-                    sensory_vec = np.pad(sensory_vec, (0, EMBED_DIM - len(sensory_vec)))
-                delta += 2.0 * sensory_vec # Stronger weight for direct sensory proof
-                count += 2
+                s_vec = sensory_hints[w][:EMBED_DIM]
+                if len(s_vec) < EMBED_DIM:
+                    s_vec = np.pad(s_vec, (0, EMBED_DIM - len(s_vec)))
+                sn = np.linalg.norm(s_vec)
+                if sn > 1e-10:
+                    delta += 2.0 * (s_vec / sn)
+                    count += 2
 
             if count == 0:
                 continue
@@ -776,25 +872,51 @@ class BaseMapper:
         return out
 
     def _split_morphemes(self, word: str) -> List[str]:
-        """Heuristic to split word into known prefix, root, and suffix."""
-        prefix = ""
+        """
+        Split word into known prefixes, suffixes, and discovered subwords.
+        Uses a greedy longest-match approach.
+        """
+        res = []
+        remaining = word.lower()
+
+        # 1. Hardcoded Prefixes
         for p in _PREFIXES:
-            if word.startswith(p) and len(word) > len(p) + 2:
-                prefix = p
-                word = word[len(p):]
+            if remaining.startswith(p) and len(remaining) > len(p) + 2:
+                res.append(p)
+                remaining = remaining[len(p):]
                 break
 
+        # 2. Hardcoded Suffixes (stored for later)
         suffix = ""
         for s in sorted(_SUFFIXES, key=len, reverse=True):
-            if word.endswith(s) and len(word) > len(s) + 2:
+            if remaining.endswith(s) and len(remaining) > len(s) + 2:
                 suffix = s
-                word = word[:-len(s)]
+                remaining = remaining[:-len(s)]
                 break
 
-        res = []
-        if prefix: res.append(prefix)
-        if word:   res.append(word)
-        if suffix: res.append(suffix)
+        # 3. Discovered Subwords (Dynamic BPE-like)
+        # Greedy segment remaining part using discovered subwords
+        while len(remaining) > 2:
+            best_sub = ""
+            for sublen in range(min(len(remaining), 6), 2, -1):
+                sub = remaining[:sublen]
+                if sub in self._base_types and self._base_types[sub] == "subword":
+                    best_sub = sub
+                    break
+
+            if best_sub:
+                res.append(best_sub)
+                remaining = remaining[len(best_sub):]
+            else:
+                # If no subword match, take one char and continue
+                res.append(remaining[0])
+                remaining = remaining[1:]
+
+        if remaining:
+            res.append(remaining)
+        if suffix:
+            res.append(suffix)
+
         return res
 
     def _token_embedding(self, token: str, token_type: str) -> np.ndarray:

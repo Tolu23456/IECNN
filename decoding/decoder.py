@@ -89,16 +89,16 @@ class IECNNDecoder:
         return out
 
     def _generative_reconstruction_text(self, target_latent: np.ndarray,
-                                         max_tokens: int, iterations: int) -> str:
+                                         max_tokens: int, iterations: int,
+                                         beam_width: int = 5) -> str:
         """
-        Fast greedy text reconstruction using two cheap stages:
+        Fast beam-search text reconstruction using two cheap stages:
 
           Stage 1: rank ALL vocab words by cosine similarity to the target
                    latent's base region (dims 0:EMBED_DIM).  O(|vocab|).
-          Stage 2: for each token position, average the chosen tokens' base
-                   embeddings and pick the next candidate that maximises
-                   cosine similarity to the full target latent.
-                   No full pipeline calls — runs in milliseconds.
+          Stage 2: for each token position, use beam search to find the best
+                   sequence of tokens that maximizes semantic similarity
+                   to the target latent, biased by bigram co-occurrence stats.
         """
         if not self.mapper.is_fitted or not self.mapper._base_vocab:
             return "[unknown]"
@@ -123,28 +123,49 @@ class IECNNDecoder:
         k = min(max(iterations, 20), len(scored))
         top_k = [w for _, w in scored[:k]]
 
-        # Stage 2 — greedy token selection using cheap average-embedding score
-        current_tokens: list = []
-        best_sim: float = -1.0
+        # Stage 2 — beam search with co-occurrence bias
+        # Each beam: (cumulative_score, tokens_list, last_semantic_sim)
+        beams = [(0.0, [], -1.0)]
 
         for _step in range(max_tokens):
-            best_next: str = ""
-            improved = False
+            candidates = []
+            for score, tokens, last_sim in beams:
+                # Transition bias from co-occurrence
+                last_token = tokens[-1] if tokens else None
+                cooc = self.mapper._cooc.get(last_token, {}) if last_token else {}
+                total_cooc = sum(cooc.values()) if cooc else 1.0
 
-            for token in top_k:
-                cand_emb = self._build_candidate_emb(current_tokens + [token])
-                sim = self._score_emb(cand_emb, target_latent)
-                if sim > best_sim + 1e-4:
-                    best_sim = sim
-                    best_next = token
-                    improved = True
+                for token in top_k:
+                    new_tokens = tokens + [token]
+                    cand_emb = self._build_candidate_emb(new_tokens)
+                    sim = self._score_emb(cand_emb, target_latent)
 
-            if improved and best_next:
-                current_tokens.append(best_next)
-            else:
+                    # N-gram bias: how likely is this token following the last one?
+                    # We use a small weight (0.15) to nudge the search without
+                    # overriding semantic similarity.
+                    bias = (cooc.get(token, 0) / total_cooc) * 0.15
+
+                    # We want to maximize sim, but also reward sequences that make sense
+                    new_score = sim + bias
+                    candidates.append((new_score, new_tokens, sim))
+
+            if not candidates:
                 break
 
-        return " ".join(current_tokens) if current_tokens else "..."
+            candidates.sort(key=lambda x: -x[0])
+            beams = candidates[:beam_width]
+
+            # If the best candidate's similarity didn't improve significantly, we might stop
+            # but greedy reconstruction usually goes up to max_tokens or until it plateaus.
+            if beams[0][2] <= last_sim + 1e-5 and _step > 2:
+                # Don't break immediately in early steps as adding more tokens
+                # might be necessary to match a high-magnitude latent
+                pass
+
+        best_tokens = beams[0][1]
+        # Clean up: sometimes the beam search might repeat a token at the end
+        # that doesn't add similarity.
+        return " ".join(best_tokens) if best_tokens else "..."
 
     def _decode_image(self, latent: np.ndarray) -> Image.Image:
         """Reconstruct 128x128 image from 256-dim latent."""
