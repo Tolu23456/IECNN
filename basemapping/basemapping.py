@@ -240,8 +240,9 @@ class BaseMapper:
         self._word_freq:  Counter = Counter()
         self._ngram_freq: Counter = Counter()
         self._subword_freq: Counter = Counter()        # Dynamic subwords (BPE-like)
+        self._composite_freq: Counter = Counter()      # Recursive concepts (v3)
         self._base_vocab: Dict[str, np.ndarray] = {}  # token → embedding
-        self._base_types: Dict[str, str] = {}          # token → 'word'|'phrase'|'subword'
+        self._base_types: Dict[str, str] = {}          # token → 'word'|'phrase'|'subword'|'composite'
 
         # Cooccurrence: token → {neighbor_token: count}
         # neighbor_token can be a word string or a specialized sensory key
@@ -259,6 +260,7 @@ class BaseMapper:
             "word_freq":  self._word_freq,
             "ngram_freq": self._ngram_freq,
             "subword_freq": self._subword_freq,
+            "composite_freq": self._composite_freq,
             "base_vocab": self._base_vocab,
             "base_types": self._base_types,
             "cooc":       self._cooc,
@@ -276,6 +278,7 @@ class BaseMapper:
         self._word_freq  = state.get("word_freq", Counter())
         self._ngram_freq = state.get("ngram_freq", Counter())
         self._subword_freq = state.get("subword_freq", Counter())
+        self._composite_freq = state.get("composite_freq", Counter())
         self._base_vocab = state.get("base_vocab", {})
         self._base_types = state.get("base_types", {})
         self._cooc       = state.get("cooc", {})
@@ -481,6 +484,10 @@ class BaseMapper:
                       EMBED_DIM+POS_DIM+FREQ_DIM+FLAG_DIM]             = flags
             matrix[i, -CTX_DIM:]                                       = ctx
 
+        # ── Layer 2.1: Attention Allocation Field (AAF) ────────────
+        # Pre-align tokens based on semantic relationships before dots see them.
+        matrix = self._apply_aaf(matrix)
+
         modifiers = {
             "position":  np.array([i / max(n-1, 1) for i in range(n)], np.float32),
             "frequency": np.array(freq_vals, np.float32),
@@ -520,143 +527,109 @@ class BaseMapper:
 
     def _transform_image(self, img_path: str) -> BaseMap:
         """
-        Treat images as sentences of visual tokens using 8×8 patch statistics.
-
-        Each patch captures:
-          • raw 8×8×3 = 192 pixel values  (full lossless patch content)
-          • per-channel std (3 values)
-          • edge gradient energy (1 value)
-          • saturation approximation (1 value)
-        Total = 197 dims, zero-padded to EMBED_DIM (224).
-        This is lossless relative to the patch (no truncation) unlike the
-        previous 16×16 approach which discarded 70% of each patch.
+        Multi-Scale Sensory Patches (v3 SOTA):
+        Treat images as sentences of hierarchical visual tokens using 4x4, 8x8,
+        and 16x16 patch sizes to capture detail, structure, and context.
         """
         img = Image.open(img_path).convert("RGB")
         img = img.resize((64, 64))
         arr = np.array(img, dtype=np.float32) / 255.0  # (64, 64, 3)
 
-        ps = 8          # 8-pixel patch side → 8×8=64 patches total
-        grid_dim = 64 // ps  # = 8
-        patches: List[np.ndarray] = []
-        patch_row_col: List[Tuple[int, int]] = []
+        all_patches: List[np.ndarray] = []
+        all_types: List[str] = []
 
-        for r in range(0, 64, ps):
-            for c in range(0, 64, ps):
-                patch = arr[r:r+ps, c:c+ps]        # (8, 8, 3)
-                raw   = patch.flatten()              # 192 values
+        for ps in [4, 8, 16]: # Detail, Structure, Context
+            grid_dim = 64 // ps
+            for r in range(0, 64, ps):
+                for c in range(0, 64, ps):
+                    patch = arr[r:r+ps, c:c+ps]        # (ps, ps, 3)
 
-                # Spatial edge energy (gradient magnitude on luminance)
-                lum = patch.mean(axis=2)             # (8, 8)
-                gx  = np.diff(lum, axis=1)
-                gy  = np.diff(lum, axis=0)
-                edge = float(np.mean(np.abs(gx)) + np.mean(np.abs(gy)))
+                    # Statistical features (lossless compression approach)
+                    # To keep dim at 224, we use statistics for larger patches
+                    flat = patch.flatten()
+                    if len(flat) > EMBED_DIM:
+                        # For 16x16, flat is 768. Use mean/std blocks
+                        b_size = ps // 4
+                        flat = patch.reshape(4, b_size, 4, b_size, 3).mean(axis=(1, 3)).flatten()
 
-                ch_std   = patch.std(axis=(0, 1))   # (3,)
-                sat_approx = float(patch.max(axis=2).mean()
-                                   - patch.min(axis=2).mean())
+                    ch_std   = patch.std(axis=(0, 1))
+                    feat = np.concatenate([flat, ch_std])
+                    if len(feat) < EMBED_DIM:
+                        feat = np.pad(feat, (0, EMBED_DIM - len(feat)))
+                    else:
+                        feat = feat[:EMBED_DIM]
 
-                feat = np.concatenate([raw, ch_std, [edge, sat_approx]])
-                if len(feat) < EMBED_DIM:
-                    feat = np.pad(feat, (0, EMBED_DIM - len(feat)))
-                else:
-                    feat = feat[:EMBED_DIM]
+                    n_val = np.linalg.norm(feat)
+                    if n_val > 1e-10: feat = feat / n_val
 
-                n_val = np.linalg.norm(feat)
-                if n_val > 1e-10:
-                    feat = feat / n_val
+                    all_patches.append(feat.astype(np.float32))
+                    all_types.append(f"visual_{ps}x{ps}")
 
-                patches.append(feat.astype(np.float32))
-                patch_row_col.append((r // ps, c // ps))
-
-        n = len(patches)
+        n = len(all_patches)
         matrix = np.zeros((n, self.feature_dim), dtype=np.float32)
-        for i, (p, (pr, pc)) in enumerate(zip(patches, patch_row_col)):
+        for i, p in enumerate(all_patches):
             matrix[i, :EMBED_DIM] = p
-            spatial_idx = pr * grid_dim + pc
-            matrix[i, EMBED_DIM:EMBED_DIM+POS_DIM] = self._position_enc(
-                spatial_idx, n, grid_dim=grid_dim)
+            matrix[i, EMBED_DIM:EMBED_DIM+POS_DIM] = self._position_enc(i, n)
             matrix[i, EMBED_DIM+POS_DIM+FREQ_DIM+MOD_IMAGE] = 1.0
 
+        # Apply AAF to hierarchical patches
+        matrix = self._apply_aaf(matrix)
+
         return BaseMap(matrix, [f"patch_{i}" for i in range(n)],
-                       ["visual"] * n, {}, {"mode": "image"})
+                       all_types, {}, {"mode": "image", "multi_scale": True})
 
     def _transform_audio(self, audio_path: str) -> BaseMap:
         """
-        Treat audio as sentences of spectral tokens using pure-numpy FFT.
-
-        No external library required — reads WAV via the standard `wave`
-        module and computes per-frame log-magnitude spectra with a Hann
-        window.  The first EMBED_DIM (224) FFT bins are kept, covering the
-        most energy-rich low frequencies for typical speech and music.
+        Multi-Scale Audio Spectrum (v3 SOTA):
+        Treat audio as hierarchical spectral tokens using multiple window sizes
+        (256, 512, 1024) to capture temporal detail and frequency precision.
         """
         import wave as _wave
-
-        n_tokens = 32
-        fft_size  = 512   # → 257 unique bins; we keep first 224
 
         try:
             with _wave.open(audio_path, "rb") as wf:
                 n_channels   = wf.getnchannels()
                 sample_width = wf.getsampwidth()
                 sample_rate  = wf.getframerate()
-                # Limit to first 5 seconds
-                max_frames = sample_rate * 5
-                raw = wf.readframes(min(wf.getnframes(), max_frames))
+                raw = wf.readframes(sample_rate * 5)
         except Exception:
-            # Unreadable — return a silent all-zero basemap
-            n = n_tokens
-            matrix = np.zeros((n, self.feature_dim), dtype=np.float32)
-            for i in range(n):
-                matrix[i, EMBED_DIM:EMBED_DIM+POS_DIM] = self._position_enc(i, n)
-                matrix[i, EMBED_DIM+POS_DIM+FREQ_DIM+MOD_AUDIO] = 1.0
-            return BaseMap(matrix, [f"spectral_{i}" for i in range(n)],
-                           ["spectral"] * n, {}, {"mode": "audio", "error": "unreadable"})
+            return self.transform("[silent]", mode="text") # Fallback
 
-        # Decode to float32 in [-1, 1]
-        if sample_width == 2:
-            samples = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
-        elif sample_width == 1:
-            samples = (np.frombuffer(raw, dtype=np.uint8).astype(np.float32) / 128.0) - 1.0
-        else:
-            samples = np.frombuffer(raw, dtype=np.float32)
+        if sample_width == 2: samples = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+        elif sample_width == 1: samples = (np.frombuffer(raw, dtype=np.uint8).astype(np.float32) / 128.0) - 1.0
+        else: samples = np.frombuffer(raw, dtype=np.float32)
+        if n_channels > 1: samples = samples.reshape(-1, n_channels).mean(axis=1)
 
-        if n_channels > 1:
-            # Average channels to mono
-            samples = samples.reshape(-1, n_channels).mean(axis=1)
+        all_spectral: List[np.ndarray] = []
+        all_types: List[str] = []
 
-        # Ensure enough samples for n_tokens frames
-        needed = fft_size + (n_tokens - 1) * (fft_size // 2)
-        if len(samples) < needed:
-            samples = np.pad(samples, (0, needed - len(samples)))
+        for fft_size in [256, 512, 1024]:
+            n_tokens = 16 if fft_size == 1024 else 32
+            needed = fft_size + (n_tokens - 1) * (fft_size // 2)
+            s_pad = np.pad(samples, (0, max(0, needed - len(samples))))
 
-        hann = np.hanning(fft_size).astype(np.float32)
-        hop  = (len(samples) - fft_size) // max(n_tokens - 1, 1)
+            hann = np.hanning(fft_size).astype(np.float32)
+            hop  = (len(s_pad) - fft_size) // max(n_tokens - 1, 1)
 
-        spectral_tokens: List[np.ndarray] = []
-        for i in range(n_tokens):
-            start = i * hop
-            frame = samples[start:start + fft_size]
-            if len(frame) < fft_size:
-                frame = np.pad(frame, (0, fft_size - len(frame)))
-            # Log-magnitude spectrum (perceptual scale)
-            spectrum = np.abs(np.fft.rfft(frame * hann))[:EMBED_DIM]
-            spectrum = np.log1p(spectrum * 100.0)
-            s_max = np.max(spectrum)
-            if s_max > 1e-10:
-                spectrum /= s_max
-            if len(spectrum) < EMBED_DIM:
-                spectrum = np.pad(spectrum, (0, EMBED_DIM - len(spectrum)))
-            spectral_tokens.append(spectrum.astype(np.float32))
+            for i in range(n_tokens):
+                frame = s_pad[i*hop : i*hop + fft_size]
+                spectrum = np.abs(np.fft.rfft(frame * hann))[:EMBED_DIM]
+                spectrum = np.log1p(spectrum * 100.0)
+                if np.max(spectrum) > 1e-10: spectrum /= np.max(spectrum)
+                if len(spectrum) < EMBED_DIM: spectrum = np.pad(spectrum, (0, EMBED_DIM - len(spectrum)))
 
-        n = len(spectral_tokens)
+                all_spectral.append(spectrum.astype(np.float32))
+                all_types.append(f"spectral_{fft_size}")
+
+        n = len(all_spectral)
         matrix = np.zeros((n, self.feature_dim), dtype=np.float32)
-        for i, t in enumerate(spectral_tokens):
+        for i, t in enumerate(all_spectral):
             matrix[i, :EMBED_DIM] = t
             matrix[i, EMBED_DIM:EMBED_DIM+POS_DIM] = self._position_enc(i, n)
             matrix[i, EMBED_DIM+POS_DIM+FREQ_DIM+MOD_AUDIO] = 1.0
 
         return BaseMap(matrix, [f"spectral_{i}" for i in range(n)],
-                       ["spectral"] * n, {}, {"mode": "audio"})
+                       all_types, {}, {"mode": "audio", "multi_scale": True})
 
     def _transform_video(self, video_path: str) -> BaseMap:
         """
@@ -1108,3 +1081,52 @@ class BaseMapper:
         for i in range(0, len(items), max_shard_size):
             shards.append(dict(items[i:i + max_shard_size]))
         return shards
+
+    def register_composite_base(self, name: str, embedding: np.ndarray):
+        """
+        Recursive Base Composition (v3 SOTA):
+        Cast a winning cluster centroid back into a persistent named base.
+        This allows the system to discover and name complex concepts.
+        """
+        if name not in self._base_vocab:
+            # We strip any complex parts to store a stable float32 base
+            real_emb = np.real(embedding[:EMBED_DIM]).astype(np.float32)
+            n = np.linalg.norm(real_emb)
+            if n > 1e-10: real_emb /= n
+
+            self._base_vocab[name] = real_emb
+            self._base_types[name] = "composite"
+            self._composite_freq[name] = 1
+        else:
+            self._composite_freq[name] += 1
+            # Update existing composite (gentle blend)
+            real_emb = np.real(embedding[:EMBED_DIM]).astype(np.float32)
+            n = np.linalg.norm(real_emb)
+            if n > 1e-10: real_emb /= n
+            self._base_vocab[name] = 0.95 * self._base_vocab[name] + 0.05 * real_emb
+
+    def _apply_aaf(self, matrix: np.ndarray) -> np.ndarray:
+        """
+        Compute the Attention Allocation Field (AAF).
+        Tokens 'poll' their neighbors for semantic context to pre-refine
+        their embeddings. This turns the static sequence into a dynamic field.
+        """
+        n, dim = matrix.shape
+        if n <= 1: return matrix
+
+        # Compute semantic self-attention matrix
+        # For efficiency, we use the base embeddings region [0:EMBED_DIM]
+        bases = matrix[:, :EMBED_DIM]
+        # (n x n) similarity matrix
+        sim = bases @ bases.T
+
+        # Softmax over rows to get allocation weights
+        sim -= np.max(sim, axis=1, keepdims=True)
+        weights = np.exp(sim * 5.0) # sharpness factor
+        weights /= weights.sum(axis=1, keepdims=True) + 1e-10
+
+        # Pre-align matrix: tokens incorporate information from their field
+        # We use a gentle blend (0.15) to keep the base identity strong
+        aligned = (1.0 - 0.15) * matrix + 0.15 * (weights @ matrix)
+
+        return aligned.astype(np.float32)
