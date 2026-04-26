@@ -28,7 +28,7 @@ from typing import List, Dict, Optional, Tuple, Any
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from basemapping.basemapping import BaseMapper, BaseMap
+from basemapping.basemapping import BaseMapper, BaseMap, EMBED_DIM
 from neural_dot.neural_dot   import BiasVector, DotGenerator, DotType, N_HEADS
 from aim.aim                 import AIMLayer
 from convergence.convergence import ConvergenceLayer, Cluster
@@ -649,7 +649,7 @@ class IECNN:
             # Step 7 — Dynamic Head Allocation: Grant extra heads to elites
             self._allocate_heads(dots, eff)
 
-            self._learn_bias(surv, candidates, assign)
+            self._learn_bias(surv, candidates, assign, basemap)
 
             # ── Layer 9.5: AGI Control & Meta-Learning ──────────────────
             # Update Cognitive State Vector (CSV)
@@ -713,6 +713,15 @@ class IECNN:
                     top_phase = mp
             self.cluster_memory.commit_pattern(final_out, top_cluster.score,
                                                alpha=self.alpha, phase=top_phase)
+
+            # Recursive Base Composition: High-score winners become new Bases
+            if top_cluster.score > 0.65:
+                # Heuristic naming for composite concept
+                if mode == "text":
+                    # For text, we can use the top tokens as a name hint
+                    # (simplified for now)
+                    concept_name = f"concept_{self._call_count % 100}"
+                    self.base_mapper.register_composite_base(concept_name, final_out)
         if self.do_evolve:
             self._dots = self.evolution.evolve(dots, self.dot_memory)
             # Joint prune: drop dots that have lived long enough to prove
@@ -985,8 +994,8 @@ class IECNN:
                                        phase=info.get("phase"))
 
     def _learn_bias(self, surviving: List[Cluster], candidates: List[Tuple],
-                    assignments: List[int]):
-        """Update global base_bias based on winning prediction characteristics."""
+                    assignments: List[int], basemap: BaseMap):
+        """Update global base_bias and refine BaseMapper embeddings based on consensus."""
         if not surviving: return
         win_cid = {surviving[0].cluster_id}
         win_biases = []
@@ -1008,6 +1017,32 @@ class IECNN:
         self.base_bias = BiasVector.from_array(
             self.base_bias.to_array() + lr * (win_mean - self.base_bias.to_array())
         )
+
+        # Consensus-Driven Learning: Nudge BaseMapper embeddings
+        # Identify tokens that were in the winning cluster
+        win_cid = {surviving[0].cluster_id}
+        winning_centroid = surviving[0].centroid
+
+        # Simple back-attribution: tokens used by winning dots get refined
+        active_tokens = set()
+        for i, (_, _, info) in enumerate(candidates):
+            if i < len(assignments) and assignments[i] in win_cid:
+                sl_start, sl_end = info.get("slice", (0, 0))
+                for t_idx in range(sl_start, sl_end):
+                    if t_idx < len(basemap.tokens):
+                        active_tokens.add(basemap.tokens[t_idx])
+
+        # Nudge these bases toward the consensus
+        if active_tokens:
+            refine_lr = 0.02 * lr
+            for tok in active_tokens:
+                if tok in self.base_mapper._base_vocab:
+                    old_emb = self.base_mapper._base_vocab[tok]
+                    # Winning centroid is complex, we take real part for base storage
+                    target = np.real(winning_centroid[:EMBED_DIM]).astype(np.float32)
+                    new_emb = old_emb + refine_lr * (target - old_emb)
+                    n = np.linalg.norm(new_emb)
+                    self.base_mapper._base_vocab[tok] = new_emb / n if n > 1e-10 else new_emb
         # AIM feedback: if inversions won often, raise inversion_bias
         if total > 0:
             ratio = aim_wins / total
