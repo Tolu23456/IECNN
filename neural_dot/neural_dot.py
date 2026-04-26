@@ -216,6 +216,7 @@ class NeuralDot:
         # Backfill defaults for fields added after some pickles were written.
         state.setdefault("birth_generation", 0)
         state.setdefault("max_heads", 8)
+        state.setdefault("current_phase", 0.0)
         self.__dict__.update(state)
         # Always normalize to float32 at runtime regardless of how it was saved
         # (legacy pickles stored float64; new pickles store float16).
@@ -420,6 +421,33 @@ class NeuralDot:
         p  = np.tanh(H @ v + self.b_offset * (head + 1) * 0.1)
         noise = self._rng.randn(len(p)).astype(np.float32) * temperature * 0.05
         return p + noise
+
+    def local_update(self, winning_centroid: np.ndarray, winning_head: int, lr: float = 0.01):
+        """
+        Hebbian Local Plasticity (v4 SOTA):
+        Nudge dot weights toward the winning consensus immediately after a win.
+        This allows dots to 'absorb' patterns they correctly identified.
+        """
+        # Ensure we work with real part for weight updates
+        target = np.real(winning_centroid).astype(np.float32)
+        n = np.linalg.norm(target)
+        if n > 1e-10: target /= n
+
+        # 1. Update main transform W
+        # We nudge a random row toward the target to maintain diversity
+        row_idx = self._rng.randint(0, self.feature_dim)
+        self.W[row_idx] = (1.0 - lr) * self.W[row_idx] + lr * target
+
+        # 2. Update winning head projection
+        H = self.head_projs[winning_head]
+        # Soft nudge of the entire projection matrix
+        # (Rank-1 update approximation)
+        H_target = np.outer(target, target)
+        self.head_projs[winning_head] = (1.0 - lr * 0.5) * H + (lr * 0.5) * H_target
+
+        # 3. Normalize weights to prevent explosion
+        norm_w = np.linalg.norm(self.W, axis=1, keepdims=True)
+        self.W /= (norm_w + 1e-10)
 
     def _reason(self, v: np.ndarray, temperature: float,
                 consensus: Optional[np.ndarray] = None) -> np.ndarray:

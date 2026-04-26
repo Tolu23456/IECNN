@@ -25,6 +25,11 @@ def test_decoding():
     decoded_text = decoder.decode(latent, target_mode="text", max_tokens=3)
     print(f"Decoded text: {decoded_text}")
 
+    # 3b. Test Pipeline-in-the-Loop decoding
+    print("Testing Pipeline-in-the-Loop decoding...")
+    refined_text = decoder.decode(latent, target_mode="text", max_tokens=3, use_pipeline=True)
+    print(f"Refined text: {refined_text}")
+
     # 4. Decode to image
     decoded_img = decoder.decode(latent, target_mode="image")
     decoded_img.save("decoded_apple.png")

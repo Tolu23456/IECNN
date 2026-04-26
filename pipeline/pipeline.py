@@ -306,7 +306,8 @@ class IECNN:
                    save_every: int = 500,
                    prune_every: int = 0,
                    prune_min_outcomes: int = 2,
-                   prune_min_age_gens: int = 2) -> "IECNN":
+                   prune_min_age_gens: int = 2,
+                   mask_ratio: float = 0.0) -> "IECNN":
         """
         Run the full pipeline over each sentence so the dot pool, dot memory,
         cluster memory, and evolution all get updated. This is what makes
@@ -334,7 +335,7 @@ class IECNN:
                 if not sent:
                     continue
                 try:
-                    self.run(sent, verbose=False)
+                    self.run(sent, verbose=False, mask_ratio=mask_ratio)
                 except Exception as e:
                     if verbose:
                         print(f"\n[train] skip line {i}: {e}")
@@ -451,7 +452,8 @@ class IECNN:
     # ── Main run ─────────────────────────────────────────────────────
 
     def run(self, input_data: Any, verbose: bool = False,
-            update_brain: bool = False, mode: str = "text") -> IECNNResult:
+            update_brain: bool = False, mode: str = "text",
+            mask_ratio: float = 0.0) -> IECNNResult:
         """
         Run the full 10-layer IECNN pipeline.
 
@@ -460,6 +462,7 @@ class IECNN:
           verbose      — print round-by-round progress
           update_brain — if True, the text enriches the global BaseMapping knowledge
           mode         — 'text' | 'image' | 'audio' | 'video'
+          mask_ratio   — fraction of BaseMap rows to 'mask' for MBM Pretraining (v4 SOTA)
         """
         if update_brain and mode == "text":
             self.base_mapper.fit([input_data])
@@ -470,6 +473,11 @@ class IECNN:
         self.cluster_memory.reset_call()
 
         basemap  = self.base_mapper.transform(input_data, mode=mode)
+
+        # ── Layer 2.1.5: Masked BaseMap Modeling (MBM) ───────────
+        # For unsupervised pretraining: hide some rows, force dots to predict them.
+        if mask_ratio > 0.0:
+            basemap = self._apply_mbm(basemap, mask_ratio)
 
         # ── Layer 2.2: Rolling Context Injection ──────────────────
         if self.context_map is not None:
@@ -504,11 +512,17 @@ class IECNN:
             # ── Memory hints for adaptive attention ──────────────────
             memory_hints = {}
             for dot in dots:
-                hint = self.dot_memory.recent_centroid(dot.dot_id)
+                # 1. Start with episodic hint (v4 SOTA)
+                hint = self.dot_memory.episodic_hint(dot.dot_id, cur_bmap.matrix, self.alpha)
+
+                # 2. Fallback to rolling centroid
+                if hint is None:
+                    hint = self.dot_memory.recent_centroid(dot.dot_id)
+
+                # 3. Last fallback: pattern library
                 if hint is None and rnd == 0:
-                    # Seed round 0 with cluster pattern library hints
-                    # if dot memory is empty
                     hint = self.cluster_memory.closest_pattern(basemap.pool("mean"), self.alpha)
+
                 memory_hints[dot.dot_id] = hint
 
             # ── Layers 3+4: Dot Prediction ───────────────────────────
@@ -603,7 +617,21 @@ class IECNN:
                 cur_entropy = min(1.0, cur_entropy + 0.30)
 
             cur_bmap = self._blend(basemap, refined)
-            self._record_dot_outcomes(surv, candidates, assign, dots)
+            self._record_dot_outcomes(surv, candidates, assign, dots, cur_bmap)
+
+            # ── Layer 4.5: Hebbian Local Plasticity ──────────────────
+            # Nudge winning dots toward consensus immediately
+            if surv:
+                win_cid = surv[0].cluster_id
+                win_centroid = surv[0].centroid
+                for i, (_, _, info) in enumerate(candidates):
+                    if i < len(assign) and assign[i] == win_cid:
+                        did = info.get("dot_id")
+                        head = info.get("head", 0)
+                        # Find the actual dot object
+                        dot_obj = next((d for d in dots if d.dot_id == did), None)
+                        if dot_obj:
+                            dot_obj.local_update(win_centroid, head, lr=0.01)
 
             # ── F17 Dot Reinforcement Pressure ───────────────────────────
             # Dots now respond to normalized global objective J(t)
@@ -786,6 +814,26 @@ class IECNN:
         if n > 1e-10:
             out = out / n * np.sqrt(self.feature_dim)
         return out
+
+    def _apply_mbm(self, basemap: BaseMap, ratio: float) -> BaseMap:
+        """
+        Hide a portion of the BaseMap matrix for pretraining.
+        Masked rows are set to zero (absent).
+        """
+        n = len(basemap.tokens)
+        if n < 2: return basemap
+
+        # Select indices to mask
+        mask_count = max(1, int(n * ratio))
+        mask_idx = self._rng.choice(n, mask_count, replace=False)
+
+        new_matrix = basemap.matrix.copy()
+        for idx in mask_idx:
+            new_matrix[idx, :] = 0.0 # Zero out the embedding
+
+        from basemapping.basemapping import BaseMap as BM
+        return BM(new_matrix, basemap.tokens, basemap.token_types,
+                  basemap.modifiers, {**basemap.metadata, "masked": True, "mask_idx": mask_idx})
 
     def _apply_phase_coding(self, basemap: BaseMap):
         """
@@ -982,16 +1030,27 @@ class IECNN:
                   original.modifiers, {**original.metadata, "blended": True})
 
     def _record_dot_outcomes(self, surviving: List[Cluster], candidates: List[Tuple],
-                             assignments: List[int], dots: list):
+                             assignments: List[int], dots: list, basemap: BaseMap):
         """Update DotMemory: which dots contributed to the winning cluster."""
         if not surviving: return
         win_cid = {surviving[0].cluster_id}
+
+        # Compute initial agreement for surprise tracking
+        # (Simplified: mean confidence of all candidates in this round)
+        avg_conf = np.mean([c[1] for c in candidates])
+
         for i, (pred, conf, info) in enumerate(candidates):
             in_winner = (i < len(assignments) and assignments[i] in win_cid)
             dot_id = info.get("dot_id", -1)
             if dot_id >= 0:
+                # Get input slice context for episodic memory
+                sl_start, sl_end = info.get("slice", (0, 0))
+                ctx = basemap.matrix[sl_start:sl_end]
+
                 self.dot_memory.record(dot_id, pred, in_winner,
-                                       phase=info.get("phase"))
+                                       phase=info.get("phase"),
+                                       initial_agreement=avg_conf,
+                                       input_context=ctx)
 
     def _learn_bias(self, surviving: List[Cluster], candidates: List[Tuple],
                     assignments: List[int], basemap: BaseMap):
