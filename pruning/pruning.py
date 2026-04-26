@@ -50,7 +50,8 @@ class PruningLayer:
         if lib and kept:
             n_cap = len(kept)
             dim = len(kept[0][0])
-            stk = np.ascontiguousarray(np.stack([x[0] for x in kept]), np.float32)
+            # Explicitly take real part for C-accelerated deduplication
+            stk = np.ascontiguousarray(np.real(np.stack([x[0] for x in kept])), np.float32)
             kept_indices = np.zeros(n_cap, dtype=np.int32)
             num_kept = lib.deduplicate_fast(_fp(stk)[0], ctypes.c_int(n_cap), ctypes.c_int(dim),
                                            ctypes.c_float(self.near_dup), ctypes.c_float(self.alpha),

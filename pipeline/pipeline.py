@@ -125,13 +125,20 @@ class IECNN:
         # Memory and evolution
         self.dot_memory      = DotMemory(num_dots)
         if phase_coding:
-            self.dot_memory.phase_bonus_weight = 0.30
+            self.dot_memory.phase_bonus_weight = 0.50 # Boosted for new task
         self.cluster_memory  = ClusterMemory(feature_dim, phase_coding=phase_coding)
         self.evolution       = DotEvolution(EvolutionConfig(), seed)
         self.evaluator       = IECNNMetrics(alpha)
 
         # Working Memory: stores result of previous run() for context
         self.working_memory: Optional[np.ndarray] = None
+
+        # AGI Control & Long-term Memory
+        from cognition.control import SelfModel, CognitiveStateVector
+        from memory.graph import WorldGraph
+        self.self_model = SelfModel(seed=seed)
+        self.world_graph = WorldGraph(feature_dim=feature_dim)
+        self.context_map: Optional[np.ndarray] = None # Rolling document context
 
         # Dot pool (generated lazily on first use; evolved across calls)
         self._dots: Optional[list] = None
@@ -464,6 +471,16 @@ class IECNN:
 
         basemap  = self.base_mapper.transform(input_data, mode=mode)
 
+        # ── Layer 2.2: Rolling Context Injection ──────────────────
+        if self.context_map is not None:
+            # Guide the new sentence with the high-level context of previous ones
+            basemap = self._blend(basemap, self.context_map, alpha=0.70)
+
+        # ── Phase-Coded Encoding: walk the token stream once ──
+        # Assign phases to dots based on the token position they 'win'
+        if self.phase_coding:
+            self._apply_phase_coding(basemap)
+
         # ── Layer 2.5: Working Memory Injection ──────────────────
         # If we have a working memory from the previous call, blend it
         # into the initial basemap to provide narrative context.
@@ -634,6 +651,33 @@ class IECNN:
 
             self._learn_bias(surv, candidates, assign)
 
+            # ── Layer 9.5: AGI Control & Meta-Learning ──────────────────
+            # Update Cognitive State Vector (CSV)
+            from cognition.control import CognitiveStateVector
+            current_csv = CognitiveStateVector(
+                entropy=ent, dominance=dom,
+                stability=self.iter_ctrl.current_stability(),
+                energy=self.iter_ctrl.current_energy(),
+                eug=eug_val, call_count=self._call_count,
+                reasoning_depth=2 # default
+            )
+
+            # Ego deciding internal actions
+            actions = self.self_model.decide(current_csv)
+
+            # Apply Self-Model decisions:
+            # 1. Modulate mutation pressure
+            mutation_std = 0.05 * actions.mutation_pressure
+            # 2. Add exploration noise to refined vector
+            if actions.exploration_noise > 0.01:
+                noise = self._rng.randn(len(refined)).astype(np.float32) * actions.exploration_noise
+                refined = refined + noise
+
+            # Learn from the delta in system energy/utility (simplified update)
+            u_delta = self.iter_ctrl.utility_acceleration()
+            e_delta = self.iter_ctrl.current_energy() - (all_rounds[-2]["energy"] if len(all_rounds) > 1 else 0.5)
+            self.self_model.learn(current_csv, actions, u_delta, -e_delta)
+
             # ── Meta-Learning: Auto-tune DRP and LR ──────────────────────
             # Adjust meta-parameters based on EUG history.
             # If EUG is consistently low, we increase failure penalty (lambda4)
@@ -698,33 +742,71 @@ class IECNN:
 
     def run_hierarchical(self, sentences: List[str], verbose: bool = False) -> np.ndarray:
         """
-        Document-level processing: process each sentence independently,
-        then perform a final 'Master Convergence' on their centroids.
+        Rolling Hierarchical Convergence (SOTA upgrade):
+        Processes document as a sequence of sentences, where each sentence
+        centroid enriches a persistent 'Context Map' that guides the next.
         """
-        centroids = []
-        scores = []
-        for sent in sentences:
-            res = self.run(sent, verbose=verbose)
-            if res.top_cluster:
-                centroids.append(res.top_cluster.centroid)
-                scores.append(res.top_cluster.score)
+        self.context_map = None # Reset for new document
+        final_centroids = []
 
-        if not centroids:
+        for i, sent in enumerate(sentences):
+            if verbose: print(f"  [Document] Sentence {i+1}/{len(sentences)}")
+
+            # Process sentence with rolling context injection
+            res = self.run(sent, verbose=verbose)
+
+            if res.top_cluster:
+                # Update Context Map: EMA blend
+                if self.context_map is None:
+                    self.context_map = res.top_cluster.centroid.copy()
+                else:
+                    self.context_map = 0.7 * self.context_map + 0.3 * res.top_cluster.centroid
+
+                final_centroids.append(res.top_cluster.centroid)
+
+                # Consolidate into World Graph periodically
+                if i % 5 == 0:
+                    self.world_graph.consolidate([(res.top_cluster.centroid, res.top_cluster.score)], alpha=self.alpha)
+
+        if not final_centroids:
             return np.zeros(self.feature_dim, dtype=np.float32)
 
-        # Final centroid: confidence-weighted average of sentence centroids
-        # weighted by their individual convergence scores.
-        stack = np.stack(centroids)
-        weights = np.array(scores)
-        weights /= weights.sum() + 1e-10
-        master_centroid = (stack * weights[:, None]).sum(axis=0)
-
-        # Re-normalize
-        n = np.linalg.norm(master_centroid)
+        # Final Document Vector is the final Context Map (sum of narrative arc)
+        out = self.context_map
+        n = np.linalg.norm(out)
         if n > 1e-10:
-            master_centroid = master_centroid / n * np.sqrt(self.feature_dim)
+            out = out / n * np.sqrt(self.feature_dim)
+        return out
 
-        return master_centroid
+    def _apply_phase_coding(self, basemap: BaseMap):
+        """
+        Walk the token stream and assign phases to dots.
+        The dot that 'wins' (most similar) a token position t gets phase 2pi * t / L.
+        """
+        dots = self._ensure_dots()
+        n_tokens = len(basemap.tokens)
+        if n_tokens == 0: return
+
+        for t, token_vec in enumerate(basemap.matrix):
+            phase = 2.0 * np.pi * t / n_tokens
+
+            # Simple competition: which dot's base projection fits this token best?
+            best_dot = None
+            best_sim = -1.0
+
+            for dot in dots:
+                # Use a simplified projection for fast phase assignment
+                # Use only EMBED_DIM for semantic/structural alignment
+                sim = similarity_score(token_vec[:EMBED_DIM], dot.W[:EMBED_DIM, 0], self.alpha)
+                if sim > best_sim:
+                    best_sim = sim
+                    best_dot = dot
+
+            if best_dot:
+                # Assign phase to dot for this run
+                best_dot.current_phase = phase
+                # Record this phase sample in dot memory for fitness
+                self.dot_memory.record_phase_sample(best_dot.dot_id, phase)
 
     def _split_sentences(self, text: str) -> List[str]:
         """Simple heuristic sentence splitter."""
