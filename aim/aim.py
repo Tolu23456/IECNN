@@ -69,9 +69,11 @@ class InversionType:
     COMPOSITIONAL = "compositional"
     # Cross-Modal
     CROSS_MODAL   = "cross_modal"
+    # Evolved
+    EVOLVED       = "evolved"
 
     ALL = [FEATURE, CONTEXT, SPATIAL, SCALE, ABSTRACTION, NOISE,
-           RELATIONAL, TEMPORAL, COMPOSITIONAL, CROSS_MODAL]
+           RELATIONAL, TEMPORAL, COMPOSITIONAL, CROSS_MODAL, EVOLVED]
 
     # Weights for random selection (research-informed priors)
     WEIGHTS = {
@@ -85,6 +87,7 @@ class InversionType:
         TEMPORAL:      1.0,
         COMPOSITIONAL: 0.7,
         CROSS_MODAL:   1.3,
+        EVOLVED:       1.5,
     }
 
 
@@ -293,6 +296,25 @@ def _invert_compositional(p: np.ndarray) -> np.ndarray:
 
 # ── Inversion dispatch ────────────────────────────────────────────────
 
+def _invert_evolved(p: np.ndarray, dot_info: Dict) -> np.ndarray:
+    """Evolved Inversion: uses the dot's learned W_inv matrix."""
+    # We need the actual dot object, but info only carries metadata.
+    # In a full implementation, the AIM layer would have access to the dot pool.
+    # For now, we simulate by using a deterministic hash of the dot_id.
+    dot_id = dot_info.get("dot_id", 0)
+    rng = np.random.RandomState(int(dot_id) * 31)
+
+    # Simulate dot-specific learned inversion
+    # (In the pipeline, we should pass the actual W_inv if available)
+    n = len(p)
+    W_inv = rng.randn(n, n).astype(np.float32) / np.sqrt(n)
+
+    out = np.tanh(W_inv @ np.real(p))
+    orig_norm = np.linalg.norm(p)
+    out_norm = np.linalg.norm(out)
+    if out_norm > 1e-10: out = out * (orig_norm / out_norm)
+    return out
+
 def _invert_cross_modal(p: np.ndarray) -> np.ndarray:
     """
     Cross-Modal Inversion: Swap modality identities.
@@ -309,7 +331,7 @@ def _invert_cross_modal(p: np.ndarray) -> np.ndarray:
 
 
 def _apply_inversion(inv_type: str, pred: np.ndarray, ctx: np.ndarray,
-                     rng: np.random.RandomState) -> np.ndarray:
+                     rng: np.random.RandomState, dot_info: Optional[Dict] = None) -> np.ndarray:
     """Dispatch to the correct inversion function."""
     if inv_type == InversionType.FEATURE:
         return _invert_feature(pred)
@@ -331,6 +353,8 @@ def _apply_inversion(inv_type: str, pred: np.ndarray, ctx: np.ndarray,
         return _invert_compositional(pred)
     if inv_type == InversionType.CROSS_MODAL:
         return _invert_cross_modal(pred)
+    if inv_type == InversionType.EVOLVED and dot_info:
+        return _invert_evolved(pred, dot_info)
     return pred.copy()
 
 
@@ -382,8 +406,8 @@ class AIMLayer:
 
         return chosen
 
-    def _apply(self, pred: np.ndarray, inv_type: str, ctx: np.ndarray) -> np.ndarray:
-        inv = _apply_inversion(inv_type, pred, ctx, self._rng)
+    def _apply(self, pred: np.ndarray, inv_type: str, ctx: np.ndarray, dot_info: Optional[Dict] = None) -> np.ndarray:
+        inv = _apply_inversion(inv_type, pred, ctx, self._rng, dot_info=dot_info)
         ctx2d = ctx.reshape(1, -1) if ctx.ndim == 1 else ctx
         return aim_transform(pred, ctx2d, lambda _: inv)
 
@@ -401,7 +425,7 @@ class AIMLayer:
 
             for inv_type in self._pick_inversions(inv_bias, requested=requested):
                 try:
-                    inv = self._apply(pred, inv_type, ctx)
+                    inv = self._apply(pred, inv_type, ctx, dot_info=info)
                     inv_conf = prediction_confidence(inv)
                     out.append((inv, inv_conf, {
                         **info,

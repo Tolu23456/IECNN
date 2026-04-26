@@ -697,16 +697,17 @@ def memory_plasticity(stability: float) -> float:
         return float(lib.memory_plasticity(ctypes.c_float(stability)))
     return 1.0 / (1.0 + np.exp(-stability))
 
-def dot_fitness(rd: float, cd: float, sd: float, ud: float, nd: float,
-                alpha: float = 0.2, beta: float = 0.2, gamma: float = 0.2, delta: float = 0.1) -> float:
-    """F24: F_d = R_d + alpha*C_d + beta*S_d + gamma*U_d - delta*N_d"""
+def dot_fitness(rd: float, cd: float, sd: float, ud: float, nd: float, surprise: float = 0.0,
+                alpha: float = 0.2, beta: float = 0.2, gamma: float = 0.2, delta: float = 0.1, sigma: float = 0.5) -> float:
+    """
+    F24 (Enhanced): F_d = R_d + alpha*C_d + beta*S_d + gamma*U_d - delta*N_d + sigma*Surprise
+    Rewards dots that are surprisingly correct (causal discovery).
+    """
     lib = _load_lib()
-    if lib:
-        return float(lib.dot_fitness(
-            ctypes.c_float(rd), ctypes.c_float(cd), ctypes.c_float(sd), ctypes.c_float(ud), ctypes.c_float(nd),
-            ctypes.c_float(alpha), ctypes.c_float(beta), ctypes.c_float(gamma), ctypes.c_float(delta)
-        ))
-    return rd + alpha * cd + beta * sd + gamma * ud - delta * nd
+    # The C version will eventually need updating, but we can pass surprise manually here
+    # to avoid crashing while we transition.
+    base = rd + alpha * cd + beta * sd + gamma * ud - delta * nd
+    return base + sigma * surprise
 
 def stability_energy(entropy: float, instability: float,
                      lambda1: float = 0.5, lambda2: float = 0.5) -> float:

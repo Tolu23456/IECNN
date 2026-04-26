@@ -49,6 +49,9 @@ class DotMemory:
         self._var_sums: Dict[int, np.ndarray] = {}
         self._var_counts: Dict[int, int] = {}
 
+        # Surprise tracking: dot_id -> rolling surprise average
+        self._surprise_history: Dict[int, float] = {}
+
         # Per-dot circular phase accumulator: (re_sum, im_sum, count)
         # Populated only when phase coding is active and predictions carry phase.
         self._phase_acc: Dict[int, Tuple[float, float, int]] = {}
@@ -62,6 +65,7 @@ class DotMemory:
             self._success_counts[dot_id] = 0.0
             self._total_counts[dot_id] = 0.0
             self._phase_acc[dot_id] = (0.0, 0.0, 0)
+            self._surprise_history[dot_id] = 0.0
 
     def record_phase_sample(self, dot_id: int, phase: float):
         """Record a phase sample for a dot (e.g. from winning a token slot)."""
@@ -74,18 +78,27 @@ class DotMemory:
         )
 
     def record(self, dot_id: int, prediction: np.ndarray, in_winner: bool,
-               phase: Optional[float] = None):
+               phase: Optional[float] = None, initial_agreement: float = 0.0):
         """Record whether a dot's prediction ended in the winning cluster.
 
         If `phase` (radians) is provided, also accumulate it into the dot's
         circular phase distribution. A narrow distribution (high concentration)
         means the dot fires consistently from the same positional slot.
+
+        `initial_agreement` is used to calculate 'Surprise'. If agreement was low
+        but the dot won, it discovered something non-obvious (Causal Discovery).
         """
         self._ensure_id(dot_id)
 
         self._total_counts[dot_id] += 1.0
         if in_winner:
             self._success_counts[dot_id] += 1.0
+
+            # Causal Surprise: 1 - initial agreement
+            surprise = max(0.0, 1.0 - initial_agreement)
+            # Update EMA of surprise
+            alpha = 0.1
+            self._surprise_history[dot_id] = (1.0 - alpha) * self._surprise_history[dot_id] + alpha * surprise
 
         self._windows[dot_id].append(prediction.copy())
         # Update rolling variance for specialization score
@@ -177,7 +190,7 @@ class DotMemory:
     def all_fitness_scores(self, dot_ids: List[int], j_norm: float = 0.0) -> np.ndarray:
         """
         F24: Dot Fitness Function
-        F_d = R_d + alpha*C_d + beta*S_d + gamma*U_d - delta*N_d
+        F_d = R_d + alpha*C_d + beta*S_d + gamma*U_d - delta*N_d + sigma*Surprise
         """
         from formulas.formulas import dot_fitness
         drp = self.drp_scores(dot_ids, j_norm)
@@ -185,9 +198,11 @@ class DotMemory:
         fit = np.zeros(len(dot_ids), dtype=np.float32)
         for i, did in enumerate(dot_ids):
             spec = self.specialization_score(did)
+            surp = self._surprise_history.get(did, 0.0)
             # Use effectiveness as proxy for U_d (utility impact) for now
             fit[i] = dot_fitness(
-                rd=float(drp[i]), cd=float(eff[i]), sd=spec, ud=float(eff[i]), nd=1.0 - float(eff[i])
+                rd=float(drp[i]), cd=float(eff[i]), sd=spec, ud=float(eff[i]), nd=1.0 - float(eff[i]),
+                surprise=float(surp)
             )
         # Phase-narrowness bonus: dots with a tightly concentrated phase
         # distribution get a multiplicative boost. Inactive when bonus weight

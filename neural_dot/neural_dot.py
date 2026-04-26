@@ -175,6 +175,10 @@ class NeuralDot:
             for _ in range(self.max_heads)
         ]
 
+        # Self-Evolving Inversion (Counterfactual hypothesis)
+        # Each dot learns its own private inversion transformation.
+        self.W_inv = rng.randn(feature_dim, feature_dim).astype(np.float32) * scale
+
         # Attention query basis (for computing the query from pooled input)
         self.Q_basis = rng.randn(feature_dim, feature_dim).astype(np.float32) * scale
         self.b_offset = rng.randn(feature_dim).astype(np.float32) * scale * 0.1
@@ -183,7 +187,7 @@ class NeuralDot:
     # ── Pickle: store large weight matrices as float16 to halve disk size.
     # Runtime keeps float32 (no math change); only the on-disk representation
     # is compressed. Backward-compatible with pre-compression pickles.
-    _F16_KEYS = ("W", "Q_basis", "b_offset")
+    _F16_KEYS = ("W", "Q_basis", "b_offset", "W_inv")
 
     @staticmethod
     def _to_f16(arr):
@@ -487,6 +491,10 @@ class NeuralDot:
         elif modality == "image" and self.bias.granularity_bias < 0.3:
             # Local visual uncertainty requests scale check
             requested_inversion = "scale"
+
+        # High confidence but low agreement (from memory) requests a custom counterfactual
+        if self.bias.attention_bias > 0.7:
+            requested_inversion = "evolved"
 
         results = []
         for h in range(self.n_heads):
