@@ -112,13 +112,13 @@ def _fp(arr: np.ndarray):
 # ── Formula 1 helpers ────────────────────────────────────────────────
 
 def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
-    """Cosine similarity. Supports complex vectors via Re(<a,b>)/(||a||*||b||)."""
+    """Cosine similarity. Supports complex vectors via |<a,b>|/(||a||*||b||)."""
     if np.iscomplexobj(a) or np.iscomplexobj(b):
         na = np.linalg.norm(a); nb = np.linalg.norm(b)
         if na < 1e-10 or nb < 1e-10: return 0.0
-        # For complex vectors, we use the real part of the normalized inner product
-        # which represents phase-aware alignment.
-        return float(np.real(np.vdot(a, b)) / (na * nb))
+        # For phase-coded activations, we care about the magnitude of the
+        # complex inner product, which represents coherence.
+        return float(np.abs(np.vdot(a, b)) / (na * nb))
 
     lib = _load_lib()
     a32 = np.ascontiguousarray(a, np.float32)

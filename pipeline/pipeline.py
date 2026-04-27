@@ -338,7 +338,9 @@ class IECNN:
                     self.run(sent, verbose=False, mask_ratio=mask_ratio)
                 except Exception as e:
                     if verbose:
+                        import traceback
                         print(f"\n[train] skip line {i}: {e}")
+                        traceback.print_exc()
                     continue
                 if verbose and (i % 25 == 0 or i == n):
                     elapsed = time.time() - t0

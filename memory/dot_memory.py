@@ -71,6 +71,8 @@ class DotMemory:
             self._phase_acc[dot_id] = (0.0, 0.0, 0)
             self._surprise_history[dot_id] = 0.0
             self._exemplars[dot_id] = []
+        if dot_id not in self._surprise_history:
+            self._surprise_history[dot_id] = 0.0
 
     def record_phase_sample(self, dot_id: int, phase: float):
         """Record a phase sample for a dot (e.g. from winning a token slot)."""
