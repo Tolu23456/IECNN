@@ -31,6 +31,7 @@ class EvolutionConfig:
     weight_noise_std: float = 0.01   # std of Gaussian noise added to weights during mutation
     tournament_size:  int   = 4      # k for tournament selection
     min_generations:  int   = 3      # minimum calls before evolution kicks in
+    evolution_interval: int = 25     # Only evolve every N calls to save time
     max_dot_pool_size: int  = 1000   # Hard cap to prevent OOM
 
 
@@ -51,35 +52,31 @@ class DotEvolution:
     def generation(self) -> int:
         return self._generation
 
-    def evolve(self, dots: list, memory: DotMemory) -> list:
+    def evolve(self, dots: list, memory: DotMemory, call_count: int = 0) -> list:
         """
-        Produce an evolved dot pool from the current pool + effectiveness memory.
-
-        Returns a new list of NeuralDot objects (same length as `dots`).
+        Produce an evolved dot pool. Optimized to run every evolution_interval.
         """
         from neural_dot.neural_dot import NeuralDot, BiasVector, DotType
+        cfg = self.config
 
-        # 0. Pool Culling: if memory is tracking too many dead dots, prune it.
-        # This keeps the save files compact.
-        if len(memory._total_counts) > self.config.max_dot_pool_size * 2:
+        if call_count > 0 and call_count % cfg.evolution_interval != 0:
+            return dots
+
+        # 0. Pool Culling
+        if len(memory._total_counts) > cfg.max_dot_pool_size * 2:
             current_ids = [d.dot_id for d in dots]
             memory.prune(current_ids)
 
         n = len(dots)
-        if n == 0:
-            return dots
+        if n == 0: return dots
 
         dot_ids = [d.dot_id for d in dots]
-        # Use F24 Dot Fitness for selection
         fitness = memory.all_fitness_scores(dot_ids)
-        cfg = self.config
 
-        # Minimum runs before evolution kicks in
-        # We check the mean total count of the current dots
+        # Accumulate enough data
         avg_total_count = np.mean([memory._total_counts.get(did, 0.0) for did in dot_ids])
         if avg_total_count < cfg.min_generations:
-            self._generation += 1
-            return dots  # too early — not enough data yet
+            return dots
 
         # Compute pool sizes
         n_keep     = max(1, int(n * cfg.keep_fraction))
@@ -164,30 +161,23 @@ class DotEvolution:
         return best_idx
 
     def _mutate(self, dot, cfg: EvolutionConfig):
-        """Clone a dot with Gaussian noise added to its bias and weights.
-
-        Experimental Stable Mutation: The child gets a new ID but we record
-        its parentage in the metadata for lineage tracking.
-        """
+        """Clone a dot with Gaussian noise added to its bias and weights."""
         from neural_dot.neural_dot import NeuralDot, BiasVector
 
+        # Use fast clone
+        child = dot.clone(new_id=True)
+        child.birth_generation = self._generation + 1
+
         # Mutate bias
-        b_arr = dot.bias.to_array()
+        b_arr = child.bias.to_array()
         noise = self._rng.randn(len(b_arr)).astype(np.float32) * cfg.bias_noise_std
         new_b = np.clip(b_arr + noise, 0.0, 2.0)
         new_b[-1] = max(new_b[-1], 0.05)  # temperature must be positive
+        child.bias = BiasVector.from_array(new_b)
 
-        child = NeuralDot(
-            dot_id=None, # New unique ID for the mutant child
-            feature_dim=dot.feature_dim,
-            bias=BiasVector.from_array(new_b),
-            dot_type=dot.dot_type,
-            seed=int(self._rng.randint(0, 2**31)),
-            birth_generation=self._generation + 1,
-        )
         # Mutate weights slightly
-        child.W = dot.W + self._rng.randn(*dot.W.shape).astype(np.float32) * cfg.weight_noise_std
-        child.b_offset = dot.b_offset + self._rng.randn(*dot.b_offset.shape).astype(np.float32) * cfg.weight_noise_std * 0.1
+        child.W += self._rng.randn(*child.W.shape).astype(np.float32) * cfg.weight_noise_std
+        child.b_offset += self._rng.randn(*child.b_offset.shape).astype(np.float32) * cfg.weight_noise_std * 0.1
 
         # Record lineage
         child.metadata = getattr(dot, "metadata", {}).copy()
@@ -196,52 +186,52 @@ class DotEvolution:
         return child
 
     def _crossover(self, p1, p2):
-        """Blend two parent dots: average bias, uniform-crossover on weight rows. Gets a new unique ID."""
+        """Blend two parent dots."""
         from neural_dot.neural_dot import NeuralDot, BiasVector
 
-        # Average the bias vectors
-        b_arr = (p1.bias.to_array() + p2.bias.to_array()) / 2.0
+        # Use fast clone for p1 as base
+        child = p1.clone(new_id=True)
+        child.birth_generation = self._generation + 1
 
-        child = NeuralDot(
-            dot_id=None, # New unique ID for the crossover child
-            feature_dim=p1.feature_dim,
-            bias=BiasVector.from_array(b_arr),
-            dot_type=p1.dot_type,
-            seed=int(self._rng.randint(0, 2**31)),
-            birth_generation=self._generation + 1,
-        )
+        # Average the bias vectors
+        child.bias = BiasVector.from_array((p1.bias.to_array() + p2.bias.to_array()) / 2.0)
+
         # Uniform row-wise crossover on W matrix
         mask = self._rng.rand(p1.W.shape[0]) > 0.5
-        child.W = np.where(mask[:, None], p1.W, p2.W)
-        child.b_offset = (p1.b_offset + p2.b_offset) / 2.0
+        child.W = np.where(mask[:, None], p1.W, p2.W).astype(np.float32)
+        child.b_offset = ((p1.b_offset + p2.b_offset) / 2.0).astype(np.float32)
         return child
 
     def mutate_weak_dots(self, dots: list, effectivenesses: np.ndarray,
                           threshold: float = 0.10,
                           mutation_std: float = 0.05) -> list:
-        """Inline (within-call) mutation. Keeps the same dot_id as it is a transformation."""
+        """Inline (within-call) mutation. Optimized for speed."""
         from neural_dot.neural_dot import NeuralDot, BiasVector, DotType
 
         n_types = len(DotType.__members__)
-        # effectivenesses matches the dots list order here
-        for i, dot in enumerate(dots):
-            eff = float(effectivenesses[i])
-            if eff < threshold:
-                # Weight mutation
-                dot.W = dot.W + self._rng.randn(*dot.W.shape).astype(np.float32) * mutation_std
-                dot.b_offset = (dot.b_offset
-                                + self._rng.randn(*dot.b_offset.shape).astype(np.float32)
-                                * mutation_std * 0.1)
-                # Bias mutation
-                b_arr = dot.bias.to_array()
-                noise = self._rng.randn(len(b_arr)).astype(np.float32) * mutation_std
-                b_arr = np.clip(b_arr + noise, 0.0, 2.0)
-                b_arr[-1] = max(float(b_arr[-1]), 0.05)
-                dot.bias = BiasVector.from_array(b_arr)
-                # Optional type switch (20% chance)
-                if self._rng.rand() < 0.20:
-                    new_type = DotType(self._rng.randint(0, n_types))
-                    dot.dot_type = new_type
+        weak_indices = np.where(effectivenesses < threshold)[0]
+        if len(weak_indices) == 0:
+            return dots
+
+        for i in weak_indices:
+            dot = dots[i]
+            # Fast sparse mutation: only 10% of weight rows
+            n_mutate = max(1, dot.feature_dim // 10)
+            rows = self._rng.choice(dot.feature_dim, n_mutate, replace=False)
+            noise = (self._rng.standard_normal((n_mutate, dot.feature_dim)) * mutation_std).astype(np.float32)
+            dot.W[rows] += noise
+
+            dot.b_offset += (self._rng.standard_normal(dot.feature_dim) * mutation_std * 0.1).astype(np.float32)
+
+            # Bias mutation
+            b_arr = dot.bias.to_array()
+            b_arr += (self._rng.standard_normal(len(b_arr)) * mutation_std).astype(np.float32)
+            b_arr = np.clip(b_arr, 0.0, 2.0)
+            b_arr[-1] = max(float(b_arr[-1]), 0.05)
+            dot.bias = BiasVector.from_array(b_arr)
+
+            if self._rng.rand() < 0.20:
+                dot.dot_type = DotType(self._rng.randint(0, n_types))
         return dots
 
     # ── Persistence ──────────────────────────────────────────────────

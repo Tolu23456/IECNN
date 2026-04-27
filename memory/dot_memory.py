@@ -46,8 +46,8 @@ class DotMemory:
         self._windows: Dict[int, deque] = {}
 
         # Per-dot prediction variance (measures specialization)
-        self._var_sums: Dict[int, np.ndarray] = {}
-        self._var_counts: Dict[int, int] = {}
+        # Using Welford's algorithm for incremental variance: (mean, M2, count)
+        self._var_stats: Dict[int, Tuple[np.ndarray, np.ndarray, int]] = {}
 
         # Surprise tracking: dot_id -> rolling surprise average
         self._surprise_history: Dict[int, float] = {}
@@ -68,7 +68,9 @@ class DotMemory:
     def _ensure_id(self, dot_id: int):
         if dot_id not in self._windows:
             self._windows[dot_id] = deque(maxlen=self.window_size)
-            self._var_counts[dot_id] = 0
+            dim = 256 # Assume default, will adjust if needed
+            self._var_stats[dot_id] = (np.zeros(dim, dtype=np.float32),
+                                      np.zeros(dim, dtype=np.float32), 0)
             self._success_counts[dot_id] = 0.0
             self._total_counts[dot_id] = 0.0
             self._phase_acc[dot_id] = (0.0, 0.0, 0)
@@ -137,12 +139,19 @@ class DotMemory:
             self._semantic_grounding[dot_id] = (1.0 - alpha_ema) * self._semantic_grounding.get(dot_id, 0.5) + alpha_ema * alignment
 
         self._windows[dot_id].append(prediction.copy())
-        # Update rolling variance for specialization score
-        d = len(self._windows[dot_id])
-        if d >= 2:
-            stack = np.stack(list(self._windows[dot_id]))
-            self._var_sums[dot_id] = np.var(stack, axis=0)
-        self._var_counts[dot_id] += 1
+
+        # Update rolling variance using Welford's algorithm (Incremental O(1))
+        # Ensure we use float32 for mean to avoid complex-to-float casting errors
+        p_real = np.real(prediction).astype(np.float32)
+
+        mean, M2, count = self._var_stats.get(dot_id, (np.zeros_like(p_real),
+                                                       np.zeros_like(p_real), 0))
+        count += 1
+        delta = p_real - mean
+        mean = mean + (delta / count)
+        delta2 = p_real - mean
+        M2 = M2 + (delta * delta2)
+        self._var_stats[dot_id] = (mean, M2, count)
 
         if phase is not None:
             re_s, im_s, cnt = self._phase_acc.get(dot_id, (0.0, 0.0, 0))
@@ -190,13 +199,15 @@ class DotMemory:
     def specialization_score(self, dot_id: int) -> float:
         """
         How consistent (specialized) is the dot's output?
-        Low variance = high specialization (dot focuses on a niche).
-        High variance = generalist (dot explores broadly).
-        Returns [0, 1]: 1 = fully specialized, 0 = fully general.
+        Optimized O(1) via incremental variance.
         """
-        if dot_id not in self._var_sums:
+        if dot_id not in self._var_stats:
             return 0.5
-        mean_var = float(np.mean(self._var_sums[dot_id]))
+        mean, M2, count = self._var_stats[dot_id]
+        if count < 2:
+            return 0.5
+        variance = M2 / count
+        mean_var = float(np.mean(variance))
         return float(1.0 / (1.0 + mean_var))
 
     def episodic_hint(self, dot_id: int, current_context: np.ndarray, alpha: float = 0.7) -> Optional[np.ndarray]:
@@ -359,8 +370,9 @@ class DotMemory:
         """
         keep = set(int(i) for i in keep_ids)
         for store in (self._success_counts, self._total_counts,
-                      self._windows, self._var_sums, self._var_counts,
-                      self._phase_acc):
+                      self._windows, self._var_stats,
+                      self._phase_acc, self._surprise_history,
+                      self._exemplars, self._semantic_grounding):
             for did in list(store.keys()):
                 if int(did) not in keep:
                     del store[did]
@@ -410,8 +422,7 @@ class DotMemory:
             "success_counts":     dict(self._success_counts),
             "total_counts":       dict(self._total_counts),
             "windows":            {k: list(v) for k, v in self._windows.items()},
-            "var_sums":           dict(self._var_sums),
-            "var_counts":         dict(self._var_counts),
+            "var_stats":          {k: (m.copy(), m2.copy(), c) for k, (m, m2, c) in self._var_stats.items()},
             "exemplars":          {k: [(c.copy(), p.copy(), w) for c, p, w in v] for k, v in self._exemplars.items()},
             "phase_acc":          {int(k): tuple(v) for k, v in self._phase_acc.items()},
         }
@@ -432,8 +443,8 @@ class DotMemory:
             int(k): deque(v, maxlen=self.window_size)
             for k, v in state.get("windows", {}).items()
         }
-        self._var_sums   = dict(state.get("var_sums", {}))
-        self._var_counts = dict(state.get("var_counts", {}))
+        self._var_stats  = {int(k): (np.array(v[0]), np.array(v[1]), int(v[2]))
+                           for k, v in state.get("var_stats", {}).items()}
         self._exemplars  = dict(state.get("exemplars", {}))
         self._phase_acc  = {
             int(k): (float(v[0]), float(v[1]), int(v[2]))

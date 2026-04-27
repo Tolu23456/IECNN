@@ -242,23 +242,12 @@ class IECNN:
             with open(paths["evo"], "rb") as fh:
                 self.evolution.load_state(pickle.load(fh))
 
-    def prune_dots(self, min_outcomes: int = 2, min_age_gens: int = 2,
+    def prune_dots(self, min_outcomes: int = 1, min_age_gens: int = 2,
+                   max_pool_size: int = 256,
                    dry_run: bool = False) -> dict:
         """
         Joint pruner for dot pool + dot memory.
-
-        A dot is removed when it is BOTH:
-          - old enough (current_gen - birth_generation >= min_age_gens), and
-          - has accumulated fewer than `min_outcomes` recorded predictions.
-
-        After culling dead dots from `self._dots`, dot_memory is pruned to
-        the surviving id set, which also removes orphaned history left
-        behind by previous generations of dead dots.
-
-        When `dry_run=True`, no state is mutated — only the stats dict is
-        returned so callers can preview the impact.
-
-        Returns a small stats dict for logging.
+        Optimized for memory: cap total dot count and prune low effectiveness dots.
         """
         if not self._dots:
             return {"removed_dots": 0, "removed_history": 0,
@@ -270,31 +259,36 @@ class IECNN:
         before_dots = len(self._dots)
         before_hist = len(self.dot_memory._total_counts)
 
-        survivors = []
+        # 1. Filter by age and activity
+        potential_survivors = []
         for d in self._dots:
             birth = int(getattr(d, "birth_generation", 0))
             age = current_gen - birth
             outcomes = self.dot_memory._total_counts.get(d.dot_id, 0.0)
-            # Newborns and dots with enough recorded outcomes survive.
             if age < min_age_gens or outcomes >= min_outcomes:
-                survivors.append(d)
+                potential_survivors.append(d)
 
-        # Always keep at least one dot to avoid a degenerate empty pool.
-        if not survivors and self._dots:
-            survivors = [self._dots[0]]
+        # 2. Sort by effectiveness and keep top max_pool_size
+        if len(potential_survivors) > max_pool_size:
+            potential_survivors.sort(key=lambda d: self.dot_memory.effectiveness(d.dot_id), reverse=True)
+            potential_survivors = potential_survivors[:max_pool_size]
 
-        keep_ids = [d.dot_id for d in survivors]
+        # Always keep at least some dots
+        if not potential_survivors and self._dots:
+            potential_survivors = self._dots[:10]
+
+        keep_ids = [d.dot_id for d in potential_survivors]
         keep_set = set(int(i) for i in keep_ids)
         kept_history = sum(1 for did in self.dot_memory._total_counts
                            if int(did) in keep_set)
 
         if not dry_run:
-            self._dots = survivors
+            self._dots = potential_survivors
             self.dot_memory.prune(keep_ids)
 
         return {
-            "removed_dots":    before_dots - len(survivors),
-            "kept_dots":       len(survivors),
+            "removed_dots":    before_dots - len(potential_survivors),
+            "kept_dots":       len(potential_survivors),
             "removed_history": before_hist - kept_history,
             "kept_history":    kept_history,
             "generation":      current_gen,
@@ -753,11 +747,10 @@ class IECNN:
                     concept_name = f"concept_{self._call_count % 100}"
                     self.base_mapper.register_composite_base(concept_name, final_out)
         if self.do_evolve:
-            self._dots = self.evolution.evolve(dots, self.dot_memory)
-            # Joint prune: drop dots that have lived long enough to prove
-            # themselves useless, and drop their history from dot_memory so
-            # the on-disk brain stops growing unboundedly.
-            self.prune_dots()
+            self._dots = self.evolution.evolve(dots, self.dot_memory, call_count=self._call_count)
+            # Joint prune
+            if self._call_count % self.evolution.config.evolution_interval == 0:
+                self.prune_dots()
         self._call_count += 1
 
         result = IECNNResult(

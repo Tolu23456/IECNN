@@ -467,22 +467,24 @@ class BaseMapper:
         freq_vals = self._freq_values(tokens, types)
         max_freq  = max(freq_vals) if freq_vals else 1.0
 
+        # Pre-compute all embeddings and batch operations
+        all_embeds = np.zeros((n, EMBED_DIM), dtype=np.float32)
+        for i in range(n):
+            all_embeds[i] = self._token_embedding(tokens[i], types[i])
+
+        all_ctx = self._context_summary_batch(tokens, types, all_embeds)
+
         for i, (tok, typ) in enumerate(zip(tokens, types)):
-            embed = self._token_embedding(tok, typ)
             pos   = self._position_enc(i, n)
             freq  = self._freq_features(tok, freq_vals[i], max_freq)
             flags = self._modifier_flags(tok, typ, i, n)
-            # Add modality flag
             flags[MOD_TEXT] = 1.0
 
-            ctx   = self._context_summary(i, tokens, types)
-
-            matrix[i, :EMBED_DIM]                                      = embed
-            matrix[i, EMBED_DIM:EMBED_DIM+POS_DIM]                    = pos
-            matrix[i, EMBED_DIM+POS_DIM:EMBED_DIM+POS_DIM+FREQ_DIM]  = freq
-            matrix[i, EMBED_DIM+POS_DIM+FREQ_DIM:
-                      EMBED_DIM+POS_DIM+FREQ_DIM+FLAG_DIM]             = flags
-            matrix[i, -CTX_DIM:]                                       = ctx
+            matrix[i, :EMBED_DIM] = all_embeds[i]
+            matrix[i, EMBED_DIM:EMBED_DIM+POS_DIM] = pos
+            matrix[i, EMBED_DIM+POS_DIM:EMBED_DIM+POS_DIM+FREQ_DIM] = freq
+            matrix[i, EMBED_DIM+POS_DIM+FREQ_DIM:EMBED_DIM+POS_DIM+FREQ_DIM+FLAG_DIM] = flags
+            matrix[i, -CTX_DIM:] = all_ctx[i]
 
         # ── Layer 2.1: Attention Allocation Field (AAF) ────────────
         # Pre-align tokens based on semantic relationships before dots see them.
@@ -990,56 +992,44 @@ class BaseMapper:
 
     # ── Context summary ──────────────────────────────────────────────
 
+    def _context_summary_batch(self, tokens: List[str], types: List[str],
+                               embeddings: np.ndarray) -> np.ndarray:
+        """Vectorized batch context summary."""
+        n = len(tokens)
+        ws = self.context_window
+        ctx_matrix = np.zeros((n, CTX_DIM), dtype=np.float32)
+
+        # Dim 0: Semantic cohesion (batch dot product)
+        sim_matrix = embeddings @ embeddings.T
+
+        for i in range(n):
+            left_idx = max(0, i - ws)
+            right_idx = min(n, i + ws + 1)
+            nbs = list(range(left_idx, i)) + list(range(i + 1, right_idx))
+
+            if not nbs: continue
+
+            # Dim 0: mean sim
+            ctx_matrix[i, 0] = np.clip(np.mean(sim_matrix[i, nbs]) * 0.5 + 0.5, 0.0, 1.0)
+
+            # Dim 1: balance
+            ctx_matrix[i, 1] = (i - left_idx) / len(nbs)
+
+            # Dim 2: phrase density
+            ctx_matrix[i, 2] = sum(1 for j in nbs if types[j] == "phrase") / len(nbs)
+
+            # Dim 3: vocab density
+            ctx_matrix[i, 3] = sum(1 for j in nbs if types[j] in ("word", "phrase")) / len(nbs)
+
+        return ctx_matrix
+
     def _context_summary(self, pos: int, tokens: List[str],
                           types: List[str]) -> np.ndarray:
-        """
-        4-dim context summary for the token at `pos`.
-
-        Dim 0: semantic cohesion — mean cosine similarity between this token's
-               embedding and its neighbors' embeddings (mapped from [-1,1] to [0,1]).
-               High = the token fits the local semantic neighbourhood.
-        Dim 1: left-right balance — fraction of context tokens that are to the
-               left of this token (0 = all right, 1 = all left).
-        Dim 2: phrase neighbor density — fraction of context tokens that are phrases.
-        Dim 3: vocab density — fraction of context tokens that are known words/phrases.
-
-        All dims are clipped to [0, 1].
-        """
-        n  = len(tokens)
-        ws = self.context_window
-        ctx = np.zeros(CTX_DIM, dtype=np.float32)
-
-        left_range  = range(max(0, pos - ws), pos)
-        right_range = range(pos + 1, min(n, pos + ws + 1))
-        all_nb_idx  = list(left_range) + list(right_range)
-
-        if not all_nb_idx:
-            return ctx
-
-        window = [(tokens[j], types[j]) for j in all_nb_idx]
-
-        # Dim 0: semantic cohesion via embedding cosine similarity
-        cur_embed = self._token_embedding(tokens[pos], types[pos])
-        sims = []
-        for tok, typ in window:
-            nb_embed = self._token_embedding(tok, typ)
-            # Both embeddings are unit-norm, so dot product == cosine similarity
-            sims.append(float(np.dot(cur_embed, nb_embed)))
-        mean_sim = float(np.mean(sims)) if sims else 0.0
-        ctx[0]   = float(np.clip(mean_sim * 0.5 + 0.5, 0.0, 1.0))
-
-        # Dim 1: left-right balance
-        n_left  = len(list(left_range))
-        n_right = len(list(right_range))
-        ctx[1]  = float(n_left / max(n_left + n_right, 1))
-
-        # Dim 2: phrase density
-        ctx[2] = sum(1.0 for _, t in window if t == "phrase") / len(window)
-
-        # Dim 3: known-vocab density
-        ctx[3] = sum(1.0 for _, t in window if t in ("word", "phrase")) / len(window)
-
-        return np.clip(ctx, 0.0, 1.0)
+        # Legacy fallback
+        embeds = np.zeros((len(tokens), EMBED_DIM), dtype=np.float32)
+        for i in range(len(tokens)):
+            embeds[i] = self._token_embedding(tokens[i], types[i])
+        return self._context_summary_batch(tokens, types, embeds)[pos]
 
     def fit_contrastive(self, matching_pairs: List[Tuple[str, str]],
                         mismatch_pairs: List[Tuple[str, str]],
@@ -1117,6 +1107,25 @@ class BaseMapper:
         # Compute semantic self-attention matrix
         # For efficiency, we use the base embeddings region [0:EMBED_DIM]
         bases = matrix[:, :EMBED_DIM]
+
+        # O(n^2) check: for long sequences, we use a sliding window AAF
+        if n > 256:
+            aligned = matrix.copy()
+            window = 64
+            for i in range(n):
+                start = max(0, i - window)
+                end = min(n, i + window + 1)
+
+                nbs = bases[start:end]
+                sim = nbs @ bases[i]
+
+                sim -= np.max(sim)
+                weights = np.exp(sim * 5.0)
+                weights /= weights.sum() + 1e-10
+
+                aligned[i] = (1.0 - 0.15) * matrix[i] + 0.15 * (weights @ matrix[start:end])
+            return aligned.astype(np.float32)
+
         # (n x n) similarity matrix
         sim = bases @ bases.T
 

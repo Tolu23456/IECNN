@@ -298,21 +298,16 @@ def _invert_compositional(p: np.ndarray) -> np.ndarray:
 
 def _invert_evolved(p: np.ndarray, dot_info: Dict) -> np.ndarray:
     """Evolved Inversion: uses the dot's learned W_inv matrix."""
-    # We need the actual dot object, but info only carries metadata.
-    # In a full implementation, the AIM layer would have access to the dot pool.
-    # For now, we simulate by using a deterministic hash of the dot_id.
-    dot_id = dot_info.get("dot_id", 0)
-    rng = np.random.RandomState(int(dot_id) * 31)
+    W_inv = dot_info.get("W_inv")
+    if W_inv is None:
+        # Fallback to feature inversion if W_inv not provided
+        return _invert_feature(p)
 
-    # Simulate dot-specific learned inversion
-    # (In the pipeline, we should pass the actual W_inv if available)
-    n = len(p)
-    W_inv = rng.randn(n, n).astype(np.float32) / np.sqrt(n)
-
-    out = np.tanh(W_inv @ np.real(p))
+    out = np.tanh(W_inv @ np.real(p).astype(np.float32))
     orig_norm = np.linalg.norm(p)
     out_norm = np.linalg.norm(out)
-    if out_norm > 1e-10: out = out * (orig_norm / out_norm)
+    if out_norm > 1e-10 and orig_norm > 1e-10:
+        out = out * (orig_norm / out_norm)
     return out
 
 def _invert_cross_modal(p: np.ndarray) -> np.ndarray:
@@ -382,6 +377,9 @@ class AIMLayer:
 
     def _pick_inversions(self, inv_bias: float, requested: Optional[str] = None) -> List[str]:
         """Pick inversions, prioritizing requested hypotheses."""
+        if self.max_variants <= 0:
+            return []
+
         n = max(1, round(inv_bias * self.max_variants))
         n = min(n, len(InversionType.ALL))
 

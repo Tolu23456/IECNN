@@ -22,14 +22,15 @@ void relational_pool(const float *mat, int n, int dim, float *out) {
         if (n == 1) memcpy(out, mat, dim * sizeof(float));
         return;
     }
-    int count = 0;
-    for (int i = 0; i < n; i++) {
-        for (int j = i + 1; j < n; j++) {
-            for (int d = 0; d < dim; d++) out[d] += (mat[i * dim + d] - mat[j * dim + d]);
-            count++;
+    /* Optimized O(n) relational pooling: sum_{i < j} (x_i - x_j) = sum_{k=0}^{n-1} (n - 1 - 2k) * x_k */
+    float count = (float)n * (n - 1) / 2.0f;
+    for (int k = 0; k < n; k++) {
+        float coeff = (float)(n - 1 - 2 * k);
+        for (int d = 0; d < dim; d++) {
+            out[d] += coeff * mat[k * dim + d];
         }
     }
-    for (int d = 0; d < dim; d++) out[d] /= (float)count;
+    for (int d = 0; d < dim; d++) out[d] /= (count + 1e-10f);
 }
 
 void logic_pool(const float *mat, int n, int dim, float *out) {
