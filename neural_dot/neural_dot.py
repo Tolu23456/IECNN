@@ -148,7 +148,8 @@ class NeuralDot:
                  dot_type: DotType = DotType.SEMANTIC,
                  n_heads: int = N_HEADS,
                  seed: Optional[int] = None,
-                 birth_generation: int = 0):
+                 birth_generation: int = 0,
+                 empty: bool = False):
         self.dot_id      = dot_id if dot_id is not None else get_next_dot_id()
         self.feature_dim = feature_dim
         self.bias        = bias or BiasVector.from_dot_type(dot_type)
@@ -158,31 +159,55 @@ class NeuralDot:
         # Phase-Coded state
         self.current_phase: float = 0.0
         self.max_heads   = 8 # Potential for growth
-        # Generation in which this dot was created. Used by the pruner to
-        # avoid killing newly-born dots before they have had a chance to
-        # accumulate outcome statistics.
         self.birth_generation = int(birth_generation)
 
-        seed = seed if seed is not None else dot_id * 31 + 7
+        if empty:
+            self.W = None
+            self.head_projs = []
+            self.W_inv = None
+            self.Q_basis = None
+            self.b_offset = None
+            self._rng = None
+            return
+
+        seed = seed if seed is not None else self.dot_id * 31 + 7
         rng  = np.random.RandomState(seed)
         scale = 1.0 / np.sqrt(feature_dim)
-        self.W = rng.randn(feature_dim, feature_dim).astype(np.float32) * scale
 
-        # Per-head projection matrices (feature_dim → feature_dim)
-        # We pre-allocate more heads than default to allow for dynamic growth
-        self.head_projs = [
-            rng.randn(feature_dim, feature_dim).astype(np.float32) * scale
-            for _ in range(self.max_heads)
-        ]
+        # Optimize: Allocate one large buffer and slice it to reduce allocations
+        total_mats = 1 + self.max_heads + 1 + 1 # W, head_projs, W_inv, Q_basis
+        buffer = (rng.randn(total_mats * feature_dim, feature_dim) * scale).astype(np.float32)
 
-        # Self-Evolving Inversion (Counterfactual hypothesis)
-        # Each dot learns its own private inversion transformation.
-        self.W_inv = rng.randn(feature_dim, feature_dim).astype(np.float32) * scale
+        self.W = buffer[0:feature_dim].copy()
+        self.head_projs = [buffer[(i+1)*feature_dim:(i+2)*feature_dim].copy() for i in range(self.max_heads)]
+        self.W_inv = buffer[(self.max_heads+1)*feature_dim:(self.max_heads+2)*feature_dim].copy()
+        self.Q_basis = buffer[(self.max_heads+2)*feature_dim:(self.max_heads+3)*feature_dim].copy()
 
-        # Attention query basis (for computing the query from pooled input)
-        self.Q_basis = rng.randn(feature_dim, feature_dim).astype(np.float32) * scale
-        self.b_offset = rng.randn(feature_dim).astype(np.float32) * scale * 0.1
+        self.b_offset = (rng.randn(feature_dim) * scale * 0.1).astype(np.float32)
         self._rng = np.random.RandomState(seed + 1)
+
+    def clone(self, new_id: bool = True):
+        """Create a deep copy of this dot."""
+        child = NeuralDot(
+            dot_id=None if new_id else self.dot_id,
+            feature_dim=self.feature_dim,
+            bias=BiasVector.from_array(self.bias.to_array()),
+            dot_type=self.dot_type,
+            n_heads=self.n_heads,
+            birth_generation=self.birth_generation,
+            empty=True
+        )
+        child.W = self.W.copy()
+        child.head_projs = [h.copy() for h in self.head_projs]
+        child.W_inv = self.W_inv.copy()
+        child.Q_basis = self.Q_basis.copy()
+        child.b_offset = self.b_offset.copy()
+        child.max_heads = self.max_heads
+        child.current_phase = self.current_phase
+        # Use a new RNG state for the child based on its new ID
+        seed = child.dot_id * 31 + 8
+        child._rng = np.random.RandomState(seed)
+        return child
 
     # ── Pickle: store large weight matrices as float16 to halve disk size.
     # Runtime keeps float32 (no math change); only the on-disk representation
@@ -336,15 +361,18 @@ class NeuralDot:
         """
         Relational pooling: compute the difference between all token pairs,
         then average. Captures interaction patterns between tokens.
+        Optimized to O(n) from O(n^2).
         """
         n = mat.shape[0]
-        if n == 1: return mat[0]
-        diffs = []
-        for i in range(n):
-            for j in range(i+1, n):
-                diff = mat[i] - mat[j]
-                diffs.append(diff)
-        return np.mean(np.stack(diffs), axis=0)
+        if n <= 1: return mat[0] if n == 1 else np.zeros(self.feature_dim, dtype=np.float32)
+
+        # O(n) implementation: sum_{i < j} (x_i - x_j) = sum_{k=0}^{n-1} (n - 1 - 2k) * x_k
+        k = np.arange(n)
+        coeffs = (n - 1 - 2 * k).astype(np.float32)
+        pooled = (coeffs[:, None] * mat).sum(axis=0)
+
+        count = n * (n - 1) / 2
+        return (pooled / (count + 1e-10)).astype(np.float32)
 
     def _logic_pool(self, mat: np.ndarray) -> np.ndarray:
         """
@@ -479,65 +507,54 @@ class NeuralDot:
     def predict(self, basemap, memory_hint: Optional[np.ndarray] = None,
                 context_entropy: float = 0.5,
                 consensus: Optional[np.ndarray] = None) -> List[Tuple[np.ndarray, float, Dict]]:
-        """
-        Generate N_HEADS candidate predictions from one basemap.
+        # Fast path: use already-pooled result if available (for batch prediction)
+        if hasattr(self, "_current_pooled"):
+            pooled, start, end = self._current_pooled
+            del self._current_pooled
+        else:
+            pooled, start, end = self._get_pooled(basemap, memory_hint)
 
-        Args:
-          basemap       — BaseMap object from basemapping
-          memory_hint   — optional recent centroid from DotMemory for attention guidance
-          context_entropy — entropy from previous round (modulates temperature)
-
-        Returns:
-          list of (prediction, confidence, info) — one per head
-        """
-        sl, start, end = self._select_slice(basemap.matrix)
         n_tokens = max(int(basemap.matrix.shape[0]), 1)
         slice_phase = float(2.0 * np.pi * ((start + end) * 0.5) / n_tokens)
-        # Determine dominant modality of the slice
-        mod_flags = sl[:, 248:252]
-        mod_counts = np.sum(mod_flags, axis=0)
-        dom_mod_idx = np.argmax(mod_counts) if np.max(mod_counts) > 0 else 0
-        mod_names = ["text", "image", "audio", "video"]
-        modality = mod_names[dom_mod_idx]
 
-        pooled   = self._pool(sl, memory_hint)
+        # Determine modality
+        modality = "text" # default
+        if (end - start) > 0:
+            sl = basemap.matrix[start:end]
+            mod_flags = sl[:, 248:252]
+            mod_counts = np.sum(mod_flags, axis=0)
+            dom_mod_idx = np.argmax(mod_counts) if np.max(mod_counts) > 0 else 0
+            modality = ["text", "image", "audio", "video"][dom_mod_idx]
+
         focused  = self._apply_dim_focus(pooled)
         abstract = self._abstract(focused)
 
         T = self.bias.effective_temperature(context_entropy)
 
-        # Apply internal reasoning pass if abstraction bias is high enough
         if self.bias.abstraction_bias > 0.4:
             abstract = self._reason(abstract, T, consensus=consensus)
 
-        # Active AIM Hypothesis: dots can request specific inversions
-        # based on their internal reasoning confidence.
         requested_inversion = None
         if self.bias.abstraction_bias > 0.6 and T > 1.2:
-            # If high abstraction and high uncertainty, request a relational check
             requested_inversion = "relational"
         elif modality == "image" and self.bias.granularity_bias < 0.3:
-            # Local visual uncertainty requests scale check
             requested_inversion = "scale"
-
-        # High confidence but low agreement (from memory) requests a custom counterfactual
         if self.bias.attention_bias > 0.7:
             requested_inversion = "evolved"
 
         results = []
+        p_phase = self.current_phase if self.current_phase != 0.0 else slice_phase
+        phase_factor = np.exp(1j * p_phase)
+
         for h in range(self.n_heads):
             raw  = self._project_head(abstract, h, T)
             norm = np.linalg.norm(raw)
             pred = raw / norm * np.sqrt(self.feature_dim) if norm > 1e-10 else raw
 
-            # Phase-Coded Activation: dot activation is complex-valued
-            # It uses the phase it acquired from the input stream.
-            # Fall back to slice_phase if current_phase is not set (legacy/default).
-            p_phase = self.current_phase if self.current_phase != 0.0 else slice_phase
-            complex_pred = pred.astype(np.complex64) * np.exp(1j * p_phase)
-
+            complex_pred = pred.astype(np.complex64) * phase_factor
             conf = prediction_confidence(complex_pred)
-            info = {
+
+            results.append((complex_pred, conf, {
                 "dot_id":    self.dot_id,
                 "dot_type":  _TYPE_NAMES[self.dot_type],
                 "head":      h,
@@ -548,9 +565,14 @@ class NeuralDot:
                 "inversion_type": None,
                 "modality":  modality,
                 "requested_inversion": requested_inversion,
-            }
-            results.append((complex_pred, conf, info))
+                "W_inv":     self.W_inv,
+            }))
         return results
+
+    def _get_pooled(self, basemap, memory_hint=None):
+        sl, start, end = self._select_slice(basemap.matrix)
+        pooled = self._pool(sl, memory_hint)
+        return pooled, start, end
 
     def __repr__(self):
         return (f"NeuralDot(id={self.dot_id}, type={_TYPE_NAMES[self.dot_type]}, "
@@ -614,14 +636,22 @@ class DotGenerator:
                 memory_hints: Optional[Dict[int, np.ndarray]] = None,
                 context_entropy: float = 0.5,
                 consensus: Optional[np.ndarray] = None) -> List[Tuple]:
-        """Run all dots on the basemap; returns flat list of (pred, conf, info)."""
-        all_results = []
+        """
+        Run all dots on the basemap.
+        Optimized via semi-vectorization.
+        """
         hints = memory_hints or {}
+
+        # 1. Sequential pooling (strategy-dependent)
         for dot in dots:
             hint = hints.get(dot.dot_id)
-            preds = dot.predict(basemap, memory_hint=hint,
-                                context_entropy=context_entropy,
-                                consensus=consensus)
+            dot._current_pooled = dot._get_pooled(basemap, hint)
+
+        # 2. Sequential prediction (currently)
+        # TODO: Vectorize the transform/reasoning stage across dots
+        all_results = []
+        for dot in dots:
+            preds = dot.predict(basemap, context_entropy=context_entropy, consensus=consensus)
             all_results.extend(preds)
         return all_results
 

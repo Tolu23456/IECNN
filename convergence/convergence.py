@@ -209,10 +209,31 @@ class ConvergenceLayer:
                        infos: List[Dict], threshold: Optional[float] = None) -> List[MicroCluster]:
         """
         Sequential greedy micro-clustering.
-        A prediction joins an existing micro-cluster if its similarity to
-        the cluster centroid exceeds micro_threshold.
+        C-accelerated for performance.
         """
         if threshold is None: threshold = self.micro_thresh
+        n = len(preds)
+        if n == 0: return []
+
+        lib = _load_lib()
+        if lib and hasattr(lib, "greedy_cluster"):
+            stk = np.ascontiguousarray(np.real(np.stack(preds)), np.float32)
+            dim = stk.shape[1]
+            assign = np.zeros(n, dtype=np.int32)
+
+            num_c = lib.greedy_cluster(
+                stk.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+                ctypes.c_int(n), ctypes.c_int(dim),
+                ctypes.c_float(self.alpha), ctypes.c_float(threshold),
+                assign.ctypes.data_as(ctypes.POINTER(ctypes.c_int))
+            )
+
+            clusters = [MicroCluster(i) for i in range(num_c)]
+            for i in range(n):
+                clusters[assign[i]].add(preds[i], confs[i], infos[i])
+            return clusters
+
+        # Fallback
         clusters: List[MicroCluster] = []
         centroids: List[np.ndarray]  = []
 
@@ -232,6 +253,30 @@ class ConvergenceLayer:
 
     def _macro_cluster(self, micros):
         if not micros: return []
+        n = len(micros)
+        centroids_list = [mc.centroid for mc in micros if mc.centroid is not None]
+        if not centroids_list: return []
+
+        lib = _load_lib()
+        if lib and hasattr(lib, "greedy_cluster"):
+            stk = np.ascontiguousarray(np.real(np.stack(centroids_list)), np.float32)
+            n_valid = len(centroids_list)
+            dim = stk.shape[1]
+            assign = np.zeros(n_valid, dtype=np.int32)
+
+            num_c = lib.greedy_cluster(
+                stk.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+                ctypes.c_int(n_valid), ctypes.c_int(dim),
+                ctypes.c_float(self.alpha), ctypes.c_float(self.macro_thresh),
+                assign.ctypes.data_as(ctypes.POINTER(ctypes.c_int))
+            )
+
+            macro_list = [Cluster(i) for i in range(num_c)]
+            for i, mc in enumerate(micros):
+                if mc.centroid is not None:
+                    macro_list[assign[i]].add_micro(mc)
+            return macro_list
+
         macro_list = []
         macro_centroids = []
         for mc in micros:

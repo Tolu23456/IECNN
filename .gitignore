@@ -25,3 +25,6 @@ corpus.txt
 .replit
 replit.md
 uv.lock
+*.txt
+*.pkl
+*.so

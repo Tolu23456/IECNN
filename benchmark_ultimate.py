@@ -24,9 +24,8 @@ class GPT2Superior:
         return outputs.last_hidden_state[0, -1, :].cpu().numpy().flatten()
 
 def run_ultimate_sota_benchmark():
-    print("╔══════════════════════════════════════════════════════════════════╗")
-    print("║            IECNN ULTIMATE SOTA NOISY 100K BENCHMARK             ║")
-    ╚══════════════════════════════════════════════════════════════════╝"))
+    print("")
+    print("            IECNN ULTIMATE SOTA NOISY 100K BENCHMARK             ")
 
     # 1. Scaling Fit
     print("\n[STEP 1] Training IECNN on 100k Extreme Noisy Corpus...")

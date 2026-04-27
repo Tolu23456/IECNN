@@ -35,10 +35,15 @@ float complex_norm(const float *a, int n, int is_complex) {
 }
 
 float cosine_sim(const float *a, const float *b, int n) {
-    /* Auto-detect complex by context? No, formulas.py handles it now.
-       But for backward compatibility with C-calls, we assume real if called directly. */
     float dot = 0.0f, na = 0.0f, nb = 0.0f;
-    for (int i = 0; i < n; i++) {
+    /* Unrolled loop for speed */
+    int i = 0;
+    for (; i <= n - 4; i += 4) {
+        dot += a[i] * b[i] + a[i+1] * b[i+1] + a[i+2] * b[i+2] + a[i+3] * b[i+3];
+        na  += a[i] * a[i] + a[i+1] * a[i+1] + a[i+2] * a[i+2] + a[i+3] * a[i+3];
+        nb  += b[i] * b[i] + b[i+1] * b[i+1] + b[i+2] * b[i+2] + b[i+3] * b[i+3];
+    }
+    for (; i < n; i++) {
         dot += a[i] * b[i];
         na  += a[i] * a[i];
         nb  += b[i] * b[i];
@@ -49,7 +54,13 @@ float cosine_sim(const float *a, const float *b, int n) {
 
 float agreement_str(const float *a, const float *b, int n) {
     float dot = 0.0f, na = 0.0f, nb = 0.0f;
-    for (int i = 0; i < n; i++) {
+    int i = 0;
+    for (; i <= n - 4; i += 4) {
+        dot += a[i] * b[i] + a[i+1] * b[i+1] + a[i+2] * b[i+2] + a[i+3] * b[i+3];
+        na  += a[i] * a[i] + a[i+1] * a[i+1] + a[i+2] * a[i+2] + a[i+3] * a[i+3];
+        nb  += b[i] * b[i] + b[i+1] * b[i+1] + b[i+2] * b[i+2] + b[i+3] * b[i+3];
+    }
+    for (; i < n; i++) {
         dot += a[i] * b[i];
         na  += a[i] * a[i];
         nb  += b[i] * b[i];

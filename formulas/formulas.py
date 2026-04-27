@@ -210,32 +210,53 @@ def phase_aware_similarity(a: np.ndarray, b: np.ndarray,
 
 def convergence_score(predictions: List[np.ndarray], confidences: List[float],
                       alpha: float = 0.7) -> float:
-    """C(k) = (1/|k|²) Σ S(p_i, p_j) · mean_confidence"""
+    """
+    C(k) = (1/|k|²) Σ S(p_i, p_j) · mean_confidence
+    Optimized for batch performance (O(N^2) but with BLAS/vectorization).
+    """
     n = len(predictions)
     if n == 0: return 0.0
     if n == 1: return float(confidences[0]) if confidences else 0.5
 
-    # Complex-aware pure python path to avoid C-acceleration casting warnings
-    is_complex = any(np.iscomplexobj(p) for p in predictions)
-    if is_complex:
-        total = 0.0
-        for i in range(n):
-            for j in range(n):
-                total += similarity_score(predictions[i], predictions[j], alpha)
-        return (total / (n * n)) * float(np.mean(confidences))
+    # Use vectorized implementation for both real and complex
+    stk = np.stack(predictions)
+    if np.iscomplexobj(stk):
+        # 1. Cosine similarity part: |<p_i, p_j>| / (||p_i||*||p_j||)
+        norms = np.linalg.norm(stk, axis=1) + 1e-10
+        # Dot products: (n x d) @ (d x n) -> (n x n)
+        dots = stk @ stk.conj().T
+        cos_sims = np.abs(dots) / np.outer(norms, norms)
 
-    lib  = _load_lib()
-    # Explicitly take real part if accidentally passed complex to C path
-    stk  = np.ascontiguousarray(np.real(np.stack(predictions)), np.float32)
-    cfx  = np.ascontiguousarray(confidences, np.float32)
-    dim  = stk.shape[1]
-    if lib:
-        fs, _s = _fp(stk); fc, _c = _fp(cfx)
-        return float(lib.convergence_score(fs, fc, ctypes.c_int(n),
-                                           ctypes.c_int(dim), ctypes.c_float(alpha)))
-    total = sum(similarity_score(predictions[i], predictions[j], alpha)
-                for i in range(n) for j in range(n))
-    return (total / (n * n)) * float(np.mean(confidences))
+        # 2. Agreement strength part
+        # A(p_i, p_j) = tanh((||p_i||+||p_j||)/2sqrt(d)) * (Re(p_i.conj()*p_j)/(||p_i||*||p_j||)+1)/2
+        d = stk.shape[1]
+        avg_norms = (norms[:, None] + norms[None, :]) / 2.0
+        tanh_term = np.tanh(avg_norms / np.sqrt(d))
+        norm_dots = np.real(dots) / np.outer(norms, norms)
+        agreement = tanh_term * (norm_dots + 1.0) / 2.0
+
+        sim_matrix = alpha * cos_sims + (1.0 - alpha) * agreement
+        return float(np.mean(sim_matrix)) * float(np.mean(confidences))
+    else:
+        lib = _load_lib()
+        if lib:
+            stk_c = np.ascontiguousarray(stk, np.float32)
+            cfx = np.ascontiguousarray(confidences, np.float32)
+            fs, _s = _fp(stk_c); fc, _c = _fp(cfx)
+            return float(lib.convergence_score(fs, fc, ctypes.c_int(n),
+                                               ctypes.c_int(stk.shape[1]), ctypes.c_float(alpha)))
+
+        norms = np.linalg.norm(stk, axis=1) + 1e-10
+        dots = stk @ stk.T
+        cos_sims = dots / np.outer(norms, norms)
+
+        d = stk.shape[1]
+        avg_norms = (norms[:, None] + norms[None, :]) / 2.0
+        tanh_term = np.tanh(avg_norms / np.sqrt(d))
+        agreement = tanh_term * (cos_sims + 1.0) / 2.0
+
+        sim_matrix = alpha * cos_sims + (1.0 - alpha) * agreement
+        return float(np.mean(sim_matrix)) * float(np.mean(confidences))
 
 
 # ── Formula 6: Prediction Confidence ────────────────────────────────
