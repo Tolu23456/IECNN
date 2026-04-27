@@ -66,6 +66,27 @@ class IECNNDecoder:
 
         return None
 
+    def decode_single_token(self, latent: np.ndarray) -> str:
+        """
+        Map a single 256-dim latent vector back to the closest vocabulary token.
+        """
+        if not self.mapper.is_fitted or not self.mapper._base_vocab:
+            return "[unknown]"
+
+        # Ensure we take the real part for decoding as bases are stored in R^d
+        target_base = np.real(latent[:EMBED_DIM]).astype(np.float32)
+        best_word = "[unknown]"
+        best_sim = -1.0
+
+        for word, emb in self.mapper._base_vocab.items():
+            if " " in word: continue # Skip phrases for single-token decoding
+            sim = self._score_emb(emb, target_base)
+            if sim > best_sim:
+                best_sim = sim
+                best_word = word
+
+        return best_word
+
     def _score_emb(self, emb: np.ndarray, target: np.ndarray) -> float:
         """Fast cosine similarity between two vectors (no full pipeline)."""
         a_norm = float(np.linalg.norm(emb))

@@ -283,13 +283,15 @@ class NeuralDot:
             results.append((pred, prediction_confidence(pred), {"dot_id": self.dot_id, "dot_type": _TYPE_NAMES[self.dot_type], "source": "original"}))
         return results
 
-    def _select_slice(self, matrix: np.ndarray):
+    def _select_slice(self, matrix: np.ndarray, causal: bool = False):
         """
         Select a contiguous slice of the basemap matrix.
 
         The slice length is controlled by granularity_bias:
           - high granularity → short focused slice (fine detail)
           - low  granularity → long slice (broad context)
+
+        If `causal` is True, biases selection toward the end of the matrix.
 
         Returns (slice, start_idx, end_idx).
         """
@@ -298,7 +300,16 @@ class NeuralDot:
         patch_size = min(patch_size, n)
         if n <= 1:
             return matrix, 0, n
-        offset = int(self._rng.uniform(0, n - patch_size + 1))
+
+        if causal:
+            # Bias toward the end: ensure end index is closer to n
+            # Weight the offset choice toward (n - patch_size)
+            # Use a beta distribution or similar to bias toward 1.0
+            bias_factor = self._rng.beta(2.0, 1.0) # Skewed toward 1.0
+            offset = int(bias_factor * (n - patch_size))
+        else:
+            offset = int(self._rng.uniform(0, n - patch_size + 1))
+
         start  = max(0, min(offset, n - 1))
         end    = max(start + 1, min(start + patch_size, n))
         return matrix[start:end], start, end
@@ -506,13 +517,14 @@ class NeuralDot:
 
     def predict(self, basemap, memory_hint: Optional[np.ndarray] = None,
                 context_entropy: float = 0.5,
-                consensus: Optional[np.ndarray] = None) -> List[Tuple[np.ndarray, float, Dict]]:
+                consensus: Optional[np.ndarray] = None,
+                causal: bool = False) -> List[Tuple[np.ndarray, float, Dict]]:
         # Fast path: use already-pooled result if available (for batch prediction)
         if hasattr(self, "_current_pooled"):
             pooled, start, end = self._current_pooled
             del self._current_pooled
         else:
-            pooled, start, end = self._get_pooled(basemap, memory_hint)
+            pooled, start, end = self._get_pooled(basemap, memory_hint, causal=causal)
 
         n_tokens = max(int(basemap.matrix.shape[0]), 1)
         slice_phase = float(2.0 * np.pi * ((start + end) * 0.5) / n_tokens)
@@ -546,6 +558,9 @@ class NeuralDot:
         p_phase = self.current_phase if self.current_phase != 0.0 else slice_phase
         phase_factor = np.exp(1j * p_phase)
 
+        # Target index for causal prediction is the token immediately following the slice
+        target_idx = end if end < n_tokens else None
+
         for h in range(self.n_heads):
             raw  = self._project_head(abstract, h, T)
             norm = np.linalg.norm(raw)
@@ -559,6 +574,7 @@ class NeuralDot:
                 "dot_type":  _TYPE_NAMES[self.dot_type],
                 "head":      h,
                 "slice":     (start, end),
+                "target_idx": target_idx,
                 "phase":     p_phase,
                 "bias":      self.bias,
                 "source":    "original",
@@ -569,8 +585,8 @@ class NeuralDot:
             }))
         return results
 
-    def _get_pooled(self, basemap, memory_hint=None):
-        sl, start, end = self._select_slice(basemap.matrix)
+    def _get_pooled(self, basemap, memory_hint=None, causal: bool = False):
+        sl, start, end = self._select_slice(basemap.matrix, causal=causal)
         pooled = self._pool(sl, memory_hint)
         return pooled, start, end
 
@@ -635,7 +651,8 @@ class DotGenerator:
     def run_all(self, basemap, dots: List[NeuralDot],
                 memory_hints: Optional[Dict[int, np.ndarray]] = None,
                 context_entropy: float = 0.5,
-                consensus: Optional[np.ndarray] = None) -> List[Tuple]:
+                consensus: Optional[np.ndarray] = None,
+                causal: bool = False) -> List[Tuple]:
         """
         Run all dots on the basemap.
         Optimized via semi-vectorization.
@@ -645,13 +662,13 @@ class DotGenerator:
         # 1. Sequential pooling (strategy-dependent)
         for dot in dots:
             hint = hints.get(dot.dot_id)
-            dot._current_pooled = dot._get_pooled(basemap, hint)
+            dot._current_pooled = dot._get_pooled(basemap, hint, causal=causal)
 
         # 2. Sequential prediction (currently)
         # TODO: Vectorize the transform/reasoning stage across dots
         all_results = []
         for dot in dots:
-            preds = dot.predict(basemap, context_entropy=context_entropy, consensus=consensus)
+            preds = dot.predict(basemap, context_entropy=context_entropy, consensus=consensus, causal=causal)
             all_results.extend(preds)
         return all_results
 

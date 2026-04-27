@@ -449,7 +449,7 @@ class IECNN:
 
     def run(self, input_data: Any, verbose: bool = False,
             update_brain: bool = False, mode: str = "text",
-            mask_ratio: float = 0.0) -> IECNNResult:
+            mask_ratio: float = 0.0, causal: bool = False) -> IECNNResult:
         """
         Run the full 10-layer IECNN pipeline.
 
@@ -459,6 +459,7 @@ class IECNN:
           update_brain — if True, the text enriches the global BaseMapping knowledge
           mode         — 'text' | 'image' | 'audio' | 'video'
           mask_ratio   — fraction of BaseMap rows to 'mask' for MBM Pretraining (v4 SOTA)
+          causal       — if True, dots focus on the end of the input (for prediction)
         """
         if update_brain and mode == "text":
             self.base_mapper.fit([input_data])
@@ -530,6 +531,7 @@ class IECNN:
                 memory_hints=memory_hints,
                 context_entropy=cur_entropy,
                 consensus=consensus,
+                causal=causal,
             )
 
             # ── Layer 5: AIM (9 inversions in parallel) ───────────────
@@ -771,6 +773,51 @@ class IECNN:
             if verbose: print(f"[IECNN] Processing {len(sentences)} sentences hierarchically...")
             return self.run_hierarchical(sentences, verbose=verbose)
         return self.run(text, verbose=verbose).output
+
+    def predict_next_token_vector(self, text: str, verbose: bool = False) -> np.ndarray:
+        """
+        Specialized pass for autoregressive next-token prediction.
+        Dots are biased to focus on the end of the sequence.
+        """
+        res = self.run(text, verbose=verbose, causal=True)
+        return res.output
+
+    def generate_autoregressive(self, prompt: str, max_tokens: int = 10,
+                                verbose: bool = False) -> str:
+        """
+        Generate text token-by-token using the autoregressive loop.
+        """
+        from decoding.decoder import IECNNDecoder
+        decoder = IECNNDecoder(self)
+        current_text = prompt
+        generated = []
+
+        for _ in range(max_tokens):
+            latent = self.predict_next_token_vector(current_text, verbose=verbose)
+            next_token = decoder.decode_single_token(latent)
+            if next_token == "[unknown]" or next_token == ".":
+                if next_token == ".":
+                    generated.append(next_token)
+                break
+            generated.append(next_token)
+            current_text += " " + next_token
+
+        return " ".join(generated)
+
+    def chat(self, message: str, history: List[Tuple[str, str]] = None,
+             max_tokens: int = 15, verbose: bool = False) -> str:
+        """
+        Conversational interface for IECNN.
+        Fuses history and current message into a single context for prediction.
+        """
+        context = ""
+        if history:
+            for user, bot in history[-3:]: # Last 3 turns for context
+                context += f"user {user} bot {bot} "
+        context += f"user {message} bot"
+
+        response = self.generate_autoregressive(context, max_tokens=max_tokens, verbose=verbose)
+        return response
 
     def run_hierarchical(self, sentences: List[str], verbose: bool = False) -> np.ndarray:
         """
@@ -1046,11 +1093,18 @@ class IECNN:
                 sl_start, sl_end = info.get("slice", (0, 0))
                 ctx = basemap.matrix[sl_start:sl_end]
 
+                # Causal Target: actual next token embedding if available
+                target_idx = info.get("target_idx")
+                causal_target = None
+                if target_idx is not None and target_idx < len(basemap.matrix):
+                    causal_target = basemap.matrix[target_idx]
+
                 self.dot_memory.record(dot_id, pred, in_winner,
                                        phase=info.get("phase"),
                                        initial_agreement=avg_conf,
                                        input_context=ctx,
-                                       ground_truth=ground_truth)
+                                       ground_truth=ground_truth,
+                                       causal_target=causal_target)
 
     def _learn_bias(self, surviving: List[Cluster], candidates: List[Tuple],
                     assignments: List[int], basemap: BaseMap):

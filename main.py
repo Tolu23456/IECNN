@@ -9,6 +9,7 @@ Usage:
   python main.py encode "text"          # encode text → 256-dim latent vector
   python main.py sim "text A" "text B"  # similarity between two texts
   python main.py compare "a" "b" "c"    # n×n similarity table
+  python main.py chat                   # interactive chatbot mode
   python main.py memory                 # show dot memory and evolution state
   python main.py prune [--dry-run]      # compact the brain (drop dead dots + orphans)
                        [--min-outcomes N] [--min-age N]
@@ -27,6 +28,7 @@ Usage:
 
   Interactive commands (available in interactive mode):
     generate <prompt>   encode prompt then decode output
+    chat                enter conversational chatbot mode
     train <filepath>    train on a text file
     sim A | B           pairwise similarity
     encode <text>       encode text and show vector summary
@@ -299,6 +301,31 @@ def cmd_generate_oneshot(prompt: str):
     model.save_brain()
 
 
+def cmd_chat(model=None):
+    _build_c()
+    if model is None: model = _make_model()
+    print(f"\n{BAR}")
+    print("  IECNN Chatbot Mode (Autoregressive Token-by-Token)")
+    print("  Type 'exit' to return to main menu.")
+    print(BAR)
+    history = []
+    while True:
+        try:
+            msg = input("\n  User: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            break
+        if msg.lower() in ("exit", "quit", "q"):
+            break
+        if not msg:
+            continue
+
+        print("  Bot: ", end="", flush=True)
+        response = model.chat(msg, history=history, verbose=False)
+        print(response)
+        history.append((msg, response))
+        model.save_brain()
+
+
 def _interactive_loop(model):
     """Quiet REPL: nothing happens until the user types something."""
     from formulas.formulas import similarity_score
@@ -348,6 +375,8 @@ def _interactive_loop(model):
             out = model.generate(prompt)
             print(f"\r  Output: {out}            ")
             model.save_brain(); continue
+        if low == "chat":
+            cmd_chat(model); continue
         if low.startswith("encode "):
             text = user[7:].strip()
             if not text: print("  Usage: encode <text>"); continue
@@ -462,6 +491,8 @@ if __name__ == "__main__":
             print("Usage: python main.py sim 'text A' 'text B'")
     elif args[0] == "compare" and len(args) >= 3:
         cmd_compare(args[1:])
+    elif args[0] == "chat":
+        cmd_chat()
     elif args[0] == "train" and len(args) >= 2:
         # python main.py train <file> [--limit N] [--evolve] [--prune-every N]
         filepath = args[1]

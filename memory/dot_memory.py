@@ -98,7 +98,8 @@ class DotMemory:
     def record(self, dot_id: int, prediction: np.ndarray, in_winner: bool,
                phase: Optional[float] = None, initial_agreement: float = 0.0,
                input_context: Optional[np.ndarray] = None,
-               ground_truth: Optional[np.ndarray] = None):
+               ground_truth: Optional[np.ndarray] = None,
+               causal_target: Optional[np.ndarray] = None):
         """Record whether a dot's prediction ended in the winning cluster.
 
         If `phase` (radians) is provided, also accumulate it into the dot's
@@ -107,10 +108,25 @@ class DotMemory:
 
         `initial_agreement` is used to calculate 'Surprise'. If agreement was low
         but the dot won, it discovered something non-obvious (Causal Discovery).
+
+        `causal_target` is the actual next token embedding. If provided,
+        it contributes to a 'Causal Accuracy' signal for the dot.
         """
         self._ensure_id(dot_id)
 
         self._total_counts[dot_id] += 1.0
+
+        # Causal Accuracy (Next-Token Prediction)
+        if causal_target is not None:
+            from formulas.formulas import similarity_score
+            # We check how well the dot predicted the ACTUAL next token
+            acc = similarity_score(prediction, causal_target, alpha=0.8)
+            # EMA update of causal success
+            alpha_c = 0.1
+            # We use success_counts but scaled by causal accuracy if it's predictive
+            if acc > 0.4:
+                self._success_counts[dot_id] += acc
+
         if in_winner:
             self._success_counts[dot_id] += 1.0
 
@@ -373,6 +389,7 @@ class DotMemory:
                       self._windows, self._var_stats,
                       self._phase_acc, self._surprise_history,
                       self._exemplars, self._semantic_grounding):
+            # Convert keys to int for consistent comparison
             for did in list(store.keys()):
                 if int(did) not in keep:
                     del store[did]
