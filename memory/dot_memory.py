@@ -228,26 +228,38 @@ class DotMemory:
 
     def episodic_hint(self, dot_id: int, current_context: np.ndarray, alpha: float = 0.7) -> Optional[np.ndarray]:
         """
-        Retrieve a prediction 'hint' from episodic memory (v4 SOTA).
-        Finds the exemplar whose input context best matches the current one.
+        Active Episodic Priming (v5 SOTA):
+        Retrieve a prediction 'hint' using similarity-weighted exemplar retrieval.
+        Instead of just the best match, it blends multiple high-confidence exemplars.
         """
         if dot_id not in self._exemplars or not self._exemplars[dot_id]:
             return None
-
-        best_sim = -1.0
-        best_pred = None
 
         # Ensure context is averaged if multi-token
         ctx_vec = np.mean(current_context, axis=0) if current_context.ndim > 1 else current_context
         from formulas.formulas import similarity_score
 
+        scored_exemplars = []
         for ex_ctx, ex_pred, weight in self._exemplars[dot_id]:
             sim = similarity_score(ctx_vec, ex_ctx, alpha)
-            if sim > best_sim:
-                best_sim = sim
-                best_pred = ex_pred
+            if sim > 0.4:
+                scored_exemplars.append((sim, ex_pred))
 
-        return best_pred if best_sim > 0.4 else None
+        if not scored_exemplars:
+            return None
+
+        # Similarity-weighted blending of episodic memories
+        scored_exemplars.sort(key=lambda x: -x[0])
+        top_k = scored_exemplars[:3]
+
+        total_sim = sum(s for s, _ in top_k)
+        if total_sim < 1e-10: return top_k[0][1]
+
+        blended_hint = np.zeros_like(top_k[0][1])
+        for sim, pred in top_k:
+            blended_hint += (sim / total_sim) * pred
+
+        return blended_hint
 
     def recent_centroid(self, dot_id: int) -> Optional[np.ndarray]:
         """Return the mean of the dot's recent predictions as a guidance signal."""

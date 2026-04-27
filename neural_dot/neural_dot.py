@@ -97,16 +97,18 @@ def get_next_dot_id():
 
 class BiasVector:
     def __init__(self, attention_bias=0.5, granularity_bias=0.5,
-                 abstraction_bias=0.5, inversion_bias=0.3, sampling_temperature=1.0):
+                 abstraction_bias=0.5, inversion_bias=0.3, sampling_temperature=1.0,
+                 reasoning_depth=0.2):
         self.attention_bias = float(np.clip(attention_bias, 0.0, 1.0))
         self.granularity_bias = float(np.clip(granularity_bias, 0.0, 1.0))
         self.abstraction_bias = float(np.clip(abstraction_bias, 0.0, 1.0))
         self.inversion_bias = float(np.clip(inversion_bias, 0.0, 1.0))
         self.sampling_temperature = float(max(sampling_temperature, 1e-6))
+        self.reasoning_depth = float(np.clip(reasoning_depth, 0.0, 1.0))
 
     def to_array(self):
         return np.array([self.attention_bias, self.granularity_bias, self.abstraction_bias,
-                         self.inversion_bias, self.sampling_temperature], dtype=np.float32)
+                         self.inversion_bias, self.sampling_temperature, self.reasoning_depth], dtype=np.float32)
 
     @classmethod
     def from_array(cls, arr):
@@ -114,7 +116,9 @@ class BiasVector:
 
     @classmethod
     def from_dot_type(cls, dot_type, rng=None):
-        preset = _TYPE_BIAS_PRESETS[dot_type]
+        preset = list(_TYPE_BIAS_PRESETS[dot_type])
+        if len(preset) < 6:
+            preset.append(0.2) # Default depth
         if rng:
             noise = rng.randn(len(preset)).astype(np.float32) * 0.05
             arr = np.clip(np.array(preset, np.float32) + noise, 0.01, 1.99)
@@ -491,26 +495,35 @@ class NeuralDot:
     def _reason(self, v: np.ndarray, temperature: float,
                 consensus: Optional[np.ndarray] = None) -> np.ndarray:
         """
-        Internal Reasoning (Inner Monologue):
-        Perform a micro-iteration internally to refine the vector.
-        Incorporates 'Cognitive Peer Pressure' if a consensus hint is available.
+        Recursive Internal Reasoning (Inner Monologue):
+        Deepened simulation where the dot explores its own predictions
+        using its learnable reasoning_depth.
         """
         refined = v
-        # Perform 2 micro-steps of iterative refinement
-        for _ in range(2):
-            # Transform and gate
+        # Number of micro-steps scaled by learnable reasoning_depth (max 5)
+        steps = max(1, int(self.bias.reasoning_depth * 5))
+
+        for _ in range(steps):
+            # 1. Self-Projection: What does the dot 'think' of its current state?
             delta = np.tanh(self.W @ refined + self.b_offset)
 
-            # Cognitive Peer Pressure: nudge toward hazy global summary
+            # 2. Cognitive Peer Pressure: Integration of global context
             if consensus is not None:
-                # The dot self-corrects based on its attention bias
-                # (high attention dots resist peer pressure more)
+                # 'Cognitive Stubbornness': high attention dots ignore the crowd
                 pressure = 0.15 * (1.0 - self.bias.attention_bias)
+                # Complex-aware blend if consensus carries phase
                 refined = (1.0 - pressure) * refined + pressure * consensus
 
-            # Add small noise per step based on temperature
+            # 3. Dynamic Gating: Abstraction bias controls the rate of change
+            gate = 0.2 + 0.3 * self.bias.abstraction_bias
             noise = self._rng.randn(len(v)).astype(np.float32) * temperature * 0.02
-            refined = 0.8 * refined + 0.2 * delta + noise
+            refined = (1.0 - gate) * refined + gate * delta + noise
+
+            # 4. Normalization to maintain representational stability
+            n_val = np.linalg.norm(refined)
+            if n_val > 1e-10:
+                refined = refined / n_val * np.sqrt(self.feature_dim)
+
         return refined
 
     # ── Main predict ──────────────────────────────────────────────────

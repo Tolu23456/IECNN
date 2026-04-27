@@ -139,6 +139,7 @@ class IECNN:
         self.self_model = SelfModel(seed=seed)
         self.world_graph = WorldGraph(feature_dim=feature_dim)
         self.context_map: Optional[np.ndarray] = None # Rolling document context
+        self.narrative_base: Optional[np.ndarray] = None # Global Narrative Base for Chat
 
         # Dot pool (generated lazily on first use; evolved across calls)
         self._dots: Optional[list] = None
@@ -604,15 +605,24 @@ class IECNN:
             # ── Update state for next round ───────────────────────────
             refined = self.iter_ctrl.advance(surv, final_out)
 
-            # ── Adaptive exploration (F16-driven stagnation response) ────
-            # When EUG is near-zero the system is in a flat basin: inject
-            # noise into the refined vector AND raise context_entropy so
-            # dots explore broader temperature / inversion settings next round.
+            # ── Aggressive Breakthrough System (Stagnation Response) ────
+            # When EUG is near-zero or energy is high, the system is stuck.
+            # We trigger breakthrough actions to force a representational shift.
             eug_val = self.iter_ctrl.current_eug()
-            if abs(eug_val) < 0.01:
-                noise   = self._rng.randn(len(refined)).astype(np.float32) * 0.05
+            energy  = self.iter_ctrl.current_energy()
+
+            if abs(eug_val) < 0.005 or energy > 0.8:
+                # 1. Breakthrough Noise: much stronger than standard exploration
+                breakthrough_std = 0.15 if energy > 0.9 else 0.08
+                noise = self._rng.randn(len(refined)).astype(np.float32) * breakthrough_std
                 refined = refined + noise
-                cur_entropy = min(1.0, cur_entropy + 0.30)
+
+                # 2. Temperature Spike: Force dots to explore wide variants
+                cur_entropy = min(1.0, cur_entropy + 0.50)
+
+                # 3. Structural Nudge: Randomly flip a few dims to escape local basin
+                flip_idx = self._rng.choice(len(refined), size=5, replace=False)
+                refined[flip_idx] *= -1.2
 
             cur_bmap = self._blend(basemap, refined)
             self._record_dot_outcomes(surv, candidates, assign, dots, cur_bmap)
@@ -808,15 +818,31 @@ class IECNN:
              max_tokens: int = 15, verbose: bool = False) -> str:
         """
         Conversational interface for IECNN.
-        Fuses history and current message into a single context for prediction.
+        Uses a 'Global Narrative Base' to maintain long-term context.
         """
-        context = ""
         if history:
-            for user, bot in history[-3:]: # Last 3 turns for context
-                context += f"user {user} bot {bot} "
-        context += f"user {message} bot"
+            # Update Narrative Base by compressing the last interaction
+            last_user, last_bot = history[-1]
+            last_latent = self.encode(f"{last_user} {last_bot}")
+            if self.narrative_base is None:
+                self.narrative_base = last_latent
+            else:
+                # Narrative arc blend (high persistence)
+                self.narrative_base = 0.8 * self.narrative_base + 0.2 * last_latent
 
-        response = self.generate_autoregressive(context, max_tokens=max_tokens, verbose=verbose)
+        context = f"user {message} bot"
+
+        # We temporarily inject the narrative base into the model's working memory
+        # to ground the new response in the overall conversation arc.
+        old_wm = self.working_memory
+        if self.narrative_base is not None:
+            self.working_memory = self.narrative_base
+
+        try:
+            response = self.generate_autoregressive(context, max_tokens=max_tokens, verbose=verbose)
+        finally:
+            self.working_memory = old_wm
+
         return response
 
     def run_hierarchical(self, sentences: List[str], verbose: bool = False) -> np.ndarray:

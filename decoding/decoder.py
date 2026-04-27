@@ -66,26 +66,59 @@ class IECNNDecoder:
 
         return None
 
-    def decode_single_token(self, latent: np.ndarray) -> str:
+    def decode_single_token(self, latent: np.ndarray, tournament: bool = True) -> str:
         """
         Map a single 256-dim latent vector back to the closest vocabulary token.
+        Uses 'Tournament Decoding' (Mini-Convergence) for higher semantic fidelity.
         """
         if not self.mapper.is_fitted or not self.mapper._base_vocab:
             return "[unknown]"
 
-        # Ensure we take the real part for decoding as bases are stored in R^d
+        # Phase 1: Fast candidates via cosine similarity
         target_base = np.real(latent[:EMBED_DIM]).astype(np.float32)
-        best_word = "[unknown]"
-        best_sim = -1.0
-
+        candidates = []
         for word, emb in self.mapper._base_vocab.items():
-            if " " in word: continue # Skip phrases for single-token decoding
+            if " " in word: continue
             sim = self._score_emb(emb, target_base)
-            if sim > best_sim:
-                best_sim = sim
-                best_word = word
+            candidates.append((sim, word, emb))
 
-        return best_word
+        candidates.sort(key=lambda x: -x[0])
+        top_k = candidates[:10] # Top 10 for tournament
+
+        if not tournament or len(top_k) <= 1:
+            return top_k[0][1] if top_k else "[unknown]"
+
+        # Phase 2: Tournament (Mini-Convergence)
+        # We treat each candidate word as a 'dot prediction' and find the
+        # consensus using the model's actual interpretation logic.
+        from convergence.convergence import ConvergenceLayer
+        conv = ConvergenceLayer(micro_threshold=0.15, alpha=self.alpha)
+
+        tournament_cands = []
+        for sim, word, emb in top_k:
+            # We construct a full 256-dim vector for the candidate
+            v = np.zeros(FEATURE_DIM, dtype=np.float32)
+            v[:EMBED_DIM] = emb
+            # Weight confidence by its similarity to the target latent
+            conf = float(np.tanh(sim * 2.0))
+            tournament_cands.append((v, conf, {"word": word, "source": "tournament"}))
+
+        clusters, _ = conv.run(tournament_cands)
+
+        if clusters:
+            # The winning cluster identifies the most semantically robust word
+            # We pick the word closest to the centroid of the winning cluster
+            winning_centroid = clusters[0].centroid
+            best_w = top_k[0][1]
+            best_s = -1.0
+            for _, word, emb in top_k:
+                s = self._score_emb(emb, winning_centroid[:EMBED_DIM])
+                if s > best_s:
+                    best_s = s
+                    best_w = word
+            return best_w
+
+        return top_k[0][1]
 
     def _score_emb(self, emb: np.ndarray, target: np.ndarray) -> float:
         """Fast cosine similarity between two vectors (no full pipeline)."""
