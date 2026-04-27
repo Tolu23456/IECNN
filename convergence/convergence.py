@@ -47,15 +47,11 @@ class MicroCluster:
         self.predictions.append(p); self.confidences.append(c); self.infos.append(info)
 
         # Phase-Coded Aggregation (Complex Centroid)
-        # Each prediction p_j is augmented by e^(i * phi_j)
+        # Predictions 'p' are already complex-valued activations from NeuralDot.predict
         stack = np.stack(self.predictions).astype(np.complex64)
-        phases = np.array([info.get("phase", 0.0) for info in self.infos], dtype=np.float32)
-
-        # Apply phase rotation
-        complex_preds = stack * np.exp(1j * phases)[:, None]
 
         # Constructive/Destructive Interference happens here via mean
-        self.centroid = np.mean(complex_preds, axis=0)
+        self.centroid = np.mean(stack, axis=0)
 
     def compute_score(self, alpha):
         self.score = convergence_score(self.predictions, self.confidences, alpha)
@@ -76,18 +72,15 @@ class Cluster:
 
     def _recompute_centroid(self):
         if not self.predictions: return
+        # Predictions are already complex-valued activations from NeuralDot.predict
         stack = np.stack(self.predictions).astype(np.complex64)
         confs = np.array(self.confidences, np.float32)
-        phases = np.array([info.get("phase", 0.0) for info in self.infos], dtype=np.float32)
-
-        # Apply phase rotation
-        complex_preds = stack * np.exp(1j * phases)[:, None]
 
         # Weights normalized by confidence
         w = confs / (confs.sum() + 1e-10)
 
         # Constructive/Destructive Interference
-        self.centroid = (w[:, None].astype(np.complex64) * complex_preds).sum(axis=0)
+        self.centroid = (w[:, None].astype(np.complex64) * stack).sum(axis=0)
 
     def add_micro(self, mc):
         self._micro_clusters.append(mc)

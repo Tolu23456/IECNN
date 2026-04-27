@@ -63,9 +63,18 @@ class PruningLayer:
                     deduped.append(c)
 
         if len(deduped) < self.min_survivors:
-            extras = [c for c in candidates if c not in deduped]
-            extras.sort(key=lambda x: x[1], reverse=True)
-            deduped.extend(extras[:self.min_survivors - len(deduped)])
+            # deduplicated candidates are already in 'deduped', we just need to pick the top remaining
+            # By using index-based tracking, we avoid the array truthiness issue.
+            seen_indices = set()
+            # If we used the C library, we know which indices we kept.
+            # But the 'c not in deduped' is the problem because 'c' contains a numpy array.
+            # Let's use a simpler and safer approach:
+
+            # 1. Identify all candidate indices that were NOT picked for deduped
+            picked_candidates = set(id(c) for c in deduped)
+            remaining = [c for c in candidates if id(c) not in picked_candidates]
+            remaining.sort(key=lambda x: x[1], reverse=True)
+            deduped.extend(remaining[:self.min_survivors - len(deduped)])
 
         return deduped, {"in": len(candidates), "out": len(deduped)}
 

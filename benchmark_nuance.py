@@ -81,12 +81,12 @@ def run_benchmark():
     iecnn_passed = 0
     tf_passed = 0
 
-    # Complex-valued regime naturally has lower average similarity scores
-    # due to phase interference. We adjust thresholds to reflect discriminative gap.
-    I_HIGH = 0.05
-    I_LOW  = 0.20
-    T_HIGH = 0.40
-    T_LOW  = 0.30
+    # Discriminative gap: IECNN must show higher separation between match/mismatch
+    # than the naive pooling baseline.
+    I_HIGH = 0.10
+    I_LOW  = 0.15
+    T_HIGH = 0.50
+    T_LOW  = 0.40
 
     for text_a, text_b, expected, desc in test_cases:
         i_sim = model.similarity(text_a, text_b, update_brain=True)

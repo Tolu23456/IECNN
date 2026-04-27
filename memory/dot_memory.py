@@ -52,11 +52,18 @@ class DotMemory:
         # Surprise tracking: dot_id -> rolling surprise average
         self._surprise_history: Dict[int, float] = {}
 
+        # Episodic Exemplars: dot_id -> List of (input_slice_centroid, winning_prediction, weight)
+        self._exemplars: Dict[int, List[Tuple[np.ndarray, np.ndarray, float]]] = {}
+        self.max_exemplars = 5
+
         # Per-dot circular phase accumulator: (re_sum, im_sum, count)
         # Populated only when phase coding is active and predictions carry phase.
         self._phase_acc: Dict[int, Tuple[float, float, int]] = {}
         # Multiplier on fitness for narrowly phase-concentrated dots; 0 disables.
         self.phase_bonus_weight: float = 0.0
+
+        # Semantic Grounding Signal (v4 SOTA): dot_id -> rolling alignment with input
+        self._semantic_grounding: Dict[int, float] = {}
 
     def _ensure_id(self, dot_id: int):
         if dot_id not in self._windows:
@@ -66,6 +73,11 @@ class DotMemory:
             self._total_counts[dot_id] = 0.0
             self._phase_acc[dot_id] = (0.0, 0.0, 0)
             self._surprise_history[dot_id] = 0.0
+            self._exemplars[dot_id] = []
+        if dot_id not in self._surprise_history:
+            self._surprise_history[dot_id] = 0.0
+        if dot_id not in self._semantic_grounding:
+            self._semantic_grounding[dot_id] = 0.5
 
     def record_phase_sample(self, dot_id: int, phase: float):
         """Record a phase sample for a dot (e.g. from winning a token slot)."""
@@ -78,7 +90,9 @@ class DotMemory:
         )
 
     def record(self, dot_id: int, prediction: np.ndarray, in_winner: bool,
-               phase: Optional[float] = None, initial_agreement: float = 0.0):
+               phase: Optional[float] = None, initial_agreement: float = 0.0,
+               input_context: Optional[np.ndarray] = None,
+               ground_truth: Optional[np.ndarray] = None):
         """Record whether a dot's prediction ended in the winning cluster.
 
         If `phase` (radians) is provided, also accumulate it into the dot's
@@ -99,6 +113,24 @@ class DotMemory:
             # Update EMA of surprise
             alpha = 0.1
             self._surprise_history[dot_id] = (1.0 - alpha) * self._surprise_history[dot_id] + alpha * surprise
+
+            # 3. Store Episodic Exemplar
+            if input_context is not None:
+                # Mean-pool multi-token context to ensure (256,) shape for similarity comparison
+                ctx_vec = np.mean(input_context, axis=0) if input_context.ndim > 1 else input_context
+                # Store the successful mapping
+                self._exemplars[dot_id].append((ctx_vec.copy(), prediction.copy(), 1.0))
+                # Keep top-K highest agreement? For now, just most recent
+                if len(self._exemplars[dot_id]) > self.max_exemplars:
+                    self._exemplars[dot_id].pop(0)
+
+        # 4. Semantic Grounding: How well does this prediction match the raw input centroid?
+        if ground_truth is not None:
+            from formulas.formulas import similarity_score
+            # We use a very light alpha to focus on the raw semantic overlap
+            alignment = similarity_score(prediction, ground_truth, alpha=0.3)
+            alpha_ema = 0.05
+            self._semantic_grounding[dot_id] = (1.0 - alpha_ema) * self._semantic_grounding.get(dot_id, 0.5) + alpha_ema * alignment
 
         self._windows[dot_id].append(prediction.copy())
         # Update rolling variance for specialization score
@@ -163,6 +195,29 @@ class DotMemory:
         mean_var = float(np.mean(self._var_sums[dot_id]))
         return float(1.0 / (1.0 + mean_var))
 
+    def episodic_hint(self, dot_id: int, current_context: np.ndarray, alpha: float = 0.7) -> Optional[np.ndarray]:
+        """
+        Retrieve a prediction 'hint' from episodic memory (v4 SOTA).
+        Finds the exemplar whose input context best matches the current one.
+        """
+        if dot_id not in self._exemplars or not self._exemplars[dot_id]:
+            return None
+
+        best_sim = -1.0
+        best_pred = None
+
+        # Ensure context is averaged if multi-token
+        ctx_vec = np.mean(current_context, axis=0) if current_context.ndim > 1 else current_context
+        from formulas.formulas import similarity_score
+
+        for ex_ctx, ex_pred, weight in self._exemplars[dot_id]:
+            sim = similarity_score(ctx_vec, ex_ctx, alpha)
+            if sim > best_sim:
+                best_sim = sim
+                best_pred = ex_pred
+
+        return best_pred if best_sim > 0.4 else None
+
     def recent_centroid(self, dot_id: int) -> Optional[np.ndarray]:
         """Return the mean of the dot's recent predictions as a guidance signal."""
         if dot_id not in self._windows:
@@ -189,8 +244,8 @@ class DotMemory:
 
     def all_fitness_scores(self, dot_ids: List[int], j_norm: float = 0.0) -> np.ndarray:
         """
-        F24: Dot Fitness Function
-        F_d = R_d + alpha*C_d + beta*S_d + gamma*U_d - delta*N_d + sigma*Surprise
+        F24 (Enhanced): Dot Fitness Function
+        F_d = R_d + alpha*C_d + beta*S_d + gamma*U_d - delta*N_d + sigma*Surprise + zeta*Grounding
         """
         from formulas.formulas import dot_fitness
         drp = self.drp_scores(dot_ids, j_norm)
@@ -199,11 +254,12 @@ class DotMemory:
         for i, did in enumerate(dot_ids):
             spec = self.specialization_score(did)
             surp = self._surprise_history.get(did, 0.0)
+            ground = self._semantic_grounding.get(did, 0.5)
             # Use effectiveness as proxy for U_d (utility impact) for now
             fit[i] = dot_fitness(
                 rd=float(drp[i]), cd=float(eff[i]), sd=spec, ud=float(eff[i]), nd=1.0 - float(eff[i]),
                 surprise=float(surp)
-            )
+            ) + 0.3 * ground # zeta = 0.3
         # Phase-narrowness bonus: dots with a tightly concentrated phase
         # distribution get a multiplicative boost. Inactive when bonus weight
         # is 0 or when the dot has no phase samples (concentration == 0.0).
@@ -352,6 +408,7 @@ class DotMemory:
             "windows":            {k: list(v) for k, v in self._windows.items()},
             "var_sums":           dict(self._var_sums),
             "var_counts":         dict(self._var_counts),
+            "exemplars":          {k: [(c.copy(), p.copy(), w) for c, p, w in v] for k, v in self._exemplars.items()},
             "phase_acc":          {int(k): tuple(v) for k, v in self._phase_acc.items()},
         }
 
@@ -373,6 +430,7 @@ class DotMemory:
         }
         self._var_sums   = dict(state.get("var_sums", {}))
         self._var_counts = dict(state.get("var_counts", {}))
+        self._exemplars  = dict(state.get("exemplars", {}))
         self._phase_acc  = {
             int(k): (float(v[0]), float(v[1]), int(v[2]))
             for k, v in state.get("phase_acc", {}).items()
