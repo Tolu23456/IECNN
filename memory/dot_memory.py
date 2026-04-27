@@ -78,6 +78,10 @@ class DotMemory:
             self._surprise_history[dot_id] = 0.0
         if dot_id not in self._semantic_grounding:
             self._semantic_grounding[dot_id] = 0.5
+        if dot_id not in self._exemplars:
+            self._exemplars[dot_id] = []
+        if dot_id not in self._phase_acc:
+            self._phase_acc[dot_id] = (0.0, 0.0, 0)
 
     def record_phase_sample(self, dot_id: int, phase: float):
         """Record a phase sample for a dot (e.g. from winning a token slot)."""
