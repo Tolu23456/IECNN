@@ -62,6 +62,9 @@ class DotMemory:
         # Multiplier on fitness for narrowly phase-concentrated dots; 0 disables.
         self.phase_bonus_weight: float = 0.0
 
+        # Semantic Grounding Signal (v4 SOTA): dot_id -> rolling alignment with input
+        self._semantic_grounding: Dict[int, float] = {}
+
     def _ensure_id(self, dot_id: int):
         if dot_id not in self._windows:
             self._windows[dot_id] = deque(maxlen=self.window_size)
@@ -73,6 +76,8 @@ class DotMemory:
             self._exemplars[dot_id] = []
         if dot_id not in self._surprise_history:
             self._surprise_history[dot_id] = 0.0
+        if dot_id not in self._semantic_grounding:
+            self._semantic_grounding[dot_id] = 0.5
 
     def record_phase_sample(self, dot_id: int, phase: float):
         """Record a phase sample for a dot (e.g. from winning a token slot)."""
@@ -86,7 +91,8 @@ class DotMemory:
 
     def record(self, dot_id: int, prediction: np.ndarray, in_winner: bool,
                phase: Optional[float] = None, initial_agreement: float = 0.0,
-               input_context: Optional[np.ndarray] = None):
+               input_context: Optional[np.ndarray] = None,
+               ground_truth: Optional[np.ndarray] = None):
         """Record whether a dot's prediction ended in the winning cluster.
 
         If `phase` (radians) is provided, also accumulate it into the dot's
@@ -117,6 +123,14 @@ class DotMemory:
                 # Keep top-K highest agreement? For now, just most recent
                 if len(self._exemplars[dot_id]) > self.max_exemplars:
                     self._exemplars[dot_id].pop(0)
+
+        # 4. Semantic Grounding: How well does this prediction match the raw input centroid?
+        if ground_truth is not None:
+            from formulas.formulas import similarity_score
+            # We use a very light alpha to focus on the raw semantic overlap
+            alignment = similarity_score(prediction, ground_truth, alpha=0.3)
+            alpha_ema = 0.05
+            self._semantic_grounding[dot_id] = (1.0 - alpha_ema) * self._semantic_grounding.get(dot_id, 0.5) + alpha_ema * alignment
 
         self._windows[dot_id].append(prediction.copy())
         # Update rolling variance for specialization score
@@ -230,8 +244,8 @@ class DotMemory:
 
     def all_fitness_scores(self, dot_ids: List[int], j_norm: float = 0.0) -> np.ndarray:
         """
-        F24: Dot Fitness Function
-        F_d = R_d + alpha*C_d + beta*S_d + gamma*U_d - delta*N_d + sigma*Surprise
+        F24 (Enhanced): Dot Fitness Function
+        F_d = R_d + alpha*C_d + beta*S_d + gamma*U_d - delta*N_d + sigma*Surprise + zeta*Grounding
         """
         from formulas.formulas import dot_fitness
         drp = self.drp_scores(dot_ids, j_norm)
@@ -240,11 +254,12 @@ class DotMemory:
         for i, did in enumerate(dot_ids):
             spec = self.specialization_score(did)
             surp = self._surprise_history.get(did, 0.0)
+            ground = self._semantic_grounding.get(did, 0.5)
             # Use effectiveness as proxy for U_d (utility impact) for now
             fit[i] = dot_fitness(
                 rd=float(drp[i]), cd=float(eff[i]), sd=spec, ud=float(eff[i]), nd=1.0 - float(eff[i]),
                 surprise=float(surp)
-            )
+            ) + 0.3 * ground # zeta = 0.3
         # Phase-narrowness bonus: dots with a tightly concentrated phase
         # distribution get a multiplicative boost. Inactive when bonus weight
         # is 0 or when the dot has no phase samples (concentration == 0.0).

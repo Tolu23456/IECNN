@@ -1041,6 +1041,10 @@ class IECNN:
         # (Simplified: mean confidence of all candidates in this round)
         avg_conf = np.mean([c[1] for c in candidates])
 
+        # GROUND TRUTH for Semantic Grounding (v4 SOTA):
+        # We use the raw input centroid (unmasked) if available, or current mean.
+        ground_truth = basemap.pool("mean")
+
         for i, (pred, conf, info) in enumerate(candidates):
             in_winner = (i < len(assignments) and assignments[i] in win_cid)
             dot_id = info.get("dot_id", -1)
@@ -1052,7 +1056,8 @@ class IECNN:
                 self.dot_memory.record(dot_id, pred, in_winner,
                                        phase=info.get("phase"),
                                        initial_agreement=avg_conf,
-                                       input_context=ctx)
+                                       input_context=ctx,
+                                       ground_truth=ground_truth)
 
     def _learn_bias(self, surviving: List[Cluster], candidates: List[Tuple],
                     assignments: List[int], basemap: BaseMap):
