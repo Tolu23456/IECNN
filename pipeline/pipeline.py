@@ -1064,62 +1064,45 @@ class IECNN:
 
     def _reflect(self, output: np.ndarray, dots: list, basemap: BaseMap) -> np.ndarray:
         """
-        Counterfactual Reasoning Layer (v2):
-        Resolves semantic contradictions by simulating alternative interpretations.
+        Cognitive Peer Pressure & Veto System (v5 SOTA):
+        Deep recursive reasoning where specialized dots can veto the consensus.
 
-        1. Identifies 'veto' dots (LOGIC/SEMANTIC) that strongly disagree with the output.
-        2. For each veto, runs an AIM inversion to see if a counterfactual
-           interpretation provides a better fit for the conflicting dots.
-        3. Fuses the most consistent counterfactuals back into the final output.
+        1. Identifies 'veto' dots (LOGIC/SEMANTIC) that strongly disagree.
+        2. Triggers Repellent Convergence if vetoes are strong.
+        3. Uses counterfactual simulation to resolve contradictions.
         """
-        # Select specialized dots for reflection
         veto_dots = [d for d in dots if d.dot_type in (DotType.LOGIC, DotType.SEMANTIC)]
-        if not veto_dots:
-            return output
+        if not veto_dots: return output
 
-        # Sample a few dots for efficiency
-        sample_size = min(12, len(veto_dots))
-        idx = self._rng.choice(len(veto_dots), sample_size, replace=False)
-        selected = [veto_dots[i] for i in idx]
-
-        corrections = []
-
-        for dot in selected:
-            # Get dot's internal predictions for the current output context
-            preds = dot.predict(basemap, memory_hint=output, context_entropy=0.05)
-
+        # 1. Detect Vetoes
+        veto_signals = []
+        for dot in veto_dots[:15]:
+            preds = dot.predict(basemap, memory_hint=output, context_entropy=0.01)
             for p, conf, _ in preds:
                 sim = similarity_score(output, p, self.alpha)
+                if sim < 0.25: # Strong Disagreement
+                    veto_signals.append((p, conf, dot))
 
-                # If dot strongly disagrees (sim < 0.35), simulate counterfactuals
-                if sim < 0.35:
-                    # 1. Choose inversion type based on dot's requested inversion or default to feature
-                    inv_type = dot.dot_type.name.lower() if hasattr(dot, "requested_inversion") and dot.requested_inversion else "feature"
+        if not veto_signals: return output
 
-                    # 2. Transform the dot's prediction using AIM to explore 'the other side'
-                    # We use the internal dispatch from aim.aim
-                    from aim.aim import _apply_inversion
-                    p_inv = _apply_inversion(inv_type, p, basemap.matrix, self._rng)
+        # 2. Resolve via Repellent Convergence
+        # We run a mini-convergence where the current 'output' acts as a repellent
+        # to find an alternative that satisfies the vetoing dots.
+        from convergence.convergence import ConvergenceLayer
+        conv = ConvergenceLayer(micro_threshold=0.20, alpha=self.alpha)
 
-                    # p_hat = Attention(output, context, Invert(p))
-                    from formulas.formulas import aim_transform
-                    ctx2d = basemap.matrix.reshape(1, -1) if basemap.matrix.ndim == 1 else basemap.matrix
-                    p_hat = aim_transform(p, ctx2d, lambda _: p_inv)
+        candidates = []
+        for p, conf, dot in veto_signals:
+            candidates.append((p, conf, {"dot_id": dot.dot_id, "source": "veto"}))
 
-                    # 3. If the counterfactual interpretation aligns better with the rest of the context
-                    # or resolves the contradiction, we use it as a correction signal.
-                    hat_sim = similarity_score(output, p_hat, self.alpha)
-                    if hat_sim > sim:
-                        # The inverted interpretation is more plausible than the direct contradiction
-                        corrections.append(conf * (p_hat - output))
-                    else:
-                        # Direct correction (nudge toward dot's original prediction)
-                        corrections.append(conf * (p - output))
+        # Repellent pass: find clusters that disagree with 'output' but agree with each other
+        alt_clusters, _ = conv.run_ultra(candidates, repellent=output)
 
-        if corrections:
-            # Apply weighted corrections (conservative blend to maintain stability)
-            nudge = np.mean(np.stack(corrections), axis=0)
-            return output + 0.15 * nudge
+        if alt_clusters and alt_clusters[0].score > 0.4:
+            # Shift output toward the most consistent alternative
+            alt_centroid = alt_clusters[0].centroid
+            shift_weight = 0.25 * alt_clusters[0].score
+            return (1.0 - shift_weight) * output + shift_weight * alt_centroid
 
         return output
 

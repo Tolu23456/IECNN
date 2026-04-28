@@ -45,31 +45,41 @@ class WorldGraph:
         self.edges: Dict[Tuple[int, int], Edge] = {}
         self._next_node_id = 10000
 
-    def consolidate(self, cluster_memory_patterns: List[Tuple[np.ndarray, float]], alpha: float = 0.7):
+    def consolidate(self, cluster_memory_patterns: List[Tuple[np.ndarray, float]],
+                    alpha: float = 0.7, surprise_threshold: float = 0.15):
         """
-        Merge new patterns from ClusterMemory into the permanent graph.
-        Patterns with high weight that recur across many calls become graph nodes.
-        Automatically links concepts that appear in the same consolidation batch.
+        Surprise-Driven Consolidation (v5 SOTA):
+        Merge patterns into the graph only if they offer high 'Surprise'
+        (structural novelty) relative to existing nodes. This prevents
+        redundant graph growth.
         """
         new_node_ids = []
 
         for centroid, weight in cluster_memory_patterns:
-            if weight < 0.2: continue # Ignore weak patterns
+            if weight < 0.2: continue
 
+            # 1. Calculate surprise: how different is this from everything we know?
             best_node = self.find_closest(centroid, alpha)
-            if best_node and similarity_score(centroid, best_node.centroid, alpha) > self.threshold:
-                # Update existing node (consolidation)
-                best_node.centroid = 0.95 * best_node.centroid + 0.05 * centroid
-                best_node.weight += weight
-                best_node.occurrences += 1
-                new_node_ids.append(best_node.node_id)
-            else:
-                # Add as new candidate node
-                new_id = self._next_node_id
-                self._next_node_id += 1
-                self.nodes[new_id] = Node(new_id, centroid.copy())
-                self.nodes[new_id].weight = weight
-                new_node_ids.append(new_id)
+            similarity = similarity_score(centroid, best_node.centroid, alpha) if best_node else 0.0
+            surprise = 1.0 - similarity
+
+            if surprise < surprise_threshold:
+                # 2. Not surprising: refine existing node
+                if best_node:
+                    # Knowledge refinement rate determined by weight
+                    refine_rate = 0.05 * weight
+                    best_node.centroid = (1.0 - refine_rate) * best_node.centroid + refine_rate * centroid
+                    best_node.weight += weight
+                    best_node.occurrences += 1
+                    new_node_ids.append(best_node.node_id)
+                continue
+
+            # 3. Surprising: register as new conceptual node
+            new_id = self._next_node_id
+            self._next_node_id += 1
+            self.nodes[new_id] = Node(new_id, centroid.copy())
+            self.nodes[new_id].weight = weight
+            new_node_ids.append(new_id)
 
         # Link concepts that frequently appear together (Co-occurrence edges)
         for i in range(len(new_node_ids)):

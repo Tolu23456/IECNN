@@ -84,6 +84,12 @@ class SelfModel:
         complexity = csv.entropy * (1.0 - csv.dominance)
         actions.iteration_budget_delta = int(np.round(complexity * 5 + raw_actions[0] * 2))
 
+        # 7. Thinking Policy (Fast vs Deep):
+        # If surprise (EUG delta) is high, switch to deep reasoning mode.
+        if abs(csv.eug) > 0.15:
+            actions.reasoning_depth_delta += 0.3
+            actions.iteration_budget_delta += 4
+
         return actions
 
     def learn(self, last_csv: CognitiveStateVector, actions: InternalCognitiveActions,

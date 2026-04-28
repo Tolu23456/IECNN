@@ -181,7 +181,8 @@ class BaseMap:
         if method == "attention":
             q = query if query is not None else np.mean(self.matrix, axis=0)
             # Scaled dot-product attention scores
-            scores = (self.matrix @ q) / np.sqrt(self.feature_dim)
+            dim = self.matrix.shape[1]
+            scores = (self.matrix @ q) / np.sqrt(dim)
             scores -= np.max(scores)
             weights = np.exp(scores * 2.0)
             weights /= weights.sum() + 1e-10
@@ -696,11 +697,19 @@ class BaseMapper:
             else:
                 block = block[:EMBED_DIM]
 
-            # Temporal motion: mean absolute pixel diff vs previous frame
+            # Motion-Vector Encoding (v5 SOTA):
+            # Compute 8-dim motion deltas between frames to capture temporal dynamics.
             if i > 0:
-                motion = float(np.mean(np.abs(frames_rgb[i] - frames_rgb[i - 1])))
+                diff = np.abs(frames_rgb[i] - frames_rgb[i - 1])
+                # 8-dim motion signature: 4 quadrants + RGB means + global std
+                m_sig = np.array([
+                    diff[:32, :32].mean(), diff[:32, 32:].mean(),
+                    diff[32:, :32].mean(), diff[32:, 32:].mean(),
+                    diff.mean(axis=(0,1))[0], diff.mean(axis=(0,1))[1], diff.mean(axis=(0,1))[2],
+                    diff.std()
+                ], dtype=np.float32)
                 block = block.copy()
-                block[-1] = motion  # encode motion in last embedding dim
+                block[-8:] = m_sig  # Encode motion in last 8 embedding dims
 
             n_val = np.linalg.norm(block)
             if n_val > 1e-10:

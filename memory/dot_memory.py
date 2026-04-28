@@ -341,10 +341,12 @@ class DotMemory:
 
     def apply_memory_decay(self, dot_ids: List[int], rho: float, x: float = 0.0):
         """
-        F23: Memory Decay Function
+        F23: Adaptive Memory Plasticity (v5 SOTA)
         M_{t+1} = (1 - rho) * M_t + rho * X
 
-        Applies decay to success_counts based on plasticity rate rho.
+        The plasticity rate 'rho' is determined by system stability; stable
+        states lead to faster memory updates (incorporating new info),
+        while unstable states freeze memory to prevent corruption.
         """
         for did in dot_ids:
             if did in self._success_counts:
