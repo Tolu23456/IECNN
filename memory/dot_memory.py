@@ -65,6 +65,9 @@ class DotMemory:
         # Semantic Grounding Signal (v4 SOTA): dot_id -> rolling alignment with input
         self._semantic_grounding: Dict[int, float] = {}
 
+        # Output History (v5 Agent SOTA): recent decoded tokens to prevent repetition
+        self.output_history = deque(maxlen=50)
+
     def _ensure_id(self, dot_id: int):
         if dot_id not in self._windows:
             self._windows[dot_id] = deque(maxlen=self.window_size)

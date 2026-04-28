@@ -95,9 +95,10 @@ def _load_lib():
     return _lib
 
 
-# ── Primitive bases: a-z, 0-9, basic punctuation ────────────────────
+# ── Primitive bases: a-z, 0-9, basic punctuation, and ACTION tokens ──
 _PRIMITIVES = list("abcdefghijklmnopqrstuvwxyz0123456789") + [
     ".", ",", "!", "?", "'", "-", "_", "/", "(", ")",
+    "WRITE_CODE", "RUN_CODE", "SEARCH", "GENERATE_IMAGE", "SPEAK"
 ]
 
 EMBED_DIM   = 224

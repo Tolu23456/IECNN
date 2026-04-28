@@ -31,11 +31,13 @@ class DeepReasoningLayer:
         baseline_vec = baseline_res.output
 
         # 2. Intervention
-        tokens = text.split()
+        # Use model's internal tokenizer for structural consistency
+        tokens = self.model.base_mapper._tokenize(text)
         if token_idx >= len(tokens): return 0.0
 
         original_tok = tokens[token_idx]
         tokens[token_idx] = replacement
+        # Re-join tokens: since _tokenize lowercases, we use a simple join
         intervention_text = " ".join(tokens)
 
         # 3. Intervention Run
@@ -51,7 +53,7 @@ class DeepReasoningLayer:
         Heuristic Causal Discovery: identify which tokens have the
         most structural influence on the sentence's meaning.
         """
-        tokens = text.split()
+        tokens = self.model.base_mapper._tokenize(text)
         impacts = {}
 
         # Sample up to 5 tokens for intervention

@@ -14,6 +14,7 @@ import os
 import sys
 import ctypes
 from typing import List, Dict, Any, Optional, Tuple
+from collections import Counter
 from PIL import Image
 import wave
 import struct
@@ -81,6 +82,17 @@ class IECNNDecoder:
             if " " in word: continue
             sim = self._score_emb(emb, target_base)
             candidates.append((sim, word, emb))
+
+        # Phase 0.5: Anti-Repetition Bias
+        # Penalize words that have appeared frequently in recent output history
+        history = list(self.model.dot_memory.output_history)
+        history_counts = Counter(history[-20:]) # Last 20 tokens
+
+        for i, (sim, word, emb) in enumerate(candidates):
+            if word in history_counts:
+                # Penalty scales with frequency
+                penalty = 0.15 * history_counts[word]
+                candidates[i] = (sim - penalty, word, emb)
 
         candidates.sort(key=lambda x: -x[0])
         top_k = candidates[:10] # Top 10 for tournament

@@ -858,8 +858,10 @@ class IECNN:
             if next_token == "[unknown]" or next_token == ".":
                 if next_token == ".":
                     generated.append(next_token)
+                    self.dot_memory.output_history.append(next_token)
                 break
             generated.append(next_token)
+            self.dot_memory.output_history.append(next_token)
             current_text += " " + next_token
 
         return " ".join(generated)
@@ -868,8 +870,14 @@ class IECNN:
              max_tokens: int = 15, verbose: bool = False) -> str:
         """
         Conversational interface for IECNN.
-        Uses a 'Global Narrative Base' to maintain long-term context.
+        Uses a 'Global Narrative Base' and Router for Agentic behavior.
         """
+        from cognition.router import AGIRouter
+        router = AGIRouter(self)
+
+        # 1. Intent Routing
+        intent, prompt = router.route(message, history)
+
         if history:
             # Update Narrative Base by compressing the last interaction
             last_user, last_bot = history[-1]
@@ -889,7 +897,16 @@ class IECNN:
             self.working_memory = self.narrative_base
 
         try:
-            response = self.generate_autoregressive(context, max_tokens=max_tokens, verbose=verbose)
+            response = self.generate_autoregressive(prompt, max_tokens=max_tokens, verbose=verbose)
+
+            # 2. Tool Execution (Heuristic)
+            if "RUN_CODE" in response or intent.value == "code":
+                from utils.tools import ToolExecutor
+                executor = ToolExecutor(self)
+                result = executor.parse_and_execute(response)
+                if result:
+                    response += f"\n[Output]: {result}"
+
         finally:
             self.working_memory = old_wm
 

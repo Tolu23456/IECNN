@@ -40,6 +40,7 @@ class DotType(IntEnum):
     GLOBAL     = 5  # uniform broad overview
     LOGIC      = 6  # structural/logical patterns (if-then, because)
     MORPH      = 7  # word structure and morphological flags
+    ACTION     = 8  # task-oriented intent and tool usage
 
 
 _TYPE_NAMES = {
@@ -51,6 +52,7 @@ _TYPE_NAMES = {
     DotType.GLOBAL:     "global",
     DotType.LOGIC:      "logic",
     DotType.MORPH:      "morph",
+    DotType.ACTION:     "action",
 }
 
 _TYPE_DIM_RANGES = {
@@ -61,18 +63,20 @@ _TYPE_DIM_RANGES = {
     DotType.TEMPORAL:   (0,   256),
     DotType.GLOBAL:     (0,   256),
     DotType.LOGIC:      (128, 256),
-    DotType.MORPH:      (236, 252),  # focus strictly on morphological flag dims
+    DotType.MORPH:      (236, 252),
+    DotType.ACTION:     (128, 252), # focus on structure + flags for intent
 }
 
 _TYPE_BIAS_PRESETS = {
-    DotType.SEMANTIC:   (0.7, 0.3, 0.5, 0.3, 0.8),
-    DotType.STRUCTURAL: (0.6, 0.5, 0.3, 0.2, 0.6),
-    DotType.CONTEXTUAL: (0.4, 0.8, 0.8, 0.4, 1.2),
-    DotType.RELATIONAL: (0.8, 0.4, 0.6, 0.5, 1.0),
-    DotType.TEMPORAL:   (0.5, 0.6, 0.4, 0.3, 0.9),
-    DotType.GLOBAL:     (0.3, 0.9, 0.7, 0.2, 0.7),
-    DotType.LOGIC:      (0.9, 0.6, 0.7, 0.1, 0.5),
-    DotType.MORPH:      (0.8, 0.2, 0.4, 0.1, 0.4), # precise focus
+    DotType.SEMANTIC:   (0.7, 0.3, 0.5, 0.3, 0.8, 0.2),
+    DotType.STRUCTURAL: (0.6, 0.5, 0.3, 0.2, 0.6, 0.2),
+    DotType.CONTEXTUAL: (0.4, 0.8, 0.8, 0.4, 1.2, 0.3),
+    DotType.RELATIONAL: (0.8, 0.4, 0.6, 0.5, 1.0, 0.3),
+    DotType.TEMPORAL:   (0.5, 0.6, 0.4, 0.3, 0.9, 0.2),
+    DotType.GLOBAL:     (0.3, 0.9, 0.7, 0.2, 0.7, 0.1),
+    DotType.LOGIC:      (0.9, 0.6, 0.7, 0.1, 0.5, 0.5),
+    DotType.MORPH:      (0.8, 0.2, 0.4, 0.1, 0.4, 0.2),
+    DotType.ACTION:     (0.9, 0.7, 0.6, 0.2, 0.4, 0.6), # high reasoning for actions
 }
 
 N_HEADS = 4  # number of prediction heads per dot
