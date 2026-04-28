@@ -65,6 +65,9 @@ class DotMemory:
         # Semantic Grounding Signal (v4 SOTA): dot_id -> rolling alignment with input
         self._semantic_grounding: Dict[int, float] = {}
 
+        # Output History (v5 Agent SOTA): recent decoded tokens to prevent repetition
+        self.output_history = deque(maxlen=50)
+
     def _ensure_id(self, dot_id: int):
         if dot_id not in self._windows:
             self._windows[dot_id] = deque(maxlen=self.window_size)
@@ -98,7 +101,8 @@ class DotMemory:
     def record(self, dot_id: int, prediction: np.ndarray, in_winner: bool,
                phase: Optional[float] = None, initial_agreement: float = 0.0,
                input_context: Optional[np.ndarray] = None,
-               ground_truth: Optional[np.ndarray] = None):
+               ground_truth: Optional[np.ndarray] = None,
+               causal_target: Optional[np.ndarray] = None):
         """Record whether a dot's prediction ended in the winning cluster.
 
         If `phase` (radians) is provided, also accumulate it into the dot's
@@ -107,10 +111,25 @@ class DotMemory:
 
         `initial_agreement` is used to calculate 'Surprise'. If agreement was low
         but the dot won, it discovered something non-obvious (Causal Discovery).
+
+        `causal_target` is the actual next token embedding. If provided,
+        it contributes to a 'Causal Accuracy' signal for the dot.
         """
         self._ensure_id(dot_id)
 
         self._total_counts[dot_id] += 1.0
+
+        # Causal Accuracy (Next-Token Prediction)
+        if causal_target is not None:
+            from formulas.formulas import similarity_score
+            # We check how well the dot predicted the ACTUAL next token
+            acc = similarity_score(prediction, causal_target, alpha=0.8)
+            # EMA update of causal success
+            alpha_c = 0.1
+            # We use success_counts but scaled by causal accuracy if it's predictive
+            if acc > 0.4:
+                self._success_counts[dot_id] += acc
+
         if in_winner:
             self._success_counts[dot_id] += 1.0
 
@@ -212,26 +231,38 @@ class DotMemory:
 
     def episodic_hint(self, dot_id: int, current_context: np.ndarray, alpha: float = 0.7) -> Optional[np.ndarray]:
         """
-        Retrieve a prediction 'hint' from episodic memory (v4 SOTA).
-        Finds the exemplar whose input context best matches the current one.
+        Active Episodic Priming (v5 SOTA):
+        Retrieve a prediction 'hint' using similarity-weighted exemplar retrieval.
+        Instead of just the best match, it blends multiple high-confidence exemplars.
         """
         if dot_id not in self._exemplars or not self._exemplars[dot_id]:
             return None
-
-        best_sim = -1.0
-        best_pred = None
 
         # Ensure context is averaged if multi-token
         ctx_vec = np.mean(current_context, axis=0) if current_context.ndim > 1 else current_context
         from formulas.formulas import similarity_score
 
+        scored_exemplars = []
         for ex_ctx, ex_pred, weight in self._exemplars[dot_id]:
             sim = similarity_score(ctx_vec, ex_ctx, alpha)
-            if sim > best_sim:
-                best_sim = sim
-                best_pred = ex_pred
+            if sim > 0.4:
+                scored_exemplars.append((sim, ex_pred))
 
-        return best_pred if best_sim > 0.4 else None
+        if not scored_exemplars:
+            return None
+
+        # Similarity-weighted blending of episodic memories
+        scored_exemplars.sort(key=lambda x: -x[0])
+        top_k = scored_exemplars[:3]
+
+        total_sim = sum(s for s, _ in top_k)
+        if total_sim < 1e-10: return top_k[0][1]
+
+        blended_hint = np.zeros_like(top_k[0][1])
+        for sim, pred in top_k:
+            blended_hint += (sim / total_sim) * pred
+
+        return blended_hint
 
     def recent_centroid(self, dot_id: int) -> Optional[np.ndarray]:
         """Return the mean of the dot's recent predictions as a guidance signal."""
@@ -313,10 +344,12 @@ class DotMemory:
 
     def apply_memory_decay(self, dot_ids: List[int], rho: float, x: float = 0.0):
         """
-        F23: Memory Decay Function
+        F23: Adaptive Memory Plasticity (v5 SOTA)
         M_{t+1} = (1 - rho) * M_t + rho * X
 
-        Applies decay to success_counts based on plasticity rate rho.
+        The plasticity rate 'rho' is determined by system stability; stable
+        states lead to faster memory updates (incorporating new info),
+        while unstable states freeze memory to prevent corruption.
         """
         for did in dot_ids:
             if did in self._success_counts:
@@ -373,6 +406,7 @@ class DotMemory:
                       self._windows, self._var_stats,
                       self._phase_acc, self._surprise_history,
                       self._exemplars, self._semantic_grounding):
+            # Convert keys to int for consistent comparison
             for did in list(store.keys()):
                 if int(did) not in keep:
                     del store[did]

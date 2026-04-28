@@ -31,7 +31,8 @@ class CognitiveStateVector:
 class InternalCognitiveActions:
     """Modulations the Self-Model can apply to the IECNN pipeline."""
     def __init__(self):
-        self.reasoning_depth_delta: int = 0
+        self.reasoning_depth_delta: float = 0.0 # Delta for dot reasoning
+        self.iteration_budget_delta: int = 0    # Dynamic computation budget
         self.threshold_shift: float = 0.0
         self.mutation_pressure: float = 1.0
         self.exploration_noise: float = 0.0
@@ -64,7 +65,7 @@ class SelfModel:
         actions = InternalCognitiveActions()
 
         # 1. Reasoning Depth: high entropy/energy increases depth
-        actions.reasoning_depth_delta = int(np.round(raw_actions[0] * 3))
+        actions.reasoning_depth_delta = float(raw_actions[0] * 0.2)
 
         # 2. Threshold Shift: high stability allows tighter thresholds
         actions.threshold_shift = float(raw_actions[1] * 0.1)
@@ -77,6 +78,17 @@ class SelfModel:
 
         # 5. Attention Allocation Field (AAF)
         actions.attention_allocation = float(np.clip(0.5 + raw_actions[4] * 0.4, 0.1, 0.9))
+
+        # 6. Iteration Budget (Dynamic Budget): high complexity needs more rounds
+        # Complexity estimated by entropy and lack of dominance
+        complexity = csv.entropy * (1.0 - csv.dominance)
+        actions.iteration_budget_delta = int(np.round(complexity * 5 + raw_actions[0] * 2))
+
+        # 7. Thinking Policy (Fast vs Deep):
+        # If surprise (EUG delta) is high, switch to deep reasoning mode.
+        if abs(csv.eug) > 0.15:
+            actions.reasoning_depth_delta += 0.3
+            actions.iteration_budget_delta += 4
 
         return actions
 

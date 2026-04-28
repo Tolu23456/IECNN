@@ -40,6 +40,7 @@ class DotType(IntEnum):
     GLOBAL     = 5  # uniform broad overview
     LOGIC      = 6  # structural/logical patterns (if-then, because)
     MORPH      = 7  # word structure and morphological flags
+    ACTION     = 8  # task-oriented intent and tool usage
 
 
 _TYPE_NAMES = {
@@ -51,6 +52,7 @@ _TYPE_NAMES = {
     DotType.GLOBAL:     "global",
     DotType.LOGIC:      "logic",
     DotType.MORPH:      "morph",
+    DotType.ACTION:     "action",
 }
 
 _TYPE_DIM_RANGES = {
@@ -61,18 +63,20 @@ _TYPE_DIM_RANGES = {
     DotType.TEMPORAL:   (0,   256),
     DotType.GLOBAL:     (0,   256),
     DotType.LOGIC:      (128, 256),
-    DotType.MORPH:      (236, 252),  # focus strictly on morphological flag dims
+    DotType.MORPH:      (236, 252),
+    DotType.ACTION:     (128, 252), # focus on structure + flags for intent
 }
 
 _TYPE_BIAS_PRESETS = {
-    DotType.SEMANTIC:   (0.7, 0.3, 0.5, 0.3, 0.8),
-    DotType.STRUCTURAL: (0.6, 0.5, 0.3, 0.2, 0.6),
-    DotType.CONTEXTUAL: (0.4, 0.8, 0.8, 0.4, 1.2),
-    DotType.RELATIONAL: (0.8, 0.4, 0.6, 0.5, 1.0),
-    DotType.TEMPORAL:   (0.5, 0.6, 0.4, 0.3, 0.9),
-    DotType.GLOBAL:     (0.3, 0.9, 0.7, 0.2, 0.7),
-    DotType.LOGIC:      (0.9, 0.6, 0.7, 0.1, 0.5),
-    DotType.MORPH:      (0.8, 0.2, 0.4, 0.1, 0.4), # precise focus
+    DotType.SEMANTIC:   (0.7, 0.3, 0.5, 0.3, 0.8, 0.2),
+    DotType.STRUCTURAL: (0.6, 0.5, 0.3, 0.2, 0.6, 0.2),
+    DotType.CONTEXTUAL: (0.4, 0.8, 0.8, 0.4, 1.2, 0.3),
+    DotType.RELATIONAL: (0.8, 0.4, 0.6, 0.5, 1.0, 0.3),
+    DotType.TEMPORAL:   (0.5, 0.6, 0.4, 0.3, 0.9, 0.2),
+    DotType.GLOBAL:     (0.3, 0.9, 0.7, 0.2, 0.7, 0.1),
+    DotType.LOGIC:      (0.9, 0.6, 0.7, 0.1, 0.5, 0.5),
+    DotType.MORPH:      (0.8, 0.2, 0.4, 0.1, 0.4, 0.2),
+    DotType.ACTION:     (0.9, 0.7, 0.6, 0.2, 0.4, 0.6), # high reasoning for actions
 }
 
 N_HEADS = 4  # number of prediction heads per dot
@@ -97,16 +101,18 @@ def get_next_dot_id():
 
 class BiasVector:
     def __init__(self, attention_bias=0.5, granularity_bias=0.5,
-                 abstraction_bias=0.5, inversion_bias=0.3, sampling_temperature=1.0):
+                 abstraction_bias=0.5, inversion_bias=0.3, sampling_temperature=1.0,
+                 reasoning_depth=0.2):
         self.attention_bias = float(np.clip(attention_bias, 0.0, 1.0))
         self.granularity_bias = float(np.clip(granularity_bias, 0.0, 1.0))
         self.abstraction_bias = float(np.clip(abstraction_bias, 0.0, 1.0))
         self.inversion_bias = float(np.clip(inversion_bias, 0.0, 1.0))
         self.sampling_temperature = float(max(sampling_temperature, 1e-6))
+        self.reasoning_depth = float(np.clip(reasoning_depth, 0.0, 1.0))
 
     def to_array(self):
         return np.array([self.attention_bias, self.granularity_bias, self.abstraction_bias,
-                         self.inversion_bias, self.sampling_temperature], dtype=np.float32)
+                         self.inversion_bias, self.sampling_temperature, self.reasoning_depth], dtype=np.float32)
 
     @classmethod
     def from_array(cls, arr):
@@ -114,7 +120,9 @@ class BiasVector:
 
     @classmethod
     def from_dot_type(cls, dot_type, rng=None):
-        preset = _TYPE_BIAS_PRESETS[dot_type]
+        preset = list(_TYPE_BIAS_PRESETS[dot_type])
+        if len(preset) < 6:
+            preset.append(0.2) # Default depth
         if rng:
             noise = rng.randn(len(preset)).astype(np.float32) * 0.05
             arr = np.clip(np.array(preset, np.float32) + noise, 0.01, 1.99)
@@ -283,13 +291,15 @@ class NeuralDot:
             results.append((pred, prediction_confidence(pred), {"dot_id": self.dot_id, "dot_type": _TYPE_NAMES[self.dot_type], "source": "original"}))
         return results
 
-    def _select_slice(self, matrix: np.ndarray):
+    def _select_slice(self, matrix: np.ndarray, causal: bool = False):
         """
         Select a contiguous slice of the basemap matrix.
 
         The slice length is controlled by granularity_bias:
           - high granularity → short focused slice (fine detail)
           - low  granularity → long slice (broad context)
+
+        If `causal` is True, biases selection toward the end of the matrix.
 
         Returns (slice, start_idx, end_idx).
         """
@@ -298,7 +308,16 @@ class NeuralDot:
         patch_size = min(patch_size, n)
         if n <= 1:
             return matrix, 0, n
-        offset = int(self._rng.uniform(0, n - patch_size + 1))
+
+        if causal:
+            # Bias toward the end: ensure end index is closer to n
+            # Weight the offset choice toward (n - patch_size)
+            # Use a beta distribution or similar to bias toward 1.0
+            bias_factor = self._rng.beta(2.0, 1.0) # Skewed toward 1.0
+            offset = int(bias_factor * (n - patch_size))
+        else:
+            offset = int(self._rng.uniform(0, n - patch_size + 1))
+
         start  = max(0, min(offset, n - 1))
         end    = max(start + 1, min(start + patch_size, n))
         return matrix[start:end], start, end
@@ -480,39 +499,49 @@ class NeuralDot:
     def _reason(self, v: np.ndarray, temperature: float,
                 consensus: Optional[np.ndarray] = None) -> np.ndarray:
         """
-        Internal Reasoning (Inner Monologue):
-        Perform a micro-iteration internally to refine the vector.
-        Incorporates 'Cognitive Peer Pressure' if a consensus hint is available.
+        Recursive Internal Reasoning (Inner Monologue):
+        Deepened simulation where the dot explores its own predictions
+        using its learnable reasoning_depth.
         """
         refined = v
-        # Perform 2 micro-steps of iterative refinement
-        for _ in range(2):
-            # Transform and gate
+        # Number of micro-steps scaled by learnable reasoning_depth (max 5)
+        steps = max(1, int(self.bias.reasoning_depth * 5))
+
+        for _ in range(steps):
+            # 1. Self-Projection: What does the dot 'think' of its current state?
             delta = np.tanh(self.W @ refined + self.b_offset)
 
-            # Cognitive Peer Pressure: nudge toward hazy global summary
+            # 2. Cognitive Peer Pressure: Integration of global context
             if consensus is not None:
-                # The dot self-corrects based on its attention bias
-                # (high attention dots resist peer pressure more)
+                # 'Cognitive Stubbornness': high attention dots ignore the crowd
                 pressure = 0.15 * (1.0 - self.bias.attention_bias)
+                # Complex-aware blend if consensus carries phase
                 refined = (1.0 - pressure) * refined + pressure * consensus
 
-            # Add small noise per step based on temperature
+            # 3. Dynamic Gating: Abstraction bias controls the rate of change
+            gate = 0.2 + 0.3 * self.bias.abstraction_bias
             noise = self._rng.randn(len(v)).astype(np.float32) * temperature * 0.02
-            refined = 0.8 * refined + 0.2 * delta + noise
+            refined = (1.0 - gate) * refined + gate * delta + noise
+
+            # 4. Normalization to maintain representational stability
+            n_val = np.linalg.norm(refined)
+            if n_val > 1e-10:
+                refined = refined / n_val * np.sqrt(self.feature_dim)
+
         return refined
 
     # ── Main predict ──────────────────────────────────────────────────
 
     def predict(self, basemap, memory_hint: Optional[np.ndarray] = None,
                 context_entropy: float = 0.5,
-                consensus: Optional[np.ndarray] = None) -> List[Tuple[np.ndarray, float, Dict]]:
+                consensus: Optional[np.ndarray] = None,
+                causal: bool = False) -> List[Tuple[np.ndarray, float, Dict]]:
         # Fast path: use already-pooled result if available (for batch prediction)
         if hasattr(self, "_current_pooled"):
             pooled, start, end = self._current_pooled
             del self._current_pooled
         else:
-            pooled, start, end = self._get_pooled(basemap, memory_hint)
+            pooled, start, end = self._get_pooled(basemap, memory_hint, causal=causal)
 
         n_tokens = max(int(basemap.matrix.shape[0]), 1)
         slice_phase = float(2.0 * np.pi * ((start + end) * 0.5) / n_tokens)
@@ -546,6 +575,9 @@ class NeuralDot:
         p_phase = self.current_phase if self.current_phase != 0.0 else slice_phase
         phase_factor = np.exp(1j * p_phase)
 
+        # Target index for causal prediction is the token immediately following the slice
+        target_idx = end if end < n_tokens else None
+
         for h in range(self.n_heads):
             raw  = self._project_head(abstract, h, T)
             norm = np.linalg.norm(raw)
@@ -559,6 +591,7 @@ class NeuralDot:
                 "dot_type":  _TYPE_NAMES[self.dot_type],
                 "head":      h,
                 "slice":     (start, end),
+                "target_idx": target_idx,
                 "phase":     p_phase,
                 "bias":      self.bias,
                 "source":    "original",
@@ -569,8 +602,8 @@ class NeuralDot:
             }))
         return results
 
-    def _get_pooled(self, basemap, memory_hint=None):
-        sl, start, end = self._select_slice(basemap.matrix)
+    def _get_pooled(self, basemap, memory_hint=None, causal: bool = False):
+        sl, start, end = self._select_slice(basemap.matrix, causal=causal)
         pooled = self._pool(sl, memory_hint)
         return pooled, start, end
 
@@ -635,7 +668,8 @@ class DotGenerator:
     def run_all(self, basemap, dots: List[NeuralDot],
                 memory_hints: Optional[Dict[int, np.ndarray]] = None,
                 context_entropy: float = 0.5,
-                consensus: Optional[np.ndarray] = None) -> List[Tuple]:
+                consensus: Optional[np.ndarray] = None,
+                causal: bool = False) -> List[Tuple]:
         """
         Run all dots on the basemap.
         Optimized via semi-vectorization.
@@ -645,13 +679,13 @@ class DotGenerator:
         # 1. Sequential pooling (strategy-dependent)
         for dot in dots:
             hint = hints.get(dot.dot_id)
-            dot._current_pooled = dot._get_pooled(basemap, hint)
+            dot._current_pooled = dot._get_pooled(basemap, hint, causal=causal)
 
         # 2. Sequential prediction (currently)
         # TODO: Vectorize the transform/reasoning stage across dots
         all_results = []
         for dot in dots:
-            preds = dot.predict(basemap, context_entropy=context_entropy, consensus=consensus)
+            preds = dot.predict(basemap, context_entropy=context_entropy, consensus=consensus, causal=causal)
             all_results.extend(preds)
         return all_results
 

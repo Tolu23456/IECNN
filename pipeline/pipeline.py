@@ -139,6 +139,7 @@ class IECNN:
         self.self_model = SelfModel(seed=seed)
         self.world_graph = WorldGraph(feature_dim=feature_dim)
         self.context_map: Optional[np.ndarray] = None # Rolling document context
+        self.narrative_base: Optional[np.ndarray] = None # Global Narrative Base for Chat
 
         # Dot pool (generated lazily on first use; evolved across calls)
         self._dots: Optional[list] = None
@@ -164,11 +165,12 @@ class IECNN:
     def _learned_paths(self, persistence_path: str) -> dict:
         base = persistence_path
         return {
-            "dots":      base + ".dots.pkl",
-            "dotmem":    base + ".dotmem.pkl",
-            "clustmem":  base + ".clustmem.pkl",
-            "evo":       base + ".evo.pkl",
-            "meta":      base + ".meta.pkl",
+            "dots":       base + ".dots.pkl",
+            "dotmem":     base + ".dotmem.pkl",
+            "clustmem":   base + ".clustmem.pkl",
+            "worldgraph": base + ".worldgraph.pkl",
+            "evo":        base + ".evo.pkl",
+            "meta":       base + ".meta.pkl",
         }
 
     def save_brain(self, persistence_path: Optional[str] = None) -> None:
@@ -189,6 +191,8 @@ class IECNN:
             pickle.dump(self.dot_memory.state_dict(), fh, protocol=pickle.HIGHEST_PROTOCOL)
         with open(paths["clustmem"], "wb") as fh:
             pickle.dump(self.cluster_memory.state_dict(), fh, protocol=pickle.HIGHEST_PROTOCOL)
+        with open(paths["worldgraph"], "wb") as fh:
+            pickle.dump(self.world_graph.state_dict(), fh, protocol=pickle.HIGHEST_PROTOCOL)
         with open(paths["evo"], "wb") as fh:
             pickle.dump(self.evolution.state_dict(), fh, protocol=pickle.HIGHEST_PROTOCOL)
         with open(paths["meta"], "wb") as fh:
@@ -238,6 +242,9 @@ class IECNN:
         if os.path.exists(paths["clustmem"]):
             with open(paths["clustmem"], "rb") as fh:
                 self.cluster_memory.load_state(pickle.load(fh))
+        if os.path.exists(paths["worldgraph"]):
+            with open(paths["worldgraph"], "rb") as fh:
+                self.world_graph.load_state(pickle.load(fh))
         if os.path.exists(paths["evo"]):
             with open(paths["evo"], "rb") as fh:
                 self.evolution.load_state(pickle.load(fh))
@@ -449,7 +456,7 @@ class IECNN:
 
     def run(self, input_data: Any, verbose: bool = False,
             update_brain: bool = False, mode: str = "text",
-            mask_ratio: float = 0.0) -> IECNNResult:
+            mask_ratio: float = 0.0, causal: bool = False) -> IECNNResult:
         """
         Run the full 10-layer IECNN pipeline.
 
@@ -459,6 +466,7 @@ class IECNN:
           update_brain — if True, the text enriches the global BaseMapping knowledge
           mode         — 'text' | 'image' | 'audio' | 'video'
           mask_ratio   — fraction of BaseMap rows to 'mask' for MBM Pretraining (v4 SOTA)
+          causal       — if True, dots focus on the end of the input (for prediction)
         """
         if update_brain and mode == "text":
             self.base_mapper.fit([input_data])
@@ -507,15 +515,28 @@ class IECNN:
 
             # ── Memory hints for adaptive attention ──────────────────
             memory_hints = {}
+
+            # 0. Global Fact Retrieval (World Graph)
+            fact_hint = self.world_graph.retrieve_facts(cur_bmap.matrix, self.alpha)
+
             for dot in dots:
                 # 1. Start with episodic hint (v4 SOTA)
                 hint = self.dot_memory.episodic_hint(dot.dot_id, cur_bmap.matrix, self.alpha)
 
-                # 2. Fallback to rolling centroid
+                # 2. Integrate Factual Memory if episodic is sparse
+                if hint is None and fact_hint is not None:
+                    # Blend fact with recent dot success
+                    rc = self.dot_memory.recent_centroid(dot.dot_id)
+                    if rc is not None:
+                        hint = 0.6 * fact_hint + 0.4 * rc
+                    else:
+                        hint = fact_hint
+
+                # 3. Fallback to rolling centroid
                 if hint is None:
                     hint = self.dot_memory.recent_centroid(dot.dot_id)
 
-                # 3. Last fallback: pattern library
+                # 4. Last fallback: pattern library
                 if hint is None and rnd == 0:
                     hint = self.cluster_memory.closest_pattern(basemap.pool("mean"), self.alpha)
 
@@ -530,6 +551,7 @@ class IECNN:
                 memory_hints=memory_hints,
                 context_entropy=cur_entropy,
                 consensus=consensus,
+                causal=causal,
             )
 
             # ── Layer 5: AIM (9 inversions in parallel) ───────────────
@@ -602,15 +624,24 @@ class IECNN:
             # ── Update state for next round ───────────────────────────
             refined = self.iter_ctrl.advance(surv, final_out)
 
-            # ── Adaptive exploration (F16-driven stagnation response) ────
-            # When EUG is near-zero the system is in a flat basin: inject
-            # noise into the refined vector AND raise context_entropy so
-            # dots explore broader temperature / inversion settings next round.
+            # ── Aggressive Breakthrough System (Stagnation Response) ────
+            # When EUG is near-zero or energy is high, the system is stuck.
+            # We trigger breakthrough actions to force a representational shift.
             eug_val = self.iter_ctrl.current_eug()
-            if abs(eug_val) < 0.01:
-                noise   = self._rng.randn(len(refined)).astype(np.float32) * 0.05
+            energy  = self.iter_ctrl.current_energy()
+
+            if abs(eug_val) < 0.005 or energy > 0.8:
+                # 1. Breakthrough Noise: much stronger than standard exploration
+                breakthrough_std = 0.15 if energy > 0.9 else 0.08
+                noise = self._rng.randn(len(refined)).astype(np.float32) * breakthrough_std
                 refined = refined + noise
-                cur_entropy = min(1.0, cur_entropy + 0.30)
+
+                # 2. Temperature Spike: Force dots to explore wide variants
+                cur_entropy = min(1.0, cur_entropy + 0.50)
+
+                # 3. Structural Nudge: Randomly flip a few dims to escape local basin
+                flip_idx = self._rng.choice(len(refined), size=5, replace=False)
+                refined[flip_idx] *= -1.2
 
             cur_bmap = self._blend(basemap, refined)
             self._record_dot_outcomes(surv, candidates, assign, dots, cur_bmap)
@@ -697,6 +728,15 @@ class IECNN:
                 noise = self._rng.randn(len(refined)).astype(np.float32) * actions.exploration_noise
                 refined = refined + noise
 
+            # 3. Dynamic Computation Budget: adjust max_iterations
+            self.iter_ctrl.max_iterations = max(5, min(20, self.iter_ctrl.max_iterations + actions.iteration_budget_delta))
+
+            # 4. Modulate Dot Reasoning Depth
+            for dot in dots:
+                b_arr = dot.bias.to_array()
+                b_arr[5] = np.clip(b_arr[5] + actions.reasoning_depth_delta, 0.0, 1.0)
+                dot.bias = BiasVector.from_array(b_arr)
+
             # Learn from the delta in system energy/utility (simplified update)
             u_delta = self.iter_ctrl.utility_acceleration()
             e_delta = self.iter_ctrl.current_energy() - (all_rounds[-2]["energy"] if len(all_rounds) > 1 else 0.5)
@@ -725,6 +765,23 @@ class IECNN:
         n = np.linalg.norm(final_out)
         if n > 1e-10: final_out = final_out / n * np.sqrt(self.feature_dim)
 
+        # ── Layer 12: Causal Discovery ────────────────────────────────
+        # Periodically simulate interventions to find structural dependencies.
+        if self._call_count > 0 and self._call_count % 20 == 0 and mode == "text":
+            from cognition.reasoning import DeepReasoningLayer
+            reasoner = DeepReasoningLayer(self, alpha=self.alpha)
+            # Heuristic dependency analysis: what tokens drive the output?
+            try:
+                impacts = reasoner.discover_dependencies(str(input_data))
+                # Top-weighted causal tokens reinforce LOGIC/STRUCTURAL dots
+                if impacts:
+                    top_token_idx = max(impacts, key=impacts.get)
+                    for d in [dot for dot in dots if dot.dot_type in (DotType.LOGIC, DotType.STRUCTURAL)]:
+                        # Nudge dots toward the most impactful causal slice
+                        d.bias.attention_bias = min(1.0, d.bias.attention_bias + 0.05)
+            except Exception:
+                pass
+
         # ── Post-run: update memory + evolve dots ─────────────────────
         # Store output in working memory for next call
         self.working_memory = final_out.copy()
@@ -738,13 +795,18 @@ class IECNN:
             self.cluster_memory.commit_pattern(final_out, top_cluster.score,
                                                alpha=self.alpha, phase=top_phase)
 
-            # Recursive Base Composition: High-score winners become new Bases
-            if top_cluster.score > 0.65:
-                # Heuristic naming for composite concept
+            # Hierarchical Concept Formation (F31 SOTA):
+            # High-confidence winners become permanent Named Composite Bases.
+            if top_cluster.score > 0.70:
+                # Hierarchical Naming: combine top 2 tokens if text mode
                 if mode == "text":
-                    # For text, we can use the top tokens as a name hint
-                    # (simplified for now)
-                    concept_name = f"concept_{self._call_count % 100}"
+                    # Determine naming components from the winning cluster's infos
+                    sources = top_cluster.dot_types()
+                    # (Simplified naming for now, could be more elaborate)
+                    concept_id = self._call_count % 1000
+                    concept_name = f"concept_{concept_id}"
+
+                    # Register as a permanent named base in the global vocabulary
                     self.base_mapper.register_composite_base(concept_name, final_out)
         if self.do_evolve:
             self._dots = self.evolution.evolve(dots, self.dot_memory, call_count=self._call_count)
@@ -771,6 +833,84 @@ class IECNN:
             if verbose: print(f"[IECNN] Processing {len(sentences)} sentences hierarchically...")
             return self.run_hierarchical(sentences, verbose=verbose)
         return self.run(text, verbose=verbose).output
+
+    def predict_next_token_vector(self, text: str, verbose: bool = False) -> np.ndarray:
+        """
+        Specialized pass for autoregressive next-token prediction.
+        Dots are biased to focus on the end of the sequence.
+        """
+        res = self.run(text, verbose=verbose, causal=True)
+        return res.output
+
+    def generate_autoregressive(self, prompt: str, max_tokens: int = 10,
+                                verbose: bool = False) -> str:
+        """
+        Generate text token-by-token using the autoregressive loop.
+        """
+        from decoding.decoder import IECNNDecoder
+        decoder = IECNNDecoder(self)
+        current_text = prompt
+        generated = []
+
+        for _ in range(max_tokens):
+            latent = self.predict_next_token_vector(current_text, verbose=verbose)
+            next_token = decoder.decode_single_token(latent)
+            if next_token == "[unknown]" or next_token == ".":
+                if next_token == ".":
+                    generated.append(next_token)
+                    self.dot_memory.output_history.append(next_token)
+                break
+            generated.append(next_token)
+            self.dot_memory.output_history.append(next_token)
+            current_text += " " + next_token
+
+        return " ".join(generated)
+
+    def chat(self, message: str, history: List[Tuple[str, str]] = None,
+             max_tokens: int = 15, verbose: bool = False) -> str:
+        """
+        Conversational interface for IECNN.
+        Uses a 'Global Narrative Base' and Router for Agentic behavior.
+        """
+        from cognition.router import AGIRouter
+        router = AGIRouter(self)
+
+        # 1. Intent Routing
+        intent, prompt = router.route(message, history)
+
+        if history:
+            # Update Narrative Base by compressing the last interaction
+            last_user, last_bot = history[-1]
+            last_latent = self.encode(f"{last_user} {last_bot}")
+            if self.narrative_base is None:
+                self.narrative_base = last_latent
+            else:
+                # Narrative arc blend (high persistence)
+                self.narrative_base = 0.8 * self.narrative_base + 0.2 * last_latent
+
+        context = f"user {message} bot"
+
+        # We temporarily inject the narrative base into the model's working memory
+        # to ground the new response in the overall conversation arc.
+        old_wm = self.working_memory
+        if self.narrative_base is not None:
+            self.working_memory = self.narrative_base
+
+        try:
+            response = self.generate_autoregressive(prompt, max_tokens=max_tokens, verbose=verbose)
+
+            # 2. Tool Execution (Heuristic)
+            if "RUN_CODE" in response or intent.value == "code":
+                from utils.tools import ToolExecutor
+                executor = ToolExecutor(self)
+                result = executor.parse_and_execute(response)
+                if result:
+                    response += f"\n[Output]: {result}"
+
+        finally:
+            self.working_memory = old_wm
+
+        return response
 
     def run_hierarchical(self, sentences: List[str], verbose: bool = False) -> np.ndarray:
         """
@@ -941,62 +1081,45 @@ class IECNN:
 
     def _reflect(self, output: np.ndarray, dots: list, basemap: BaseMap) -> np.ndarray:
         """
-        Counterfactual Reasoning Layer (v2):
-        Resolves semantic contradictions by simulating alternative interpretations.
+        Cognitive Peer Pressure & Veto System (v5 SOTA):
+        Deep recursive reasoning where specialized dots can veto the consensus.
 
-        1. Identifies 'veto' dots (LOGIC/SEMANTIC) that strongly disagree with the output.
-        2. For each veto, runs an AIM inversion to see if a counterfactual
-           interpretation provides a better fit for the conflicting dots.
-        3. Fuses the most consistent counterfactuals back into the final output.
+        1. Identifies 'veto' dots (LOGIC/SEMANTIC) that strongly disagree.
+        2. Triggers Repellent Convergence if vetoes are strong.
+        3. Uses counterfactual simulation to resolve contradictions.
         """
-        # Select specialized dots for reflection
         veto_dots = [d for d in dots if d.dot_type in (DotType.LOGIC, DotType.SEMANTIC)]
-        if not veto_dots:
-            return output
+        if not veto_dots: return output
 
-        # Sample a few dots for efficiency
-        sample_size = min(12, len(veto_dots))
-        idx = self._rng.choice(len(veto_dots), sample_size, replace=False)
-        selected = [veto_dots[i] for i in idx]
-
-        corrections = []
-
-        for dot in selected:
-            # Get dot's internal predictions for the current output context
-            preds = dot.predict(basemap, memory_hint=output, context_entropy=0.05)
-
+        # 1. Detect Vetoes
+        veto_signals = []
+        for dot in veto_dots[:15]:
+            preds = dot.predict(basemap, memory_hint=output, context_entropy=0.01)
             for p, conf, _ in preds:
                 sim = similarity_score(output, p, self.alpha)
+                if sim < 0.25: # Strong Disagreement
+                    veto_signals.append((p, conf, dot))
 
-                # If dot strongly disagrees (sim < 0.35), simulate counterfactuals
-                if sim < 0.35:
-                    # 1. Choose inversion type based on dot's requested inversion or default to feature
-                    inv_type = dot.dot_type.name.lower() if hasattr(dot, "requested_inversion") and dot.requested_inversion else "feature"
+        if not veto_signals: return output
 
-                    # 2. Transform the dot's prediction using AIM to explore 'the other side'
-                    # We use the internal dispatch from aim.aim
-                    from aim.aim import _apply_inversion
-                    p_inv = _apply_inversion(inv_type, p, basemap.matrix, self._rng)
+        # 2. Resolve via Repellent Convergence
+        # We run a mini-convergence where the current 'output' acts as a repellent
+        # to find an alternative that satisfies the vetoing dots.
+        from convergence.convergence import ConvergenceLayer
+        conv = ConvergenceLayer(micro_threshold=0.20, alpha=self.alpha)
 
-                    # p_hat = Attention(output, context, Invert(p))
-                    from formulas.formulas import aim_transform
-                    ctx2d = basemap.matrix.reshape(1, -1) if basemap.matrix.ndim == 1 else basemap.matrix
-                    p_hat = aim_transform(p, ctx2d, lambda _: p_inv)
+        candidates = []
+        for p, conf, dot in veto_signals:
+            candidates.append((p, conf, {"dot_id": dot.dot_id, "source": "veto"}))
 
-                    # 3. If the counterfactual interpretation aligns better with the rest of the context
-                    # or resolves the contradiction, we use it as a correction signal.
-                    hat_sim = similarity_score(output, p_hat, self.alpha)
-                    if hat_sim > sim:
-                        # The inverted interpretation is more plausible than the direct contradiction
-                        corrections.append(conf * (p_hat - output))
-                    else:
-                        # Direct correction (nudge toward dot's original prediction)
-                        corrections.append(conf * (p - output))
+        # Repellent pass: find clusters that disagree with 'output' but agree with each other
+        alt_clusters, _ = conv.run_ultra(candidates, repellent=output)
 
-        if corrections:
-            # Apply weighted corrections (conservative blend to maintain stability)
-            nudge = np.mean(np.stack(corrections), axis=0)
-            return output + 0.15 * nudge
+        if alt_clusters and alt_clusters[0].score > 0.4:
+            # Shift output toward the most consistent alternative
+            alt_centroid = alt_clusters[0].centroid
+            shift_weight = 0.25 * alt_clusters[0].score
+            return (1.0 - shift_weight) * output + shift_weight * alt_centroid
 
         return output
 
@@ -1046,11 +1169,18 @@ class IECNN:
                 sl_start, sl_end = info.get("slice", (0, 0))
                 ctx = basemap.matrix[sl_start:sl_end]
 
+                # Causal Target: actual next token embedding if available
+                target_idx = info.get("target_idx")
+                causal_target = None
+                if target_idx is not None and target_idx < len(basemap.matrix):
+                    causal_target = basemap.matrix[target_idx]
+
                 self.dot_memory.record(dot_id, pred, in_winner,
                                        phase=info.get("phase"),
                                        initial_agreement=avg_conf,
                                        input_context=ctx,
-                                       ground_truth=ground_truth)
+                                       ground_truth=ground_truth,
+                                       causal_target=causal_target)
 
     def _learn_bias(self, surviving: List[Cluster], candidates: List[Tuple],
                     assignments: List[int], basemap: BaseMap):

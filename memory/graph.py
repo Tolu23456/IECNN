@@ -45,26 +45,46 @@ class WorldGraph:
         self.edges: Dict[Tuple[int, int], Edge] = {}
         self._next_node_id = 10000
 
-    def consolidate(self, cluster_memory_patterns: List[Tuple[np.ndarray, float]], alpha: float = 0.7):
+    def consolidate(self, cluster_memory_patterns: List[Tuple[np.ndarray, float]],
+                    alpha: float = 0.7, surprise_threshold: float = 0.15):
         """
-        Merge new patterns from ClusterMemory into the permanent graph.
-        Patterns with high weight that recur across many calls become graph nodes.
+        Surprise-Driven Consolidation (v5 SOTA):
+        Merge patterns into the graph only if they offer high 'Surprise'
+        (structural novelty) relative to existing nodes. This prevents
+        redundant graph growth.
         """
-        for centroid, weight in cluster_memory_patterns:
-            if weight < 0.2: continue # Ignore weak patterns
+        new_node_ids = []
 
+        for centroid, weight in cluster_memory_patterns:
+            if weight < 0.2: continue
+
+            # 1. Calculate surprise: how different is this from everything we know?
             best_node = self.find_closest(centroid, alpha)
-            if best_node and similarity_score(centroid, best_node.centroid, alpha) > self.threshold:
-                # Update existing node (consolidation)
-                best_node.centroid = 0.95 * best_node.centroid + 0.05 * centroid
-                best_node.weight += weight
-                best_node.occurrences += 1
-            else:
-                # Add as new candidate node
-                new_id = self._next_node_id
-                self._next_node_id += 1
-                self.nodes[new_id] = Node(new_id, centroid.copy())
-                self.nodes[new_id].weight = weight
+            similarity = similarity_score(centroid, best_node.centroid, alpha) if best_node else 0.0
+            surprise = 1.0 - similarity
+
+            if surprise < surprise_threshold:
+                # 2. Not surprising: refine existing node
+                if best_node:
+                    # Knowledge refinement rate determined by weight
+                    refine_rate = 0.05 * weight
+                    best_node.centroid = (1.0 - refine_rate) * best_node.centroid + refine_rate * centroid
+                    best_node.weight += weight
+                    best_node.occurrences += 1
+                    new_node_ids.append(best_node.node_id)
+                continue
+
+            # 3. Surprising: register as new conceptual node
+            new_id = self._next_node_id
+            self._next_node_id += 1
+            self.nodes[new_id] = Node(new_id, centroid.copy())
+            self.nodes[new_id].weight = weight
+            new_node_ids.append(new_id)
+
+        # Link concepts that frequently appear together (Co-occurrence edges)
+        for i in range(len(new_node_ids)):
+            for j in range(i + 1, len(new_node_ids)):
+                self.add_edge(new_node_ids[i], new_node_ids[j])
 
     def find_closest(self, query: np.ndarray, alpha: float = 0.7) -> Optional[Node]:
         """Find the most similar conceptual anchor in the graph."""
@@ -95,13 +115,34 @@ class WorldGraph:
     def query(self, query_vec: np.ndarray, alpha: float = 0.7, top_k: int = 5) -> List[Tuple[Node, float]]:
         """Retrieve related conceptual anchors."""
         results = []
+        # Flatten query if it's a matrix
+        q_v = np.mean(query_vec, axis=0) if query_vec.ndim > 1 else query_vec
+
         for node in self.nodes.values():
-            sim = similarity_score(query_vec, node.centroid, alpha)
+            sim = similarity_score(q_v, node.centroid, alpha)
             if sim > 0.1:
                 results.append((node, sim))
 
         results.sort(key=lambda x: -x[1])
         return results[:top_k]
+
+    def retrieve_facts(self, context_vec: np.ndarray, alpha: float = 0.7) -> Optional[np.ndarray]:
+        """
+        Factual Retrieval: Find the most relevant fact-centroid in the graph.
+        Returns a blended centroid of related nodes to serve as a memory hint.
+        """
+        matches = self.query(context_vec, alpha, top_k=3)
+        if not matches:
+            return None
+
+        total_sim = sum(s for _, s in matches)
+        if total_sim < 1e-10: return matches[0][0].centroid
+
+        blended = np.zeros(self.feature_dim, dtype=np.complex64)
+        for node, sim in matches:
+            blended += (sim / total_sim) * node.centroid.astype(np.complex64)
+
+        return blended
 
     def state_dict(self) -> Dict:
         return {

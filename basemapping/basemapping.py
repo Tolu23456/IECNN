@@ -95,9 +95,10 @@ def _load_lib():
     return _lib
 
 
-# ── Primitive bases: a-z, 0-9, basic punctuation ────────────────────
+# ── Primitive bases: a-z, 0-9, basic punctuation, and ACTION tokens ──
 _PRIMITIVES = list("abcdefghijklmnopqrstuvwxyz0123456789") + [
     ".", ",", "!", "?", "'", "-", "_", "/", "(", ")",
+    "WRITE_CODE", "RUN_CODE", "SEARCH", "GENERATE_IMAGE", "SPEAK"
 ]
 
 EMBED_DIM   = 224
@@ -158,27 +159,36 @@ class BaseMap:
     def __len__(self):
         return len(self.tokens)
 
-    def pool(self, method: str = "mean") -> np.ndarray:
+    def pool(self, method: str = "mean", query: Optional[np.ndarray] = None) -> np.ndarray:
         """
         Pool the token rows into a single vector.
 
         Methods:
-          "mean"  — uniform average of all rows (default)
-          "max"   — element-wise maximum
-          "idf"   — IDF-style: down-weight high-frequency tokens (stop-word
-                    suppression without a stop-word list).  Weights are
-                    computed from the frequency column in the feature matrix.
+          "mean"      — uniform average of all rows (default)
+          "max"       — element-wise maximum
+          "idf"       — IDF-style: down-weight high-frequency tokens.
+          "attention" — weight tokens by similarity to a query vector (or centroid).
         """
         if method == "mean":
             return np.mean(self.matrix, axis=0)
         if method == "max":
             return np.max(self.matrix, axis=0)
         if method == "idf":
-            freq_col = self.matrix[:, EMBED_DIM + POS_DIM]  # raw_freq / max_freq
+            freq_col = self.matrix[:, EMBED_DIM + POS_DIM]
             idf_w    = np.clip(1.0 - freq_col * 0.7, 0.3, 1.0)
             weighted = self.matrix * idf_w[:, None]
             denom    = idf_w.sum()
-            return weighted.sum(axis=0) / max(float(denom), 1e-10)
+            return (weighted.sum(axis=0) / max(float(denom), 1e-10)).astype(np.float32)
+        if method == "attention":
+            q = query if query is not None else np.mean(self.matrix, axis=0)
+            # Scaled dot-product attention scores
+            dim = self.matrix.shape[1]
+            scores = (self.matrix @ q) / np.sqrt(dim)
+            scores -= np.max(scores)
+            weights = np.exp(scores * 2.0)
+            weights /= weights.sum() + 1e-10
+            return (weights[:, None] * self.matrix).sum(axis=0).astype(np.float32)
+
         return np.mean(self.matrix, axis=0)
 
     def slice(self, start: int, end: int) -> np.ndarray:
@@ -688,11 +698,19 @@ class BaseMapper:
             else:
                 block = block[:EMBED_DIM]
 
-            # Temporal motion: mean absolute pixel diff vs previous frame
+            # Motion-Vector Encoding (v5 SOTA):
+            # Compute 8-dim motion deltas between frames to capture temporal dynamics.
             if i > 0:
-                motion = float(np.mean(np.abs(frames_rgb[i] - frames_rgb[i - 1])))
+                diff = np.abs(frames_rgb[i] - frames_rgb[i - 1])
+                # 8-dim motion signature: 4 quadrants + RGB means + global std
+                m_sig = np.array([
+                    diff[:32, :32].mean(), diff[:32, 32:].mean(),
+                    diff[32:, :32].mean(), diff[32:, 32:].mean(),
+                    diff.mean(axis=(0,1))[0], diff.mean(axis=(0,1))[1], diff.mean(axis=(0,1))[2],
+                    diff.std()
+                ], dtype=np.float32)
                 block = block.copy()
-                block[-1] = motion  # encode motion in last embedding dim
+                block[-8:] = m_sig  # Encode motion in last 8 embedding dims
 
             n_val = np.linalg.norm(block)
             if n_val > 1e-10:
@@ -725,10 +743,10 @@ class BaseMapper:
         Greedily segment token stream into the highest-level bases available.
 
         Priority (highest wins):
+          0. Composite concepts (Recursive Base Composition)
           1. Known phrase bases (longest match first)
           2. Known word bases
           3. Unknown word — represented as ONE token of type 'composed'
-             (embedding built from character primitives; NOT split into chars)
         """
         result_toks:  List[str] = []
         result_types: List[str] = []
@@ -736,12 +754,27 @@ class BaseMapper:
         while i < len(tokens):
             matched = False
             if self.is_fitted:
+                # 0. Check for Composite Concepts first
+                for comp_name, comp_type in self._base_types.items():
+                    if comp_type == "composite":
+                        # Greedy composite match: does the next span match a known concept?
+                        # (Concepts are identified by their stable string name)
+                        span = " ".join(tokens[i:i+3])
+                        if comp_name in span:
+                            result_toks.append(comp_name)
+                            result_types.append("composite")
+                            # We heuristicly skip ahead based on word count
+                            i += len(comp_name.split("_")) # e.g. 'concept_123'
+                            matched = True
+                            break
+
+                # 1. Phrases
                 for ng_len in range(self.ngram_range[1], self.ngram_range[0]-1, -1):
                     if i + ng_len <= len(tokens):
                         candidate = " ".join(tokens[i:i+ng_len])
                         if candidate in self._base_vocab:
                             result_toks.append(candidate)
-                            result_types.append("phrase")
+                            result_types.append(self._base_types.get(candidate, "phrase"))
                             i += ng_len
                             matched = True
                             break
