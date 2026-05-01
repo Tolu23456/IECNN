@@ -234,32 +234,38 @@ class IECNN:
                 self.alpha, self.convergence.gamma, self.iter_ctrl.max_iterations,
                 _fp(out_v)[0], assign.ctypes.data_as(ctypes.POINTER(ctypes.c_int))
             )
-            # v6 SOTA: Fast outcome recording for C-pipeline
-            # We treat the best cluster from C as the ground truth for this run
-            # to enable dot reinforcement learning.
+
+            # v6 SOTA: Outcome recording for C-pipeline
             for i, dot in enumerate(dots):
                 for h in range(dot.n_heads):
-                    # Index in assign array (max 8 heads per dot)
                     idx = i * 8 + h
-                    in_winner = (assign[idx] == 0) # C-loop uses index 0 for best_c
+                    in_winner = (assign[idx] == 0)
                     self.dot_memory.record(dot.dot_id, out_v, in_winner)
 
             self._call_count += 1
             self.working_memory = out_v.copy()
             return IECNNResult(out_v, basemap, None, {"rounds": 0}, "Pipeline-C", [])
 
-        # Python Fallback (Original Loop)
+        # Python Fallback
         self.iter_ctrl.reset()
         cur_bmap = basemap
         while True:
-            rnd = self.iter_ctrl.current_round
             dot_preds = self.dot_gen.run_all(cur_bmap, dots, causal=causal)
             candidates = self.aim.transform(dot_preds, cur_bmap)
             filt, _ = self.pruning.stage1(candidates)
-            clusters, _ = self.convergence.run(filt)
+            clusters, assign = self.convergence.run(filt)
             surv, _ = self.pruning.stage3(clusters)
             if not surv: break
             self.iter_ctrl.record_round(surv, {})
+
+            # Manual outcome recording for Python fallback
+            win_cid = surv[0].cluster_id
+            for i, (_, _, info) in enumerate(candidates):
+                did = info.get("dot_id")
+                if did is not None:
+                    in_winner = (assign[i] == win_cid)
+                    self.dot_memory.record(did, surv[0].centroid, in_winner)
+
             stop, reason = self.iter_ctrl.should_stop(surv)
             if stop: break
             refined = self.iter_ctrl.advance(surv, surv[0].centroid)
@@ -299,26 +305,30 @@ class IECNN:
             out_v.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
             assigns.ctypes.data_as(ctypes.POINTER(ctypes.c_int))
         )
+
+        for s in range(n_sents):
+            for i, dot in enumerate(dots):
+                for h in range(dot.n_heads):
+                    idx = i * 8 + h
+                    in_winner = (assigns[s, idx] == 0)
+                    self.dot_memory.record(dot.dot_id, out_v[s], in_winner)
+
         self._call_count += n_sents
         return out_v
 
     def train_pass(self, sentences: List[str], use_c_pipeline: bool = True, verbose: bool = True):
         if not sentences: return
         t0 = time.time()
-        # Process in batches of 50 for efficiency
         batch_size = 50
         for i in range(0, len(sentences), batch_size):
             batch = sentences[i:i+batch_size]
             self.run_batch(batch, use_c_pipeline=use_c_pipeline)
-
-            # Trigger Evolution after each batch
             dots = self._ensure_dots()
             self._dots = self.evolution.evolve(dots, self.dot_memory, call_count=self._call_count)
-
             if verbose:
                 elapsed = time.time() - t0
                 rate = (i + len(batch)) / elapsed
-                effs = self.dot_memory.all_effectivenesses()
+                effs = self.dot_memory.all_effectivenesses([d.dot_id for d in self._dots])
                 max_eff = np.max(effs) if len(effs) > 0 else 0.0
                 print(f"\r[train] {i+len(batch)}/{len(sentences)} | {rate:.2f} lines/s | MaxEff: {max_eff:.4f}", end="", flush=True)
         if verbose: print()
@@ -334,28 +344,17 @@ class IECNN:
     def encode(self, text: str) -> np.ndarray: return self.run(text).output
 
     def chat(self, message: str, history: List = None) -> str:
-        """Agentic Chat interface (v6 SOTA)."""
         from cognition.router import AGIRouter
         from decoding.decoder import IECNNDecoder
         from utils.tools import ToolExecutor
-
         router = AGIRouter(self)
         intent, prompt = router.route(message, history=history)
-
-        # Latent Encoding of context-aware prompt
         res = self.run(prompt)
-        latent = res.output
-
-        # Tournament Decoding for high-fidelity response
         decoder = IECNNDecoder(self)
-        response = decoder.decode(latent, iterations=40)
-
-        # Tool Execution loop
+        response = decoder.decode(res.output, iterations=40)
         executor = ToolExecutor(self)
         action_res = executor.parse_and_execute(response)
-        if action_res:
-            response += f"\n[Action Result]: {action_res}"
-
+        if action_res: response += f"\n[Action Result]: {action_res}"
         return response
 
 import time

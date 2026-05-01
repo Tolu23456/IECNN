@@ -52,6 +52,14 @@ Tracked ideas, fixes, and features. Mark items done with [x] as work completes.
 
 ---
 
+## [V6 SOTA Completed]
+- [x] Consolidated Pipeline-C with OpenMP
+- [x] Universal Multilingual BaseMapping (CJK/Arabic)
+- [x] Deterministic SHA-256 Embeddings
+- [x] High-Fidelity Multi-modal Decoder kernels in C
+- [x] LAZY Dot Type and Logic/Action enhancements
+- [x] AAF Memory Safety and fixed Video reshape
+
 ## Active / Near-term
 
 ### Decoder quality
