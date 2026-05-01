@@ -7,6 +7,7 @@ dependencies = [
     "email-validator>=2.3.0",
     "flask>=3.1.3",
     "flask-sqlalchemy>=3.1.1",
+    "google-generativeai",
     "gunicorn>=25.3.0",
     "numpy>=2.4.4",
     "pillow>=12.2.0",

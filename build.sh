@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -e
-GCC=$(which gcc 2>/dev/null || echo "gcc")
-FLAGS="-O3 -shared -fPIC -lm -march=native"
+GCC=/usr/bin/gcc
+FLAGS="-O3 -shared -fPIC -lm -march=native -fopenmp"
 
 echo "[build] Compiling formulas.c → formulas/formulas_c.so"
 $GCC $FLAGS -o formulas/formulas_c.so formulas/formulas.c
@@ -25,3 +25,6 @@ echo "[build] Compiling decoder.c → decoding/decoder_c.so"
 $GCC $FLAGS -o decoding/decoder_c.so decoding/decoder.c
 
 echo "[build] All C extensions built successfully."
+
+echo "[build] Compiling pipeline.c → pipeline/pipeline_c.so"
+$GCC $FLAGS -I. -o pipeline/pipeline_c.so pipeline/pipeline_c.c neural_dot/neural_dot_c.c convergence/convergence.c formulas/formulas.c

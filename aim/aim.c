@@ -179,3 +179,75 @@ void invert_noise(const float *p, int n, unsigned int seed, float *out) {
 
     free(abs_vals);
 }
+
+/* ── Relational Inversion (v6) ──────────────────────────────────── */
+void invert_relational(const float *p, int n, float *out) {
+    int bs = n / 8;
+    if (bs < 1) bs = 1;
+    int nb = n / bs;
+
+    float *G = (float *)calloc(nb * nb, sizeof(float));
+    for (int i = 0; i < nb; i++) {
+        for (int j = 0; j < nb; j++) {
+            float dot = 0.0f;
+            for (int d = 0; d < bs; d++) dot += p[i * bs + d] * p[j * bs + d];
+            G[i * nb + j] = dot;
+        }
+    }
+
+    int dom = 0;
+    float max_off = -1.0f;
+    for (int i = 0; i < nb; i++) {
+        float off = 0.0f;
+        for (int j = 0; j < nb; j++) if (i != j) off += fabsf(G[i * nb + j]);
+        if (off > max_off) { max_off = off; dom = i; }
+    }
+
+    memcpy(out, p, n * sizeof(float));
+    const float *dom_block = p + dom * bs;
+    float self_dot = G[dom * nb + dom] + 1e-10f;
+
+    for (int i = 0; i < nb; i++) {
+        if (i == dom) continue;
+        float dot_val = 0.0f;
+        for (int d = 0; d < bs; d++) dot_val += dom_block[d] * p[i * bs + d];
+        float proj_scale = 2.0f * dot_val / self_dot;
+        for (int d = 0; d < bs; d++) out[i * bs + d] -= proj_scale * dom_block[d];
+    }
+    free(G);
+}
+
+/* ── Temporal Inversion (v6) ────────────────────────────────────── */
+void invert_temporal(const float *p, int n, float *out) {
+    memcpy(out, p, n * sizeof(float));
+    // Semantic dims [0:224] - 8 steps of 28
+    int step = 28;
+    for (int i = 0; i < 4; i++) {
+        for (int d = 0; d < step; d++) {
+            float tmp = out[i * step + d];
+            out[i * step + d] = out[(7 - i) * step + d];
+            out[(7 - i) * step + d] = tmp;
+        }
+    }
+    // Position dims [224:232]
+    if (n >= 232) {
+        for (int i = 0; i < 4; i++) {
+            float tmp = out[224 + i];
+            out[224 + i] = out[231 - i];
+            out[231 - i] = tmp;
+        }
+    }
+}
+
+/* ── Cross-Modal Inversion (v6) ─────────────────────────────────── */
+void invert_cross_modal(const float *p, int n, float *out) {
+    memcpy(out, p, n * sizeof(float));
+    if (n >= 252) {
+        // Roll modality flags circular [248:252]
+        float tmp = out[251];
+        out[251] = out[250];
+        out[250] = out[249];
+        out[249] = out[248];
+        out[248] = tmp;
+    }
+}

@@ -62,20 +62,28 @@ class AGIRouter:
         return best_intent
 
     def route(self, text: str, history: List = None) -> Tuple[Intent, str]:
-        """Unified entry point for the AGI agent."""
+        """Unified entry point for the AGI agent (v6 SOTA)."""
         intent = self.detect_intent(text)
 
-        # Routing logic:
-        if intent == Intent.CODE:
-            # Add CODE markers for autoregressive biasing
-            prompt = f"user {text} ACTION WRITE_CODE bot"
-            return intent, prompt
-        elif intent == Intent.IMAGE:
-            prompt = f"user {text} ACTION GENERATE_IMAGE bot"
-            return intent, prompt
-        elif intent == Intent.SEARCH:
-            prompt = f"user {text} ACTION SEARCH bot"
-            return intent, prompt
+        # History compression: incorporate previous context into current latent state
+        context_prefix = ""
+        if history:
+            # Take last turn for immediate context
+            last_u, last_b = history[-1]
+            context_prefix = f"context [ {last_u} -> {last_b} ] "
 
-        # Default Chat routing
-        return intent, text
+        # Enhanced Routing Logic: Context-aware prompt construction
+        if intent == Intent.CODE:
+            prompt = f"{context_prefix}system [MODE: CODING] user {text} action WRITE_CODE bot"
+        elif intent == Intent.IMAGE:
+            prompt = f"{context_prefix}system [MODE: VISUAL] user {text} action GENERATE_IMAGE bot"
+        elif intent == Intent.AUDIO:
+            prompt = f"{context_prefix}system [MODE: AUDIO] user {text} action SPEAK bot"
+        elif intent == Intent.REASONING:
+            prompt = f"{context_prefix}system [MODE: LOGIC] user {text} action REASON bot"
+        elif intent == Intent.SEARCH:
+            prompt = f"{context_prefix}system [MODE: SEARCH] user {text} action SEARCH bot"
+        else:
+            prompt = f"{context_prefix}user {text} bot"
+
+        return intent, prompt

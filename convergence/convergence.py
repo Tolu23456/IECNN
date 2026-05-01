@@ -45,12 +45,7 @@ class MicroCluster:
 
     def add(self, p, c, info):
         self.predictions.append(p); self.confidences.append(c); self.infos.append(info)
-
-        # Phase-Coded Aggregation (Complex Centroid)
-        # Predictions 'p' are already complex-valued activations from NeuralDot.predict
         stack = np.stack(self.predictions).astype(np.complex64)
-
-        # Constructive/Destructive Interference happens here via mean
         self.centroid = np.mean(stack, axis=0)
 
     def compute_score(self, alpha):
@@ -72,14 +67,9 @@ class Cluster:
 
     def _recompute_centroid(self):
         if not self.predictions: return
-        # Predictions are already complex-valued activations from NeuralDot.predict
         stack = np.stack(self.predictions).astype(np.complex64)
         confs = np.array(self.confidences, np.float32)
-
-        # Weights normalized by confidence
         w = confs / (confs.sum() + 1e-10)
-
-        # Constructive/Destructive Interference
         self.centroid = (w[:, None].astype(np.complex64) * stack).sum(axis=0)
 
     def add_micro(self, mc):
@@ -90,22 +80,39 @@ class Cluster:
         self._recompute_centroid()
 
     def compute_score(self, alpha=0.7, gamma=0.3):
+        """Optimized hierarchical convergence score."""
         if len(self._micro_clusters) >= 2:
             centroids = [mc.centroid for mc in self._micro_clusters if mc.centroid is not None]
             scores = [mc.score for mc in self._micro_clusters]
             if centroids and scores:
-                self.score = hierarchical_convergence_score(centroids, scores, alpha, gamma)
+                stk = np.stack([np.real(c) for c in centroids]).astype(np.float32)
+                dots = (stk @ stk.T) / 256.0
+                agreement = 0.76159416 * (dots + 1.0) / 2.0
+                cross_matrix = alpha * dots + (1.0 - alpha) * agreement
+                n_m = len(centroids)
+                cross_sim = (np.sum(cross_matrix) - n_m) / (n_m * (n_m - 1)) if n_m > 1 else 0.0
+                self.score = np.mean(scores) * (1.0 + gamma * cross_sim)
                 return
         self.score = convergence_score(self.predictions, self.confidences, alpha)
 
     def apply_cross_type_bonus(self, alpha=0.7, bonus_weight=0.15):
+        """Optimized CTA bonus."""
         type_preds = {}
         for p, info in zip(self.predictions, self.infos):
             t = info.get("dot_type", "unknown")
             type_preds.setdefault(t, []).append(p)
         if len(type_preds) < 2: return
-        type_centroids = {t: np.mean(np.stack(ps), axis=0) for t, ps in type_preds.items()}
-        cta = cross_type_agreement(type_centroids, alpha)
+
+        centroids = [np.mean(np.stack(ps), axis=0) for ps in type_preds.values()]
+        stk = np.stack([np.real(c) for c in centroids]).astype(np.float32)
+        norms = np.linalg.norm(stk, axis=1, keepdims=True) + 1e-10
+        stk /= norms; stk *= 16.0 # sqrt(256)
+
+        dots = (stk @ stk.T) / 256.0
+        agreement = 0.76159416 * (dots + 1.0) / 2.0
+        cross_matrix = alpha * dots + (1.0 - alpha) * agreement
+        n_t = len(centroids)
+        cta = (np.sum(cross_matrix) - n_t) / (n_t * (n_t - 1)) if n_t > 1 else 0.0
         self.score = self.score * (1.0 + bonus_weight * cta)
 
     @property
@@ -128,7 +135,6 @@ class Cluster:
         return counts
 
     def modalities(self) -> Dict[str, int]:
-        """Distribution of modalities within this cluster."""
         counts: Dict[str, int] = {}
         for info in self.infos:
             m = info.get("modality", "unknown")
@@ -136,26 +142,12 @@ class Cluster:
         return counts
 
     def mean_phase(self) -> Tuple[float, float]:
-        """
-        Circular mean and concentration of member phases.
-
-        Returns (mean_phase_radians, concentration in [0, 1]).
-        Concentration of 1.0 means all members agree on a single phase;
-        0.0 means uniformly spread. Returns (0.0, 0.0) if no members carry
-        a 'phase' key (i.e. phase coding is disabled or this is legacy data).
-        """
-        re_sum = 0.0
-        im_sum = 0.0
-        n = 0
+        re_sum = im_sum = 0.0; n = 0
         for info in self.infos:
             ph = info.get("phase")
-            if ph is None:
-                continue
-            re_sum += float(np.cos(ph))
-            im_sum += float(np.sin(ph))
-            n += 1
-        if n == 0:
-            return (0.0, 0.0)
+            if ph is None: continue
+            re_sum += float(np.cos(ph)); im_sum += float(np.sin(ph)); n += 1
+        if n == 0: return (0.0, 0.0)
         mean = float(np.arctan2(im_sum, re_sum))
         conc = float(np.sqrt(re_sum * re_sum + im_sum * im_sum) / n)
         return (mean, conc)
@@ -180,17 +172,13 @@ class ConvergenceLayer:
         confs = [c[1] for c in candidates]
         infos = [c[2] for c in candidates]
 
-        # Multi-modal boost: slightly lower threshold for cross-modal agreement
-        # to encourage the emergence of unified concepts.
         is_mixed = len(set(info.get("modality", "unknown") for info in infos)) > 1
         current_micro_thresh = self.micro_thresh * 0.9 if is_mixed else self.micro_thresh
 
-        # Stage 1: micro-clustering
         micro_clusters = self._micro_cluster(preds, confs, infos, current_micro_thresh)
         for mc in micro_clusters:
             mc.compute_score(self.alpha)
 
-        # Stage 2: macro-clustering over micro-cluster centroids
         macro_clusters = self._macro_cluster(micro_clusters)
         for cl in macro_clusters:
             cl.compute_score(self.alpha, self.gamma)
@@ -203,14 +191,8 @@ class ConvergenceLayer:
                     if info in mc.infos: assign[i] = cl.cluster_id
         return macro_clusters, assign
 
-    # ── Stage 1: Micro-clustering ────────────────────────────────────
-
     def _micro_cluster(self, preds: List[np.ndarray], confs: List[float],
                        infos: List[Dict], threshold: Optional[float] = None) -> List[MicroCluster]:
-        """
-        Sequential greedy micro-clustering.
-        C-accelerated for performance.
-        """
         if threshold is None: threshold = self.micro_thresh
         n = len(preds)
         if n == 0: return []
@@ -233,10 +215,9 @@ class ConvergenceLayer:
                 clusters[assign[i]].add(preds[i], confs[i], infos[i])
             return clusters
 
-        # Fallback
+        # Pure Python Fallback
         clusters: List[MicroCluster] = []
         centroids: List[np.ndarray]  = []
-
         for i, (p, c, info) in enumerate(zip(preds, confs, infos)):
             best_cid, best_sim = -1, threshold
             for cid, cent in enumerate(centroids):
@@ -253,28 +234,24 @@ class ConvergenceLayer:
 
     def _macro_cluster(self, micros):
         if not micros: return []
-        n = len(micros)
         centroids_list = [mc.centroid for mc in micros if mc.centroid is not None]
         if not centroids_list: return []
+        n = len(centroids_list)
 
         lib = _load_lib()
         if lib and hasattr(lib, "greedy_cluster"):
             stk = np.ascontiguousarray(np.real(np.stack(centroids_list)), np.float32)
-            n_valid = len(centroids_list)
             dim = stk.shape[1]
-            assign = np.zeros(n_valid, dtype=np.int32)
-
+            assign = np.zeros(n, dtype=np.int32)
             num_c = lib.greedy_cluster(
                 stk.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
-                ctypes.c_int(n_valid), ctypes.c_int(dim),
+                ctypes.c_int(n), ctypes.c_int(dim),
                 ctypes.c_float(self.alpha), ctypes.c_float(self.macro_thresh),
                 assign.ctypes.data_as(ctypes.POINTER(ctypes.c_int))
             )
-
             macro_list = [Cluster(i) for i in range(num_c)]
             for i, mc in enumerate(micros):
-                if mc.centroid is not None:
-                    macro_list[assign[i]].add_micro(mc)
+                macro_list[assign[i]].add_micro(mc)
             return macro_list
 
         macro_list = []
