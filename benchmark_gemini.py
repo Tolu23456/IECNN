@@ -7,7 +7,9 @@ from formulas.formulas import similarity_score
 from cognition.reasoning import DeepReasoningLayer
 
 # Gemini Setup
-GEMINI_API_KEY = "AIzaSyAjIOaz-4xS-gdTEhp1Dbr4HF3RvsthbQ4"
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+if not GEMINI_API_KEY:
+    raise EnvironmentError("GEMINI_API_KEY environment variable not set. Add it via Secrets.")
 genai.configure(api_key=GEMINI_API_KEY)
 model_gemini = genai.GenerativeModel('gemini-flash-latest')
 
