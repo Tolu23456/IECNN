@@ -60,14 +60,64 @@ changing the IECNN algorithm.  All C extensions compiled with `-O3 -march=native
 | Diverse 1k-sentence corpus, 2nd pass | **6,617 w/s** |
 | Sustained (max_pos=6, evolution every 2k sents) | **6,338 w/s** |
 | max_pos=3 (short-prefix mode) | **10,620 w/s** |
+| tok_emb_cache warm (2nd pass, after session-2) | **7,315 w/s** (+10.5%) |
 
 #### Key files changed
-- `pipeline/pipeline.py` — `causal_train_pass` fully rewritten; `_get_ctx_cached` bypasses transform; `train_pass` + `causal_train_pass` add `save_every` param
+- `pipeline/pipeline.py` — `causal_train_pass` fully rewritten; `_get_ctx_cached` bypasses transform; `train_pass` + `causal_train_pass` add `save_every` param; `causal_train_file()` streaming method added; `_tok_emb_cache` for Phase 3; Phase-5b bulk BLAS mean_pred
 - `pipeline/pipeline_c.c` — thread-local static buffers; `training_mode` param; `schedule(dynamic,1)`
 - `neural_dot/neural_dot_c.c` — 65,536-entry noise table; `training_mode` skips fast_randn; removed inner OMP
 - `neural_dot/neural_dot.h` — added `int training_mode` to `predict_batch_c` signature
 - `build.sh` — added `-ffast-math -funroll-loops -lmvec`
 - `fast_train.py` — `fast_effective_train` uses `causal_batch=200, save_every=5000`
+- `train_300k.py` — full training runner for 300k corpus (Phase 1 vocab + Phase 2 causal)
+- `evaluate_iecnn.py` — evaluation suite (win-rate, dot specialization, next-word accuracy, qualitative)
+
+---
+
+## 300k Corpus Training & Evaluation (May 2026)
+
+### Corpus
+271,526 lines assembled from 20 sources: WikiText-2 + 19 Project Gutenberg books (War and Peace, Moby Dick, Great Expectations, David Copperfield, Ulysses, Jane Eyre, Dracula, Oliver Twist, Pride & Prejudice, Two Cities, Sherlock Holmes, Dorian Gray, Emma, Wuthering Heights, Huck Finn, Dubliners, Grimm, Peter Pan, Metamorphosis). Cleaned, deduped, shuffled.  File: `/tmp/corpus_300k.txt`.
+
+### Training run
+~85,000 / 271,526 lines trained (2 × 95-second foreground sessions at ~380 lines/s ≈ 4,600 w/s).
+
+### Evaluation results
+
+#### [A] Speed (this session additions)
+| Change | Effect |
+|---|---|
+| Phase-5b BLAS: `(mean_ctx @ W_flat.T).reshape(n_dots, dim)` replaces 128 matmuls | 1 BLAS call instead of 128 |
+| `_tok_emb_cache`: caches `_token_embedding()` results per token | 7,315 w/s warm (+10.5%) |
+| `causal_train_file()`: streaming file training (bounded RAM) | New method |
+
+#### [B] Causal win-rate (primary quality metric)
+- **88.77%** vs 50% random baseline → **+38.77 percentage-point lift**
+- Verdict: ✓ STRONG directional learning
+
+#### [C] Dot specialization
+- MaxEff: **0.9399** | MeanEff: **0.8825** | StdEff: **0.1382**
+- 120/128 dots above 0.5 effectiveness; 114/128 above 0.9
+- Inter-dot W-matrix cosine similarity: **0.6567** ⚠ HIGH COLLAPSE (dots are too similar to each other)
+
+#### [D] Context sensitivity
+- Mean prediction cosine across different input contexts: **0.8097** ⚠ LOW
+- Dots largely ignore context — they predict similar directions regardless of prefix
+
+#### [E] Next-word prediction accuracy
+- Top-1: **0.00%** | Top-5: **0.00%** | Top-10: **0.00%** (from 3000-candidate pool)
+- Chance baseline: 0.033% / 0.167% / 0.333%
+- Root cause: dot collapse + low context-sensitivity → all dots vote for same words
+
+### Where to improve (priority order)
+
+1. **Dot diversity loss** — add inter-dot repulsion term during training (penalise W[d] ≈ W[d']); prevents collapse
+2. **Competitive / winner-takes-most update** — only top-K winning dots update per position; forces specialisation
+3. **Context-sensitive pooling** — replace mean-pool of prefix tokens with attention-weighted pool using a learned query
+4. **Nearest-neighbour inference decoder** — map predicted embedding → nearest vocab vector via FAISS/HNSW instead of voting
+5. **More training data + passes** — current 85k/271k is 31%; full corpus + 2–3 passes needed for stable statistics
+6. **Scale dots** — 128 dots for 32,575 vocab is sparse; try 256 or 512 dots
+7. **GloVe/FastText init** — replace polynomial hash embeddings with pre-trained word vectors for better cold-start signal
 
 ---
 

@@ -181,6 +181,12 @@ class IECNN:
         # Eliminates re-transforming repeated causal prefixes (major speedup).
         self._ctx_cache: Dict[str, np.ndarray] = {}
 
+        # Token embedding cache: token → normalised float32 (dim,)
+        # Across a 200-sentence batch, target tokens repeat constantly (same
+        # common words appear in many positions).  Caching avoids re-running
+        # _token_embedding (complex polynomial + normalisation) per duplicate.
+        self._tok_emb_cache: Dict[str, np.ndarray] = {}
+
         if persistence_path:
             try:
                 self.load_brain(persistence_path)
@@ -570,15 +576,27 @@ class IECNN:
                 all_ctxs[j_pfx] = self._get_ctx_cached(pfx)
 
             # ── PHASE 3: Build normalised target vectors ──────────────────────
+            # _tok_emb_cache avoids re-running _token_embedding for tokens that
+            # appeared in earlier batches (common words appear thousands of times).
             tvs = np.zeros((n_total, dim), dtype=np.float32)
             for j, tok in enumerate(all_tgt_toks):
-                te = self.base_mapper._token_embedding(
-                    tok, self.base_mapper._base_types.get(tok, "word")
-                )
-                nc = min(len(te), dim)
-                tvs[j, :nc] = np.real(te[:nc])
-            tv_norms = np.linalg.norm(tvs, axis=1, keepdims=True).clip(1e-10)
-            tvs_n    = tvs / tv_norms                       # (n_total, dim)
+                cached = self._tok_emb_cache.get(tok)
+                if cached is not None:
+                    tvs[j] = cached
+                else:
+                    te = self.base_mapper._token_embedding(
+                        tok, self.base_mapper._base_types.get(tok, "word")
+                    )
+                    nc = min(len(te), dim)
+                    v  = np.zeros(dim, dtype=np.float32)
+                    v[:nc] = np.real(te[:nc])
+                    tn = float(np.linalg.norm(v))
+                    if tn > 1e-10:
+                        v /= tn
+                    if len(self._tok_emb_cache) < 50_000:
+                        self._tok_emb_cache[tok] = v
+                    tvs[j] = v
+            tvs_n = tvs                                     # already normalised
 
             # ── PHASE 4: BLAS win-criterion ───────────────────────────────────
             # dot_pred[p, d] = W[d] @ ctx[p]  →  (n_total, n_dots, dim)
@@ -613,19 +631,22 @@ class IECNN:
                 dot.W = W[i].copy()
 
             # ── PHASE 5b: Vectorized memory record ───────────────────────────
-            # One pass over 128 dots — bulk counters + single mean-pred window.
-            # mean_pred[d] = mean_ctx @ W[d].T  (cheap: (1,256)@(256,256) × 128)
-            mean_ctx = all_ctxs.mean(axis=0)                 # (dim,)
-            decay    = float(0.9 ** n_total)
+            # One BLAS call computes ALL 128 mean predictions simultaneously:
+            #   mean_ctx (dim,) @ W_flat.T (dim, n_dots*dim) → (n_dots*dim,)
+            #   reshape → (n_dots, dim) — replaces 128 separate matmuls.
+            mean_ctx      = all_ctxs.mean(axis=0)            # (dim,)
+            all_mean_preds = (mean_ctx @ W_flat.T).reshape(n_dots, dim)  # (n_dots, dim)
+            wins_per_dot  = causal_wins.sum(axis=0)          # (n_dots,) int
+            decay         = float(0.9 ** n_total)
             for d_idx, did in enumerate(dot_ids_list):
                 self.dot_memory._ensure_id(did)
-                n_wins = int(causal_wins[:, d_idx].sum())
+                n_wins   = int(wins_per_dot[d_idx])
                 self.dot_memory._total_counts[did]   += float(n_total)
                 self.dot_memory._success_counts[did] += float(n_wins)
                 win_rate = n_wins / n_total
                 h = self.dot_memory._surprise_history[did]
                 self.dot_memory._surprise_history[did] = decay * h + (1.0 - decay) * win_rate
-                mean_pred = mean_ctx @ W[d_idx].T           # (dim,) — from W directly
+                mean_pred = all_mean_preds[d_idx]            # (dim,) — from bulk BLAS
                 self.dot_memory._windows[did].append(mean_pred)
                 old_mean, M2, count = self.dot_memory._var_stats[did]
                 count  += 1
@@ -672,6 +693,110 @@ class IECNN:
 
         if verbose:
             print()
+
+    def causal_train_file(
+        self,
+        path: str,
+        chunk_size: int = 5000,
+        max_pos: int = 6,
+        causal_batch: int = 200,
+        save_every: int = 10000,
+        encoding: str = "utf-8",
+        verbose: bool = True,
+    ) -> None:
+        """Stream-train causal_train_pass from a corpus file without loading it all
+        into memory.  Reads *chunk_size* non-blank lines at a time, calls
+        causal_train_pass on each chunk, then discards the chunk.
+
+        Args:
+            path:         Path to a plain-text corpus file (one sentence per line).
+            chunk_size:   Lines per chunk (trades RAM for progress-granularity).
+            max_pos:      Passed through to causal_train_pass.
+            causal_batch: Passed through to causal_train_pass.
+            save_every:   Save brain every N *total* lines processed (0 = never).
+            encoding:     File encoding (default utf-8, falls back to latin-1).
+            verbose:      Print per-chunk throughput line.
+        """
+        import os, time as _time
+        total_lines = 0
+        chunk: List[str] = []
+        t_start = _time.time()
+        t_chunk  = _time.time()
+
+        # Estimate file line count cheaply (for progress display)
+        try:
+            file_bytes = os.path.getsize(path)
+        except OSError:
+            file_bytes = 0
+
+        try:
+            fh = open(path, encoding=encoding, errors="replace")
+        except OSError as exc:
+            raise OSError(f"causal_train_file: cannot open {path!r}: {exc}") from exc
+
+        with fh:
+            for raw_line in fh:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                chunk.append(line)
+                if len(chunk) < chunk_size:
+                    continue
+
+                # ── Process chunk ────────────────────────────────────────────
+                self.causal_train_pass(
+                    chunk,
+                    max_pos=max_pos,
+                    causal_batch=causal_batch,
+                    verbose=False,
+                )
+                total_lines += len(chunk)
+
+                if verbose:
+                    elapsed    = _time.time() - t_start
+                    chunk_time = _time.time() - t_chunk
+                    wps        = total_lines / max(elapsed, 1e-6)
+                    dots       = self._dots or []
+                    effs       = self.dot_memory.all_effectivenesses(
+                        [d.dot_id for d in dots]
+                    )
+                    max_eff = float(np.max(effs)) if len(effs) > 0 else 0.0
+                    print(
+                        f"\r[file-train] {total_lines:,} lines | "
+                        f"{wps:,.0f} w/s | "
+                        f"MaxEff={max_eff:.4f} | "
+                        f"elapsed={elapsed:.0f}s",
+                        end="", flush=True,
+                    )
+
+                if save_every > 0 and (total_lines % save_every) < chunk_size:
+                    self.save_brain()
+
+                chunk = []
+                t_chunk = _time.time()
+
+            # ── Tail chunk (< chunk_size lines) ─────────────────────────────
+            if chunk:
+                self.causal_train_pass(
+                    chunk,
+                    max_pos=max_pos,
+                    causal_batch=causal_batch,
+                    verbose=False,
+                )
+                total_lines += len(chunk)
+                self.save_brain()
+
+        if verbose:
+            elapsed = _time.time() - t_start
+            dots    = self._dots or []
+            effs    = self.dot_memory.all_effectivenesses(
+                [d.dot_id for d in dots]
+            )
+            max_eff = float(np.max(effs)) if len(effs) > 0 else 0.0
+            print(
+                f"\n[file-train] DONE — {total_lines:,} lines in {elapsed:.1f}s "
+                f"({total_lines/max(elapsed,1e-6):,.0f} w/s avg) | MaxEff={max_eff:.4f}"
+            )
 
     def train_pass(self, sentences: List[str], use_c_pipeline: bool = True,
                    verbose: bool = True, prune_every: int = 0,
