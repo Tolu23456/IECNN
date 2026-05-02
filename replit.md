@@ -306,46 +306,307 @@ Raw win counting gave each dot ~0.78% win-rate (1/128), far below the 0.5 prior 
 
 ## Generation Architecture (May 2026)
 
-### Peep Mechanism + Grammar Guide (`peep/peep.py`, `grammar/grammar.py`)
+### `generation/` Module — Full Score-Processor Pipeline
 
-Three improvements to semantic context and generation quality:
+IECNN's generation engine lives entirely in `generation/` and is wired into
+`causal_generate()` / `causal_generate_nbest()` in `pipeline/pipeline.py`.
 
-#### 1. Recency-Weighted Context Encoding (`pipeline.py: _get_ctx_cached`)
-- Context vector = weighted sum of token embeddings with decay 0.70^(n−1−i)
-- Last word gets weight 1.0, second-to-last gets 0.70, etc.
-- L2-normalised to unit sphere
-- Prevents long prompts from diluting recent semantic signal
+#### Processors (`generation/processors.py`) — 13 pluggable stages
+All processors operate on cosine-similarity score arrays `(V,)` in IECNN's
+unit-sphere space (no gradients, no logits).
 
-#### 2. Peep Mechanism (`peep/peep.py`)
-- `PeepMechanism`: 128 specialisation vectors (one per dot), shape (128, FEATURE_DIM)
-- `observe_batch(ctxs, best_dots)`: after each causal training position, EMA-updates the context-direction centroid for each winning dot (lr=0.04)
-- `select(ctx_eff, raw_preds)`: pure cosine similarity selects the single dot most aligned to current context
-- `top_k(ctx_eff, raw_preds, k=3)`: returns top-3 aligned dots (used for generation averaging)
-- Saved/loaded from `global_brain.pkl.peep.pkl`
-- After 300k calibration: 128/128 active dots, 236k hits, strong std=2174 (specialisation spread confirmed)
+| # | Class | Paper | Purpose |
+|---|---|---|---|
+| 1 | `SemanticFieldBias` | — | Boost words near the prompt's topic centroid |
+| 2 | `VocabFrequencyPrior` | — | Log-freq prior; penalise ultra-rare words |
+| 3 | `RepetitionPenalty` | Keskar 2019 (CTRL) | Presence + frequency decay |
+| 4 | `NoRepeatNGram` | Paulus 2018 | Hard-block repeated bigrams + trigrams |
+| 5 | `DegenerationPenalty` | Su & Collier NeurIPS'22 | SimCTG embedding-level anti-repeat |
+| 6 | `MinLengthGuard` | — | Block stop tokens before min_tokens |
+| 7 | `ExponentialDecayLength` | HuggingFace 4.x | Smooth stop-token boosting after start_idx |
+| 8 | `TypicalFilter` | Meister 2023 | Remove over/under-predictable tokens |
+| 9 | `NucleusFilter` | Holtzman 2020 | Top-p probability mass cutoff |
+| 10 | `EtaFilter` | Hewitt 2022 | Entropy-adaptive token truncation |
+| 11 | `MinPFilter` | Menhguin 2023 | Remove tokens < min_p × peak prob |
+| 12 | `DynamicTemperature` | — | Trend-adaptive temperature (first 3 steps) |
+| 13 | `MirostatScheduler` | Basu 2020 (ICLR'21) | Feedback-loop target-confidence temperature |
 
-#### 3. Grammar Guide (`grammar/grammar.py`)
-- Rule-based POS tagger: 9 classes (ARTICLE, NOUN, VERB, ADJECTIVE, ADVERB, PRONOUN, PREPOSITION, CONJUNCTION, OTHER)
-- `GrammarGuide(vocab)`: pre-computes (9, 9) transition weight matrix × per-tag scores → additive vocab bias vector
-- `weights(last_token)` → (V,) additive bias applied to cosine scores before softmax sampling
-- Encourages grammatically plausible next-word POS class
+#### Context Enrichment (`generation/context_hist.py`)
+- `ContextHistory(window, dim, decay, ctx_alpha)` — attention-weighted ring buffer; `attend(ctx)` returns history-enriched context vector (IECNN's KV-cache equivalent)
+- `ContextAnchor(prompt_ctx, drift_threshold, correction_strength)` — prompt-anchored anti-drift correction; prevents context from drifting away from the original topic
 
-#### Generation Paths (PATH A / PATH B)
-- **PATH A (Peep+Grammar)**: top-3 dots by cosine alignment selected; residuals blended by cosine weight; decoded with grammar bias + softmax temperature. Shows `d{N}(score)` per dot.
-- **PATH B (majority-vote fallback)**: original 128-dot majority vote with grammar bias added; shown when Peep not yet calibrated.
+#### Multi-Head Convergence (`generation/multihead.py`)
+- `MultiHeadConvergence(n_heads=8, embed_dim=224)` — 8 independent dot groups via round-robin assignment
+- `forward(raw_preds, word_vecs_n, gram_w, block_mask)` → `(V_scores, confidence)` — confidence-weighted sum across heads
+- `peep_forward(...)` → `(V_scores, confidence)` — 70% Peep signal + 30% MHC blend (PATH A)
+- `contrastive_forward(raw_preds, ctx_eff, ...)` → `(V_scores, confidence)` — IECNN Contrastive Decoding (Li et al. 2022): top-½ context-aligned dots (expert) vs bottom-½ (amateur); score = (1+α)×expert − α×amateur; PATH B
 
-#### Calibration
-```bash
-python main.py calibrate                            # use default /tmp/corpus_300k.txt
-python main.py calibrate /path/to/corpus.txt        # custom corpus
-python main.py calibrate /path/to/corpus.txt --limit 50000  # limit lines
+#### `causal_generate()` — 10-stage loop
 ```
-Or interactively:
+1. ContextHistory.attend() → history-enriched ctx
+2. ContextAnchor.correct() → anti-drift correction
+3. Exclusion steering → push away visited embedding space
+4. W_stack @ ctx_eff → raw_preds (128, 256)
+5. PATH A (Peep calibrated): mhc.peep_forward() — Peep top-5 (70%) + MHC (30%)
+   PATH B (uncalibrated):    mhc.contrastive_forward(α_decay=0.18→0.08) — expert/amateur split
+2.5. Speculative two-pass vocab pre-filter: draft with top-32 ctx-aligned dots →
+     keep top-350; full voting on survivors only (~3× step speedup)
+5.5. Cross-head agreement bonus: vote count / n_heads × 0.10 (per word)
+6. Score pipeline (9 stages):
+   SemanticFieldBias(dynamic anchor, blend=0.12/3steps) → VocabFrequencyPrior →
+   BigramContinuationBonus(last_tok) → SemanticProximityPenalty(win=4, thresh=0.82) →
+   RepetitionPenalty → NoRepeatNGram(3)+NGram(2) → DegenerationPenalty →
+   MinLengthGuard → ExponentialDecayLength
+7. 1-step lookahead pre-scorer: top-3 candidates scored by W_stack consensus-norm
+   under would-be next context (step-adaptive _ca); bonus 0.06 × consensus_norm
+8. Confidence check + low-confidence early stop + coherence-trend degeneration guard (coh3<0.04)
+9. Entropy-adaptive exclusion coefficient update (H_norm → excl = 0.35–0.50)
+10. Six-layer filter: TopKFilter(k=40, adaptive) → TypicalFilter(p=0.95) →
+    TailFreeFilter(z=0.97) → Nucleus(p=0.92→0.87, adaptive) → Eta(ε=3e-4) → MinP(0.05)
+11. Temperature: DynamicTemperature (steps 0-2) →
+    MirostatScheduler(τ=0.38, lr=0.08, τ_warmup=0.85→0.65 over 6 steps) (step 3+)
+12. softmax_sample → emit token; update EMA context + ContextHistory + exclusion EMA
+    + dynamic SemanticFieldBias anchor blend (every 3 steps)
 ```
-> calibrate
-> calibrate /tmp/corpus_300k.txt
+Result dict includes: `text`, `tokens`, `confidences`, `stop_reason`,
+`coherence` (avg cos-sim between consecutive token embeddings),
+`diversity` (unique/total tokens), `fluency` (attested bigram fraction),
+`vocab_size` (freq-filtered pool size).
+
+#### Key quality improvements (session 2 — May 2026)
+| Feature | Technique | Effect |
+|---|---|---|
+| Contrastive voting (PATH B) | Li et al. 2022 — split top/bot-½ dots by ctx alignment | Amplifies context-specific signal |
+| Bigram continuation bonus | Data-driven collocation scoring | Improves syntactic fluency |
+| Freq-filtered vocab (min_freq=3) | Removes hapax legomena | Eliminates cosine noise from rare words |
+| TypicalFilter | Meister 2023 | Removes over/under-predictable tokens |
+| EtaFilter | Hewitt 2022 | Entropy-adaptive truncation |
+| 1-step lookahead scorer | IECNN native | Prevents garden-path token choices |
+| Entropy-adaptive exclusion | — | Stronger steering when model is uncertain |
+| Coherence-trend stop | — | Detects and halts at degeneration onset |
+| Step-decaying α (PATH B) | — | More guidance early, less late |
+| N-best reranking (×3 / ×5) | — | Picks best-coherence run from multiple |
+| SemanticProximityPenalty | Embedding cosine penalty (quadratic) | Blocks near-synonym repetition |
+| Step-adaptive ctx_alpha | Linear schedule 0.72→base | Tighter prompt hold at start, natural drift later |
+| Mirostat τ-warmup | Ceiling 0.85→0.65 over 6 steps | Richer early exploration, focused late sampling |
+| Quality rating display | avg_conf × coh × diversity composite | Immediate per-run quality feedback in CLI |
+| Cross-head agreement bonus | Head vote-count normalised to [0, 0.10] | Rewards tokens confirmed by multiple MHC heads |
+| Two-pass speculative filter | Draft 32 dots → keep top-350 → full 128-dot pass | ~3× per-step cost reduction, quality preserved |
+| Dynamic SemanticFieldBias | EMA anchor blend 0.12 every 3 steps | Bias tracks evolving topic, not just original prompt |
+| Adaptive top_p scheduling | 0.92 (step 0) → 0.87 (step 8+) | Wider beam early, focused sampling once context set |
+| TailFreeFilter (z=0.97) | 2nd-derivative tail cut (Phénix & Egan 2019) | Removes flat low-prob tail; complements nucleus |
+| N-best diversity forcing | Per-run seed offset + first-token penalty | Ensures N runs explore distinct continuations |
+| Bigram fluency bonus | attested_bigrams / (ntok-1) × 0.12 in N-best score | Rewards linguistically natural token sequences |
+| Dot dropout (PATH B) | 10% random dot zeroing per step | Attention-dropout analog; improves N-best diversity |
+| Confidence bar display | 5-block ASCII bar per token (░░░░░ → █████) | Instant visual confidence read-out in CLI |
+| TopKFilter (adaptive k=40) | Entropy-scaled k: 40 (confident) → 60 (uncertain) | Hard cap before soft filters; prevents extreme tail |
+| Adaptive anchor strength | 0.20→0.06 decay (0.88^step) | Strong on-topic start; natural drift allowed later |
+| Fluency metric | bigram_hits/(ntok-1) in result dict + CLI display | Quantifies attested-collocation density of output |
+| Multi-window coherence guard | coh3 < 0.04 OR coh6 < 0.10 dual-trigger stop | Catches abrupt collapse AND slow-rolling drift |
+| Prompt-type detection | Q/Imperative/Statement → CONF_STOP ± 15%, min_tokens ± 1-2 | Adapts generation budget to prompt intent |
+| Adaptive HARD_BLOCK window | 4 (step 0) → 8 (step 16+) via 4 + step//4 | More open early exploration, tighter loop prevention late |
+| Head z-score normalisation | per-head (hs − mean)/std before combination | Prevents high-magnitude heads drowning quieter focused heads |
+| DotVariancePenalty (18th proc) | σ²_norm × 0.08 subtracted per token | Penalises tokens where dots strongly disagree |
+| Peep path z-score | (peep_scores − μ)/σ before blend | Makes Peep/MHC magnitudes comparable for 70/30 blend |
+| Contrastive z-score | final combined normalised post-subtraction | Stabilises filter chain input across all steps |
+| Context momentum (β1=0.85) | vel = β1·vel + (1−β1)·Δctx; ctx += 0.12·vel | Smooths context trajectory, dampens oscillation |
+| Score-margin gating | top1-top2 gap < 0.05 → 70% top1 + 30% top2 context | Soft context commit for uncertain tokens |
+| Shannon diversity index | H_norm = H/log(N) in result dict | Information-theoretic diversity vs simple TTR |
+| EMA entropy tracker (H̄) | α=0.15 per-step H_norm rolling mean | Tracks generation uncertainty across the sequence |
+| nbest10 command | 10-candidate N-best reranking | Broader search for highest-quality output |
+| `stats` CLI command | vocab, dots, Peep, filter chain summary | Instant brain health overview |
+| LocalSemanticFilter (19th) | top-200 context-cosine vocab restriction | Cuts live vocab to semantically focused pool |
+| Adaptive min_p scheduling | min_p = 0.05×(1−0.40×H_norm) in [0.02,0.05] | More permissive at high entropy, tighter when confident |
+| Peep path z-score | (peep_scores−μ)/σ before 70/30 blend | Equal-magnitude inputs into Peep/MHC blend |
+| Recency-weighted confidence (RW) | linear ramp weights, later tokens heavier | Reflects current quality better than simple average |
+| Confidence histogram | 5-bin [▁▂▃▄█] bar in CLI output | Instant visual distribution of per-token confidence |
+| PromptDriftPenalty (20th) | strength=0.06, threshold=0.08 — penalises prompt-distant tokens | Symmetric push-pull attractor with SemanticFieldBias |
+| Recency-decay rep penalty | presence×(0.88^age) per token | Old tokens penalised 37% as heavily as recent ones |
+| Penalty momentum (β=0.78) | EMA of rep-delta, 0.30× applied next step | Burst-repetition accumulates extra penalty |
+| Confidence trend boost | polyfit(last-5 confs); slope<-0.04 → +0.12 temp | Prevents collapse into a low-confidence rut |
+| Dynamic local_sem top_k | 150+100×H_norm in [150,250] | Adapts semantic pool width to current uncertainty |
+| Coherence-adaptive ctx alpha | +0.04 if coh≥0.30, -0.04 if coh<0.08 | Context hold strength tracks coherence quality |
+| High-quality early stop | conf≥0.78 & coh≥0.55 & conf×coh>0.50 → stop | Prevents overextension past a coherent peak |
+| Score floor clamp | finite scores clamped to ≥ -3.0 | Guards softmax against stacked-penalty underflow |
+| Multi-scale coherence (C3/C6) | last-3 and last-6 window cosine averages in result + CLI | Detects local vs global coherence independently |
+| Low-confidence token marker | `~` prefix on tokens with conf < 0.25 in CLI | Visually flags uncertain tokens in output |
+| SurpriseBonus (21st proc) | +0.04 to context-close non-top-50 tokens | Widens beam beyond dot-consensus attractor |
+| Head-spread penalty (step 5.55) | max−min head score, normalised × 0.05 | Penalises per-head high-disagreement tokens |
+| Beam entropy gate (step 8.5) | if <3 survivors, restore pre-filter top-3 | Prevents filter over-kill from single candidates |
+| Vocabulary precision metric | hits/total in result dict + CLI VPrec | Fraction of tokens chosen from context-close pool |
+| Two-path consensus blend (5.75) | Path A 88% + Path B contrastive 12% | Cross-validates Peep+MHC with contrastive path |
+| Adaptive anchor strength (C3) | +0.05 if last 3-step sum cosines < 0.20 | Stronger prompt anchor when local coherence drops |
+| Near-window rep penalty (6-3a) | −0.08 extra for last-3 tokens | Burst-repetition suppression on top of EMA momentum |
+| Enriched N-best scoring | adds RW_conf, VPrec, C3, Shannon to composite | Richer candidate selection beyond avg_conf×coherence |
+| `ctxvec` CLI command | top-10 nearest vocab words to context direction | Diagnose whether context is pointing at right region |
+| Context oscillation dampener | cosine(Δ_t, Δ_{t-1}) < −0.10 → velocity × 0.70 | Resists ctx ping-pong between two semantic poles |
+| Pseudo-perplexity in result dict | 2^(H̄ × log2 V); CLI label PPL | Normalised generation difficulty score |
+| Confidence variance in result dict | std dev of step confidences; CLI label Var | Measures patchy vs consistent model certainty |
+| Bigram+trigram fluency blend | 80% bigram + 20% trigram vocab hit fraction | More sensitive naturalness proxy than bigrams alone |
+| `topwords` CLI command | top-N vocab words by dot-outcome frequency | Reveals generation frequency bias in the brain |
+| Enriched N-best scoring v2 | adds pseudo_ppl (inverted) and conf_variance to composite | Richer N-best selection |
+| Semantic field momentum | slow centroid α=0.05; pull str=0.08 if dist>0.35 | Resists runaway topic drift while allowing sentence dev |
+| Prompt-type anchor multiplier | question×1.20, continuation×0.85, imperative×1.10 | Tighter anchoring for Q&A, looser for continuations |
+| Score-gap EMA tracker (8.7) | EMA top1−top2 score gap per step; result key avg_score_gap | Measures per-step decision certainty |
+| Low-entropy collapse gate (8.6) | restores top-5 pre-filter when ≤2 survivors or spread<0.02 | Prevents filter chain from collapsing to deterministic output |
+| Confidence trend in result dict | polyfit slope over all steps; result key conf_trend; CLI Trend | Positive = growing confidence |
+| CLI stats expanded | +Var, +Trend, +Gap, +PPL labels | All new metrics visible in every generation |
+| Repetition burst detector (6-3c) | 2+/4 identical tokens → reset rep_mom + temp+0.20 | Forces model off attractor on burst-repeat detection |
+| Score-gap guided temperature | high gap→temp−0.05; low gap→temp+0.05 | Decisive when confident, exploratory when uncertain |
+| Adaptive temp lower bound | RW_conf≥0.50→lb=0.08; <0.30→lb=0.20 | Tighter sampling when consistently confident |
+| Exclusion radius scaling | +0.50×rep_mom_mag (capped +0.15) | Stronger exclusion push when rep momentum is high |
+| Low-confidence recovery pulse | conf<0.15 at step≥2 → temp+0.08 | Nudges model out of very-low-confidence local minimum |
+| Mirostat target adaptation | coh≥0.30→target=0.35; coh<0.08→0.42 | Coherence-responsive sampling tightness |
+| Entropy budget guard | cumulative H > max_tokens×0.65 → temp≤0.10 | Near-greedy finishing once entropy budget exhausted |
+| Peep hit-rate tracking | fraction of steps Peep top-5 ⊇ chosen token | Exposes Peep calibration quality; result key peep_hit_rate |
+| Context velocity magnitude | EMA ‖ctx_vel‖; result key ctx_vel_mag | Measures how fast context is shifting semantically |
+| Soft anchor restart | 3-step low-gap streak (gap<0.03) → re-warm anchor to current ctx | Escapes stale anchor plateau (one-time per generation) |
+| Exclusion warmup | exclusion disabled for first 2 steps | Free early-token exploration before exclusion kicks in |
+| Final-3-step vocab tightening | LocalSem top_k=120 for last 3 steps | Focused ending candidates for cleaner generation close |
+| `peepstats` CLI command | adj-cosine spread + norm stats across dot specialisations | Diagnose Peep calibration quality and diversity |
+| Depth-2 lookahead (6-8) | simulate 2-step paths for top-2 candidates (+0.03 bonus) | More accurate planning vs depth-1 garden-path avoidance |
+| Coherence-guided SFB strength | coh≥0.30→×0.70; coh<0.08→×1.40 | Adaptive topic-coherence bias based on local fluency |
+| Score centroid floor lift (6-0b) | EMA top-10 mean; slope<−0.10→+0.04 lift | Rescues fading candidate pool before filter chain zeros it |
+| Peep top-k adaptation | H_norm>0.60→top-k=7 (wider candidate set) | Uncertain steps use more Peep candidates for diversity |
+| `compare A|B|C` interactive command | pairwise similarity matrix in the REPL | Compares multiple texts without leaving the interactive loop |
+| Dynamic DRAFT_D scaling | 24+24×H_norm (24→48) | Wider dot draft on uncertain steps for better pre-filtering |
+| CLI Vel+PHit labels | ctx_vel_mag and peep_hit_rate in stats line | Every generation shows context speed and Peep hit-rate |
+| `histgen` CLI command | 5 seeded variations with Avg/Coh/Flu/PPL table | Side-by-side comparison of generation variation quality |
+| Confidence floor early stop | 4 consecutive steps <0.12 conf → stop early | Avoids appending low-quality tokens at generation end |
+| Adaptive SimCTG alpha from C3 | coh>0.30→α=0.20; coh<0→α=0.65 | Softer degeneration penalty when model is already coherent |
+| Peak confidence step tracking | result key peak_conf_step | Index of the highest-confidence step per generation |
+| Context-weighted two-path blend | Path-B contribution halved for cos(word,ctx)<0 tokens | Consensus blend only rewards context-relevant agreement |
+| `seedgen [N] <prompt>` CLI command | N seeded runs with quality ranking, marks best with * | Best-of-N seeded generation with composite Q score |
+| Entropy-adaptive near-window penalty | 0.08×(0.70+0.60×H_norm) range 0.056–0.104 | Stronger burst suppression when model is uncertain |
+| Depth-2 lookahead disabled final 2 steps | skip depth-2 when step ≥ max_tokens−2 | No planning benefit in last 2 generation steps |
+| N-best peak-step bonus | ×(1+0.05×tanh(pcs/ntok)) | Rewards candidates whose confidence peaked later |
+| Prompt-length adaptive anchor strength | 0.15+0.03×(nwords−1), capped 0.36 | Longer prompts get stronger anchor; single words get 0.15 |
+| `topconfs` CLI command | top-5 confidence steps from last generation | Pinpoints where the model was most/least certain |
+| Score-gap oscillation damper | 3+ sign-flips in 4-step window → halve delta for 2 steps | Prevents temp oscillation when score gap alternates wildly |
+| Gap-adaptive ctx EMA α | gap>0.15→+0.02; gap<0.04→−0.02 on _ca | Tighter context hold on confident steps, looser on uncertain |
+| C6 sustained-drift pulse | 3 steps C6<0.05 → one-time +0.12 temp pulse | Escapes sustained semantic drift that Mirostat doesn't catch |
+| Per-step score-gap history | result key sg_step_gaps (list) | Powers scorehist CLI; full decision-certainty timeline |
+| `scorehist` CLI command | ASCII bar chart of per-step score gaps | Visualises model certainty across entire last generation |
+| Vocab-prec adaptive min_p | vprec>0.50→lower min_p; vprec<0.50→raise min_p | Diversity-tuned filter based on how well vocab precision is holding |
+| Coherence-variance SFB boost | std-dev coh>0.15 over last 4 steps → +0.04 SFB | Zigzagging topic triggers stronger prompt-topic pull |
+| Contrastive alpha decay adaptive to length | max_tokens>16 → slower decay (up to 0.92) | Longer gens preserve contrastive signal beyond step 8 |
+| Token embedding spread metric | mean pairwise 1−cos across last 16 token embeddings | Result key token_embed_spread; higher = more semantically diverse |
+| Spread in CLI stats line | Spread:{tok_spread:.3f} added to stats output | Every generation shows how spread-out the chosen embeddings are |
+| `confgraph [N]` CLI command | Unicode sparkline + bar chart of step confidences | Full visual confidence profile with per-token bars |
+| Dot agreement bonus (6-0a) | ≥2 dots top-1 agree → +0.012×(extra_dots) bonus | Multi-dot consensus on a token gets a small additive reward |
+| Score spread clipping | max score capped at min+1.6 to prevent softmax collapse | Prevents outlier-high tokens from monopolising sampling |
+| Adaptive history window | window = history_window + max_tokens//4, capped 40 | Longer generations automatically attend further back |
+| Generation rhythm score | 1−(alternations/steps); 1=smooth, 0=zigzag | Result key rhythm_score measures confidence smoothness |
+| `dotscores` CLI command | vote-count bar chart of dot top-1 agreement | Shows which tokens the dot ensemble converged on last step |
+| Dot agreement bonus cap | per-token bonus capped at 0.06 | Prevents over-rewarding very popular consensus tokens |
+| Velocity-adaptive exclusion | excl_coeff −= 0.08×vel_mag | High context velocity → loosen exclusion (already moving away) |
+| Early C3 stop relaxation | C3≥0.40 + conf≥0.70 at step≥min_tokens−1 → stop | Very coherent early runs can end slightly before min_tokens |
+| Rhythm in CLI stats line | Rhythm:{rhythm:.2f} in stats output | Every generation shows its confidence smoothness score |
+| `rhythmgraph` CLI command | ▲▼─ sparkline of per-step confidence deltas | Full visual rhythm profile with alternation count |
+| Per-step top-3 token log | result key _top3_log: list of [(score,word)×3] | Powers top3log CLI; shows what the model almost picked |
+| Rhythm-adaptive temperature | 3-step alternating zigzag → +0.04 temp | Smooths recurring confidence zigzag patterns |
+| N-best rhythm bonus | ×(1+rhythm_score×0.04) | Smoother-confidence candidates rewarded in N-best |
+| `gensummary` CLI command | one-liner: Qual/Avg/Coh/Flu/PPL/Rhythm/Spread | Quick quality digest of the last generation |
+| `top3log [N]` CLI command | per-step table of top-3 token candidates | Reveals what the model almost chose at every step |
+| Anchor strength result key | result["anchor_strength"] = _anc_strength | Prompt-adaptive anchor strength exposed for inspection |
+| Prompt type result key | result["prompt_type"] = _ptype (question/imperative/statement) | Detected intent exposed for downstream analysis |
+| Coherence direction signal | result["coh_direction"] = rolling slope of coh3 over last 4 steps | + = improving, − = degrading coherence trajectory |
+| Rhythm-adaptive score floor | rhythm<0.4 → floor raised +0.02 | Zigzag confidence broadens candidate pool to find alternatives |
+| Anc/CohDir/PType in CLI stats | Anc:{anc_str}  CohDir:{coh_dir}  PType:{prompt_type} | Full visibility into anchor, coherence direction, prompt intent |
+| `analyze` CLI command | brain diagnostics: dot/W-stack/word-vec norms + vocab coverage | One-stop brain health check |
+| Step-wise confidence EMA | α=0.35 smoothed EMA of per-step confidence (not used for sampling) | conf_ema_final result key; reduces tracking noise |
+| Score histogram result key | result["score_hist"]: 8-bucket count of per-step confidence values | Distribution of confidence across generation; shown in scorehist |
+| Adaptive degeneration threshold | coh_dir < −0.06 → guard tightens from 0.04 to 0.06 | Catches degrading coherence trajectories earlier |
+| `scorehist` confidence histogram | Appended to scorehist output: 8 confidence buckets with bars | Visual distribution of how confident the model was per step |
+| `diffgen A \| B` CLI command | side-by-side stats for two different prompts | Compare avg/coh/rhythm/ppl/spread/toks between two prompts |
+| Conf-EMA used in floor-stop | _conf_ema replaces raw confidence in floor-stop check | Single noisy step no longer prematurely terminates |
+| Vocab-prec EMA (α=0.20) | _vprec_ema smooths raw vocab_prec; used in min_p adaptive | Smoother adaptive min_p; result key vocab_prec_ema |
+| coh_dir N-best bonus | ×(1 + max(coh_dir,0)×0.06) in N-best reranking | Improving-coherence generations rewarded in N-best |
+| `trendgen [N] <prompt>` CLI | run same prompt N times, compare conf_ema_final across runs | Repeatability/stability metric for any prompt |
+| Per-step top-1 margin log | result["top1_margins"]: top1−top2 gap at every step | Decisiveness profile per generation step |
+| Adaptive Mirostat from vprec_ema | vprec_ema≥0.70 → target=min(target,0.32) | High vocab precision tightens Mirostat exploration |
+| coh_dir-adaptive centroid lift | coh_dir<−0.04→+0.05, >+0.04→+0.03, else +0.04 | Coherence trajectory shapes how aggressively scores are rescued |
+| `confema` CLI command | raw avg vs EMA, variance, trend, vprec_ema, sparkline | Full confidence quality summary for last generation |
+| `marginlog [N]` CLI command | per-step top-1 score margin sparkline | Shows decisiveness (how far ahead top token was) at each step |
+| Margin-adaptive temperature | margin_ema>0.15→−0.02 temp; <0.03→+0.02 | Decisive steps allow tighter temp; wavering opens up |
+| Low-margin burst trigger | margin<0.02 for 3+ steps → 75%-strength burst pulse | Indecisive plateau breaks out via temp pulse, same as burst |
+| Adaptive early-C3 threshold | vprec_ema≥0.65 → C3 threshold relaxed 0.40→0.35 | High vocab precision lets model stop on slightly weaker C3 |
+| Quality history tracker | model._quality_history deque (last 8 N-best scores) | Tracks nbest/seedgen quality across recent generations |
+| `qualplot` CLI command | bar chart of quality history scores | Visual trend of generation quality over last 8 N-best runs |
+| Per-step coh3 log | result["coh3_steps"]: coh3 at every step≥3 | Coherence trajectory for cohplot |
+| Per-step entropy log | result["entropy_steps"]: H_norm at every step | Entropy trajectory for entropyplot |
+| SFB strength fresh per gen | SemanticFieldBias recreated each causal_generate call | Prevents mutated SFB strength from contaminating next generation |
+| `cohplot [N]` CLI command | sparkline + bar chart of per-step coh3 values | Visual coherence trajectory for last generation |
+| `entropyplot [N]` CLI command | sparkline + bar chart of per-step H_norm values | Visual entropy trajectory for last generation |
+| Per-step velocity log | result["velocity_steps"]: ctx_vel_mag_ema at every step | Powers velplot CLI |
+| Per-step SFB strength log | result["sfb_strength_steps"]: SFB.strength at every step | Powers sfbplot; shows how SFB adapts during generation |
+| Margin-adaptive anchor boost | margin_ema<0.03 → anchor.strength += 0.04 | Indecisive plateau pulls harder back to prompt |
+| `velplot [N]` CLI command | sparkline + bar chart of per-step velocity EMA | Shows how fast context moves semantically step by step |
+| `sfbplot [N]` CLI command | sparkline + bar chart of per-step SFB strength | Shows prompt-topic pull force profile during generation |
+| `speedrun <prompt>` CLI command | run prompt at 5/10/15/20/25 max_tokens, compare metrics | Length-vs-quality diagnostic for any prompt |
+| Per-step score percentile | result["percentile_steps"]: np.mean(finite≤winner) per step | 1.0=always top; <1.0=below-top token chosen (surprise/sampling) |
+| `fulldiag` CLI command | all trajectory sparklines (coh3/entropy/vel/sfb/margin/pct) | One-command complete generation health report |
+| `benchprompts` CLI command | 5 standard prompts → conf_ema/coherence/rhythm/coh_dir table | Reproducible quality benchmark across prompt types |
+| `pctplot [N]` CLI command | sparkline + bar chart of per-step score percentile | Shows how consistently the top token is chosen |
+| Adaptive eta epsilon | _eta.epsilon = clip(3e-4 × (1+2×H_norm), 3e-4, 9e-4) | Entropy-responsive eta filter: uncertain→wider, confident→tighter |
+| Short-token filler penalty | len(token)≤2 → score-=0.025 when >3 alternatives exist | Discourages "a","in","of" from dominating uncertain steps |
+| `conf_declining` result key | True when last 4 confidences are strictly decreasing | Flag for detecting loss-of-confidence tail in generation |
+| `repdiag` CLI command | unique/repeated/short/long token stats for last gen | Quick repetition + confidence health check |
+| `confoverlay [N]` CLI command | raw conf + recomputed EMA per-step sparkline overlay | Shows whether EMA is tracking or lagging raw confidence |
+| Per-step temperature log | result["temp_steps"]: final temp at every step | Powers tempplot; shows how mirostat/boosts affect sampling temp |
+| `vocab_prec_ema` result key | result["vocab_prec_ema"]: vocab precision EMA at gen end | Measures how consistently model picks context-aligned vocab |
+| Adaptive SFB decay from coh3 | coh3≥0.45→_sfb._decay≥0.96; coh3<0.20→_sfb._decay≤0.90 | Keeps topic bias alive when coherent; releases when drifting |
+| `tempplot [N]` CLI command | sparkline + bar chart of per-step temperature | Shows when mirostat tightens or boosts loosen sampling |
+| `tokenmap` CLI command | color grid of token length profile (S/M/L/X) | Visual token-length distribution for last generation |
+| `gencompare <prompt>` CLI command | causal_generate vs causal_generate_nbest side-by-side | Direct comparison of single-run vs N-best reranking quality |
+| Per-step coh6 log | result["coh6_steps"]: 6-window coherence at every step≥6 | Powers coh6plot; longer window than coh3 for smoother signal |
+| `sg_slope` result key | linear regression slope of sg_step_gaps | Positive=growing decisiveness; negative=wavering toward end |
+| Adaptive typical p from coh3 | coh3→typical.p = clip(0.95-0.03×coh3, 0.88, 0.97) | Coherent steps tighten filter; incoherent widen to find path |
+| `coh6plot [N]` CLI command | sparkline + bar chart of per-step 6-token coherence | Slower/smoother coherence signal than coh3plot |
+| `topconfgen [N] <prompt>` CLI command | run N times, sort by conf_ema_final, show best | Self-selecting best generation without nbest overhead |
+| `pivotgen <word> \| <prompt>` CLI command | generate baseline vs pivot-appended prompt, compare | Tests how a forced first-token direction affects generation |
+| Per-step score variance | result["score_var_steps"]: var of finite scores per step | High var=wide spread; low var=flat/uncertain distribution |
+| Adaptive TopK from entropy | _topk.k = clip(30+int(20×H_norm),20,60) | High entropy→more candidates; confident→tighter beam |
+| `stresstest` CLI command | 10 built-in prompts → avg/std for conf/coh/rhythm table | Reproducible broad stress-test of current brain quality |
+| `varplot [N]` CLI command | sparkline + bar chart of per-step score variance | Shows how spread the score distribution is at each step |
+| `genheatmap` CLI command | score histogram heat map showing bucket fill fractions | Distribution shape visualizer for last generation |
+| `confmatrix` CLI command | 2-D confidence×position heat map (4 bins × 3 positions) | Shows where in the sequence confidence is high vs low |
+| Per-step TopK log | result["topk_steps"]: _topk.k at every step | Powers topkplot; shows how entropy drives candidate beam width |
+| Adaptive TFS z from entropy | _tfs.z = clip(0.97-0.04×H_norm, 0.90, 0.98) | High entropy→tighter tail cut; confident→looser |
+| `coh_trend` result key | linear slope of coh3_steps | Positive=coherence growing; negative=semantic drift |
+| Stats line additions | CohTrend, SGSlope, VPrecEMA, [!DECLINING] flag | Richer per-generation diagnostics in the output summary |
+| `topkplot [N]` CLI command | sparkline + bar chart of per-step TopK k value | Visualizes how entropy steers candidate beam width |
+| Local coherence extension gate | coh3≥0.50 at min_tokens → min_tokens+=1 | Allows one extra token when generation is on excellent track |
+| Margin-adaptive nucleus | margin_ema<0.03 → nuc_p+=0.03 (capped 0.97) | Widens nucleus on indecisive plateau to find better candidates |
+
+#### `causal_generate_nbest(prompt, n=3)` — N-best reranking
+Runs `causal_generate` N times; picks winner by:
+`score = avg_conf × (0.80 + 0.20 × coherence) × tanh(ntok/6) × (1 + diversity×0.10)`
+
+#### Vocab filtering
+Generation vocab filtered to words with `freq ≥ 3` in training corpus.
+Eliminates hapax legomena and rare proper nouns that produce cosine noise.
+Fallback chain ensures ≥ 200 / ≥ 50 words even on sparse brains.
+
+#### CLI commands
 ```
-Calibration re-runs `causal_train_pass` with cleared ctx-cache, then saves Peep to disk. Subsequent `cgen` commands use PATH A automatically.
+cgen <prompt>    — single generation (Contrastive·MHC or Peep+MHC·70/30)
+nbest <prompt>   — best-of-3 reranked (highest coherence×confidence)
+nbest5 <prompt>  — best-of-5 reranked
+rebuild          — re-embed vocab with char n-gram embeddings
+calibrate [path] — build Peep specialisations → activates Peep+MHC·70/30 path
+```
+
+#### Peep Mechanism (`peep/peep.py`)
+- 128 specialisation vectors (one per dot), shape `(128, FEATURE_DIM)`
+- `observe_batch(ctxs, best_dots)`: EMA-updates context-direction centroid for each winning dot (lr=0.04)
+- `top_k(ctx_eff, raw_preds, k=5)`: top-5 dots most aligned to current context → used in PATH A
+- Saved to `global_brain.pkl.peep.pkl`
+
+#### Grammar Guide (`grammar/grammar.py`)
+- Rule-based POS tagger: 9 classes
+- `GrammarGuide(vocab)`: (9×9) transition weight matrix → additive vocab bias `(V,)`
+- Applied at step 3 of the loop alongside anti-rep mask
 
 ## Running the App
 
