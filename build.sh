@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -e
-GCC=/usr/bin/gcc
+GCC=$(which gcc 2>/dev/null || echo /usr/bin/gcc)
 FLAGS="-O3 -shared -fPIC -lm -march=native -fopenmp"
 
 echo "[build] Compiling formulas.c → formulas/formulas_c.so"

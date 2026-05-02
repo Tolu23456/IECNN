@@ -341,6 +341,10 @@ class IECNN:
             mat = (alpha * mat + (1.0 - alpha) * r[None, :]).astype(np.float32)
         return BaseMap(mat, original.tokens, original.token_types, original.modifiers, original.metadata)
 
+    def fit(self, texts: List[str]) -> "IECNN":
+        self.base_mapper.fit(texts)
+        return self
+
     def encode(self, text: str) -> np.ndarray: return self.run(text).output
 
     def chat(self, message: str, history: List = None) -> str:

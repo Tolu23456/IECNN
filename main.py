@@ -114,7 +114,7 @@ def cmd_encode(text: str):
     print(f"  First 24 dims: {np.round(vec[:24], 3)}")
     print(f"  Norm         : {np.linalg.norm(vec):.4f}")
     print(f"  Stop reason  : {res.stop_reason}")
-    print(f"  Rounds       : {res.summary['rounds']}")
+    print(f"  Rounds       : {res.summary.get('rounds', res.rounds)}")
     if res.metrics:
         m = res.metrics
         print(f"  Quality      : {m.convergence_quality:.4f}")
