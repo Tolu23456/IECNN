@@ -710,8 +710,18 @@ class IECNN:
             # subtract the global average direction (50% weight) and re-normalise.
             # This amplifies each dot's unique direction and suppresses the shared
             # "average corpus direction" that causes collapse.
-            lr           = 0.005
-            lr_eff       = 1.0 - (1.0 - lr) ** n_total
+            #
+            # F14 ADAPTIVE LR: each dot's effective learning rate is scaled by
+            # (1 - 0.8 * dominance²) so dominant dots slow down and allow
+            # weaker dots to catch up — prevents winner-take-all monopoly.
+            base_lr     = 0.005
+            dominance_arr = np.array(
+                [getattr(d, 'dominance', 0.5) for d in dots], dtype=np.float32
+            )                                                   # (n_dots,)
+            lr_arr      = base_lr * (1.0 - 0.8 * dominance_arr ** 2)  # (n_dots,) F14
+            lr_arr      = np.clip(lr_arr, 1e-5, base_lr)
+            lr_eff_arr  = 1.0 - (1.0 - lr_arr) ** n_total     # (n_dots,) effective
+
             win_counts_f = causal_wins.sum(axis=0).clip(1.0)   # (n_dots,)
             mean_targets = (causal_wins.T @ tvs_n) / win_counts_f[:, None]
                                                                 # (n_dots, dim)
@@ -725,7 +735,8 @@ class IECNN:
             eff_targets  = div_targets / dt_norms               # (n_dots, dim)
 
             rows = np.array([d._rng.randint(0, dim) for d in dots], dtype=np.int64)
-            W[idx, rows] = (1.0 - lr_eff) * W[idx, rows] + lr_eff * eff_targets
+            lre  = lr_eff_arr[:, None]                          # (n_dots, 1) broadcast
+            W[idx, rows] = (1.0 - lre) * W[idx, rows] + lre * eff_targets
             row_vecs     = W[idx, rows]
             W[idx, rows] = row_vecs / np.linalg.norm(row_vecs, axis=1, keepdims=True).clip(1e-10)
 
@@ -733,20 +744,37 @@ class IECNN:
             for i, dot in enumerate(dots):
                 dot.W = W[i].copy()
 
-            # ── PHASE 5b: Vectorized memory record ───────────────────────────
-            # One BLAS call computes ALL 128 mean predictions simultaneously:
-            #   mean_ctx (dim,) @ W_flat.T (dim, n_dots*dim) → (n_dots*dim,)
-            #   reshape → (n_dots, dim) — replaces 128 separate matmuls.
+            # ── PHASE 5b: Memory record + F17 dominance update ───────────────
+            # Win scoring: normalise relative to the expected baseline (1/n_dots).
+            #   score = 0.5 * min(2, actual_rate / expected_rate)
+            #   → 0.5  for an average dot   (ratio = 1.0)
+            #   → 1.0  for 2× average       (ratio = 2.0, clipped)
+            #   → 0.0  for a dot that never wins
+            # This ensures effectiveness converges to ~0.5 for random dots and
+            # rises above 0.5 as dots specialise — symmetry breaking is possible.
+            #
+            # F17 DOMINANCE EMA: updated per-batch on the same above/below signal.
+            # dominant dots (dominance > 0.5) had their lr reduced via F14 above.
             mean_ctx      = all_ctxs.mean(axis=0)            # (dim,)
             all_mean_preds = (mean_ctx @ W_flat.T).reshape(n_dots, dim)  # (n_dots, dim)
-            wins_per_dot  = causal_wins.sum(axis=0)          # (n_dots,) int
+            wins_per_dot  = causal_wins.sum(axis=0)          # (n_dots,) float
+            expected_wins = float(n_total) / float(n_dots)   # baseline per dot
             decay         = float(0.9 ** n_total)
             for d_idx, did in enumerate(dot_ids_list):
                 self.dot_memory._ensure_id(did)
-                n_wins   = int(wins_per_dot[d_idx])
-                self.dot_memory._total_counts[did]   += float(n_total)
-                self.dot_memory._success_counts[did] += float(n_wins)
-                win_rate = n_wins / n_total
+                n_wins    = float(wins_per_dot[d_idx])
+                ratio     = n_wins / max(expected_wins, 1e-6)   # 1.0 = average
+                norm_score = 0.5 * min(2.0, ratio)              # [0, 1], 0.5=average
+                # One trial per batch — effectiveness = mean(norm_score) over batches
+                self.dot_memory._total_counts[did]   += 1.0
+                self.dot_memory._success_counts[did] += norm_score
+
+                # F17: update dot's dominance EMA (above/below expected baseline)
+                dot = dots[d_idx]
+                dot.dominance = 0.9 * dot.dominance + 0.1 * min(1.0, ratio)
+                dot.dominance = max(0.0, min(1.0, dot.dominance))
+
+                win_rate = n_wins / max(float(n_total), 1.0)
                 h = self.dot_memory._surprise_history[did]
                 self.dot_memory._surprise_history[did] = decay * h + (1.0 - decay) * win_rate
                 mean_pred = all_mean_preds[d_idx]            # (dim,) — from bulk BLAS

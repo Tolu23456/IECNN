@@ -174,6 +174,13 @@ class NeuralDot:
         self.max_heads   = 8
         self.birth_generation = int(birth_generation)
 
+        # F17 Dot Reinforcement Pressure — dominance EMA (0=losing, 0.5=neutral, 1=dominant)
+        self.dominance: float = 0.5
+        # F14 Adaptive Learning Rate — starts at 0.01, decays as dominance grows
+        self.eta: float = 0.01
+        # Fitness cache — updated by evolution
+        self.fitness: float = 0.0
+
         if empty:
             self.W = None; self.head_projs = []; self.W_inv = None
             self.Q_basis = None; self.b_offset = None; self._rng = None
@@ -197,6 +204,9 @@ class NeuralDot:
         child.W_inv = self.W_inv.copy(); child.Q_basis = self.Q_basis.copy()
         child.b_offset = self.b_offset.copy(); child.max_heads = self.max_heads
         child.current_phase = self.current_phase; child._rng = np.random.RandomState(child.dot_id * 31 + 8)
+        child.dominance = getattr(self, 'dominance', 0.5)
+        child.eta       = getattr(self, 'eta', 0.01)
+        child.fitness   = getattr(self, 'fitness', 0.0)
         return child
 
     _F16_KEYS = ("W", "Q_basis", "b_offset", "W_inv")
@@ -218,6 +228,10 @@ class NeuralDot:
             if k in self.__dict__: self.__dict__[k] = self._to_f32(self.__dict__[k])
         if "head_projs" in self.__dict__: self.__dict__["head_projs"] = [self._to_f32(h) for h in self.__dict__["head_projs"]]
         if "_rng" not in self.__dict__: self.__dict__["_rng"] = np.random.RandomState(int(self.dot_id) * 31 + 8)
+        # Backward compat: F14/F17 fields added after initial training runs
+        if "dominance" not in self.__dict__: self.__dict__["dominance"] = 0.5
+        if "eta"       not in self.__dict__: self.__dict__["eta"]       = 0.01
+        if "fitness"   not in self.__dict__: self.__dict__["fitness"]   = 0.0
 
     def predict(self, basemap, memory_hint: Optional[np.ndarray] = None, context_entropy: float = 0.5, consensus: Optional[np.ndarray] = None, causal: bool = False, abstract: Optional[np.ndarray] = None) -> List[Tuple]:
         lib = _load_lib()
@@ -331,13 +345,29 @@ class NeuralDot:
             return out
         p = np.tanh(H @ v + offset); return p + self._rng.randn(self.feature_dim).astype(np.float32) * temperature * 0.05
 
-    def local_update(self, winning_centroid, winning_head, lr=0.01):
+    def local_update(self, winning_centroid, winning_head, lr=0.01, won=False):
         target = np.real(winning_centroid).astype(np.float32); n = np.linalg.norm(target)
         if n > 1e-10: target /= n
         row = self._rng.randint(0, self.feature_dim)
-        self.W[row] = (1.0 - lr) * self.W[row] + lr * target
-        self.head_projs[winning_head] = (1.0 - lr * 0.5) * self.head_projs[winning_head] + (lr * 0.5) * np.outer(target, target)
+
+        # F14: Adaptive LR — winners slow down so followers can catch up
+        eff_lr = lr * (1.0 - 0.8 * self.dominance ** 2)
+        eff_lr = max(eff_lr, 1e-5)
+
+        self.W[row] = (1.0 - eff_lr) * self.W[row] + eff_lr * target
+        self.head_projs[winning_head] = (1.0 - eff_lr * 0.5) * self.head_projs[winning_head] + (eff_lr * 0.5) * np.outer(target, target)
         self.W /= (np.linalg.norm(self.W, axis=1, keepdims=True) + 1e-10)
+
+        # F17: DRP — update dominance EMA based on win/loss
+        if won:
+            self.dominance = 0.9 * self.dominance + 0.1 * 1.0
+        else:
+            self.dominance = 0.9 * self.dominance + 0.1 * 0.0
+        self.dominance = max(0.0, min(1.0, self.dominance))
+
+        # Stop learning if very dominant — prevents monopoly
+        if self.dominance > 0.7:
+            self.eta = max(self.eta * 0.5, 1e-5)
 
     def _reason(self, v, temperature, consensus=None):
         lib = _load_lib(); steps = max(1, int(self.bias.reasoning_depth * 5))

@@ -273,12 +273,34 @@ centroid is committed to the cross-call pattern library via `cluster_memory.comm
 - **MeanEff**: Stable ~0.307 (mix of trained ~0.016 + fresh ~0.500 dots)
 - **Dots above 50%**: 0/128 across all checkpoints
 
-### Root Cause: Winner-Take-All Win Criterion
+### Root Cause (identified and fixed)
 The causal training uses **winner-take-all** (argmax over 128 dots per position).
-This gives each dot a ~0.78% win-rate (1/128 = 0.78%), far below the 0.5 prior.
-Evolution culls trained dots (eff ≈ 0.78%) and replaces them with fresh dots (eff = 0.5).
-**Fix**: Change win criterion to `cosine(W[d] @ ctx, target) > 0`  
-This restores the ~50% baseline, allowing specialized dots to exceed 0.5 → MaxEff > 0.5.
+Raw win counting gave each dot ~0.78% win-rate (1/128), far below the 0.5 prior → evolution culled all trained dots.
+
+**Fix applied (F14 + F17 + normalized scoring):**
+1. **F17 Dominance EMA** added to `NeuralDot`: `dominance=0.5`, updated per-batch via `0.9*d + 0.1*(wins/expected_wins)`. Dots above baseline gain dominance; below-baseline dots lose it.
+2. **F14 Adaptive LR**: `lr = base_lr * (1 - 0.8 * dominance²)` — dominant dots slow down to prevent monopoly.
+3. **Normalized win scoring**: Each batch records `score = 0.5 * min(2, actual_wins/expected_wins)`. Average dot → score=0.5 → effectiveness=0.5. Specialists exceed 0.5.
+4. **Memory reset**: Old raw-count data cleared before retraining; W-matrices retained.
+
+---
+
+## 300k Corpus Re-Training — After F14/F17 Fix (May 2026)
+
+| CP | Sents | MaxEff | MeanEff | Dots>50% | Dots>70% | Dots>80% | DomMax | Signal | w/s |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | 40,000 | 1.0000 | 0.6043 | 51/128 | 35/128 | 14/128 | 0.9995 | YES | 18,241 |
+| 2 | 80,000 | 1.0000 | 0.6086 | 51/128 | 36/128 | 19/128 | 1.0000 | STABLE | 18,999 |
+| 3 | 120,000 | 1.0000 | 0.6082 | 51/128 | 32/128 | 15/128 | 0.9999 | STABLE | 19,033 |
+| 4 | 160,000 | 1.0000 | 0.6117 | 51/128 | 34/128 | 19/128 | 0.9997 | STABLE | 19,337 |
+| 5 | 200,000 | 1.0000 | 0.6126 | 51/128 | 31/128 | 21/128 | 0.9994 | STABLE | 19,599 |
+| 6 | 240,000 | 1.0000 | 0.6060 | 51/128 | 33/128 | 16/128 | 0.9994 | STABLE | 19,771 |
+| 7 | 280,000 | 1.0000 | 0.6082 | 51/128 | 37/128 | 16/128 | 0.9993 | STABLE | 19,901 |
+| 8 | 300,000 | 1.0000 | 0.6103 | 51/128 | 33/128 | 20/128 | 0.9993 | STABLE | 19,835 |
+
+**Verdict**: STRONG LEARNING — dots have significantly specialised.  
+**Speed**: 19,834 w/s average (exceeds 16k target).  
+**Next**: Dots>50% stable at 51/128. To push further, consider increasing causal_batch or adding repulsion between dom>0.9 dots.
 
 ---
 

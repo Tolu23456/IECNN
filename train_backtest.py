@@ -99,6 +99,13 @@ def _snapshot(model, sentences_done: int, t_start: float,
     total_pred = sum(model.dot_memory._total_counts.get(d, 0.0)   for d in dot_ids)
     win_rate   = total_wins / max(total_pred, 1.0)
 
+    # Dominance stats (F17)
+    doms = [getattr(d, 'dominance', 0.5) for d in dots]
+    dom_max  = float(max(doms)) if doms else 0.5
+    dom_mean = float(np.mean(doms)) if doms else 0.5
+    dots_dom_above_50 = int(sum(1 for v in doms if v > 0.5))
+    dots_dom_above_70 = int(sum(1 for v in doms if v > 0.7))
+
     # Dot diversity (mean pairwise W-cosine)
     try:
         W_stack = np.stack([d.W for d in dots[:32]])  # sample 32 dots for speed
@@ -128,6 +135,10 @@ def _snapshot(model, sentences_done: int, t_start: float,
         "dot_diversity":   round(diversity, 6),
         "learning_signal": learning,
         "pool_size":       len(dots),
+        "dom_max":         round(dom_max,  4),
+        "dom_mean":        round(dom_mean, 4),
+        "dots_dom_above_50": dots_dom_above_50,
+        "dots_dom_above_70": dots_dom_above_70,
     }
     return snap
 
@@ -146,6 +157,7 @@ def _print_checkpoint(snap: dict, checkpoint_num: int):
     print(f"  Dots >50%     : {snap['dots_above_50pct']} / {snap['pool_size']}")
     print(f"  Dots >70%     : {snap['dots_above_70pct']} / {snap['pool_size']}")
     print(f"  Dots >80%     : {snap['dots_above_80pct']} / {snap['pool_size']}")
+    print(f"  Dominance max : {snap['dom_max']:.4f}  (dom>50%: {snap['dots_dom_above_50']}  dom>70%: {snap['dots_dom_above_70']})")
     print(f"  Dot diversity : {snap['dot_diversity']:.4f}  (1.0=max diverse)")
     print(f"  Speed         : {snap['words_per_s']:,.0f} w/s")
     print(f"  Elapsed       : {snap['elapsed_s']:.0f}s")
@@ -254,6 +266,26 @@ def run_training(corpus_path: str, checkpoint_every: int):
     print(BAR)
 
     model = _make_model()
+
+    # ── Memory reset ──────────────────────────────────────────────────────────
+    # The previous run used raw win-count recording (total_counts += n_positions,
+    # success_counts += n_wins).  The new F14/F17 scoring records 1 trial per
+    # batch with a normalized score in [0,1] (0.5 = average baseline).  Old
+    # counts are completely incompatible — they'd swamp the new signal for
+    # thousands of batches.  We clear the effectiveness counters and reset dot
+    # dominance to 0.5 while keeping the learned W matrices.
+    print("\n[Reset] Clearing stale effectiveness counts from previous run...")
+    dots = model._dots or []
+    n_reset = 0
+    for d in dots:
+        did = d.dot_id
+        model.dot_memory._success_counts[did] = 0.0
+        model.dot_memory._total_counts[did]   = 0.0
+        d.dominance = 0.5
+        d.eta       = 0.01
+        d.fitness   = 0.0
+        n_reset += 1
+    print(f"[Reset] Cleared {n_reset} dots — W matrices kept, counts zeroed.\n")
 
     # Phase 1: Vocab seeding (skip if already fitted)
     if not model.base_mapper.is_fitted or len(model.base_mapper._base_vocab) < 1000:
