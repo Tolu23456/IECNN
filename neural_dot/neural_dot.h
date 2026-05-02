@@ -23,7 +23,8 @@ void predict_batch_c(
     float *out_preds,
     float *out_confs,
     int *out_starts,
-    int *out_ends
+    int *out_ends,
+    int training_mode
 );
 
 #endif

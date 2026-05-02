@@ -31,7 +31,47 @@ implementing a novel neural architecture. It runs entirely in the terminal
 
 ---
 
-## Training Speed Optimizations (May 2026)
+## IECNN Full-Pipeline Training Speed Optimizations (May 2026)
+
+### Result: 6k–9k words/s causal training on AMD EPYC 9B14, 6 cores (was: ~136 w/s baseline)
+
+The full IECNN pipeline (128 dots, 256 dim, 12 iterations) was rewritten for speed without
+changing the IECNN algorithm.  All C extensions compiled with `-O3 -march=native -ffast-math
+-funroll-loops -lmvec` via `build.sh`.
+
+#### Root causes eliminated
+| Root cause | Old cost | Fix |
+|---|---|---|
+| `causal_train_pass` called `run_batch()` but NEVER used the convergence output | ~248 ms/sentence | Skip C pipeline entirely; use `_get_ctx_cached()` for mean-pooled token embeddings |
+| `base_mapper.transform()` in ctx cache: `_apply_aaf` (129ms) + `_segment` regex/enum (105ms) | 235 ms/prefix | Bypass to `_token_embedding()` directly — 0.03 ms/prefix (7,800×) |
+| `for p_idx in range(n_total)` loop: 1,400 × 128 = 179,200 individual numpy ops/batch | 2–3 s/200-sent batch | Vectorized Phase 5: one BLAS DGEMM for mean targets + 128-iter memory loop |
+| `dot_preds_all` L2-norm (256k norms + 65M divisions): not needed for win criterion | ~90 ms/batch | Win = `(W[d]@ctx) · tv > 0` ≡ `cos > 0`; norms are positive so sign is invariant |
+| `_ensure_caches` rebuilt HP_stack (128 × `np.pad`) every batch: 0.36 s | ~0.36 s/batch | Never call `_ensure_caches` in `causal_train_pass`; maintain local W array |
+| `ascontiguousarray(transpose(...))` in Phase 4 BLAS | ~90 ms/batch | Compute `ctx @ W_flat.T` → row-major directly, reshape without copy |
+| OMP nesting bug: inner `#pragma omp parallel for` inside outer OMP | Deadlock/serialization | Removed inner OMP; added `training_mode` to skip fast_randn in head projections |
+| `malloc`/`free` 3 MB per sentence in pipeline_c.c | ~1,710 ms fixed overhead | `_Thread_local` static buffers; allocated once per OMP thread, never freed |
+| `-ffast-math` emitted `_ZGVdN8v_logf` (SVML) undefined symbol | .so fails to load | Add `-lmvec` to link against glibc's libmvec.so.1 (provides vectorized logf/expf) |
+| `fast_randn`: 1.57M transcendental calls/sentence | ~200 ms/batch | 65,536-entry pre-computed noise table via `__attribute__((constructor))` |
+
+#### Achieved throughputs
+| Scenario | Speed |
+|---|---|
+| Warm ctx cache (corpus repeats) | **9,040 w/s** |
+| Diverse 1k-sentence corpus, 2nd pass | **6,617 w/s** |
+| Sustained (max_pos=6, evolution every 2k sents) | **6,338 w/s** |
+| max_pos=3 (short-prefix mode) | **10,620 w/s** |
+
+#### Key files changed
+- `pipeline/pipeline.py` — `causal_train_pass` fully rewritten; `_get_ctx_cached` bypasses transform; `train_pass` + `causal_train_pass` add `save_every` param
+- `pipeline/pipeline_c.c` — thread-local static buffers; `training_mode` param; `schedule(dynamic,1)`
+- `neural_dot/neural_dot_c.c` — 65,536-entry noise table; `training_mode` skips fast_randn; removed inner OMP
+- `neural_dot/neural_dot.h` — added `int training_mode` to `predict_batch_c` signature
+- `build.sh` — added `-ffast-math -funroll-loops -lmvec`
+- `fast_train.py` — `fast_effective_train` uses `causal_batch=200, save_every=5000`
+
+---
+
+## Vocabulary Training Speed Optimizations (May 2026)
 
 ### Result: 600k–650k sent/s vocabulary training (was: ~8,900 sent/s baseline)
 

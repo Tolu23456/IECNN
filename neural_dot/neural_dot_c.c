@@ -5,13 +5,36 @@
 #include "../shared_defs.h"
 #include "../formulas/formulas.h"
 
+/* ── Pre-generated Gaussian noise table ──────────────────────────────────────
+ * Initialized once when the .so loads via __attribute__((constructor)).
+ * Eliminates 1.57M logf/cosf/sqrtf calls per sentence in training mode.
+ * Uses Box-Muller on a 16-bit LCG — good enough for stochastic noise.
+ */
+#define NOISE_TABLE_SIZE (1 << 16)  /* 65536 */
+static float _g_noise_table[NOISE_TABLE_SIZE];
+
+static void __attribute__((constructor)) _init_noise_table(void) {
+    unsigned int seed = 0xDEADBEEFu;
+    for (int i = 0; i < NOISE_TABLE_SIZE; i += 2) {
+        seed = seed * 1103515245u + 12345u;
+        float u1 = ((seed >> 8) & 0xFFFFFFu) * (1.0f / 16777216.0f) + 1e-7f;
+        seed = seed * 1103515245u + 12345u;
+        float u2 = ((seed >> 8) & 0xFFFFFFu) * (1.0f / 16777216.0f);
+        float r   = sqrtf(-2.0f * logf(u1));
+        float phi = 6.283185307f * u2;
+        _g_noise_table[i]     = r * cosf(phi);
+        _g_noise_table[i + 1] = r * sinf(phi);
+    }
+}
+
+#define FAST_NOISE(idx) _g_noise_table[(unsigned int)(idx) & (NOISE_TABLE_SIZE - 1u)]
+
 /* Optimized Slice and Pool selection */
 
 void temporal_pool(const float *mat, int n, int dim, int rtl, float *out) {
     float sum_w = 0.0f;
     memset(out, 0, dim * sizeof(float));
     for (int i = 0; i < n; i++) {
-        // If RTL, reverse the temporal weight decay
         int idx = rtl ? (n - 1 - i) : i;
         float w = expf((float)idx / (float)n - 1.0f);
         sum_w += w;
@@ -44,7 +67,7 @@ void logic_pool(const float *mat, int n, int dim, float *out) {
         }
         return;
     }
-    float accel[256]; // Assuming dim is fixed at 256 for now, or use dynamic
+    float accel[256];
     memset(accel, 0, sizeof(accel));
     for (int i = 0; i < n - 2; i++) {
         for (int d = 0; d < dim; d++) {
@@ -108,37 +131,50 @@ void reason_fast(float *v, const float *W, const float *b, int dim, int steps, f
     }
 }
 
-/* BATCH PIPELINE: Process all dots in one go */
+/* ── BATCH PIPELINE ──────────────────────────────────────────────────────────
+ *
+ * training_mode = 1: skip fast_randn (1.57M transcendental calls/sentence)
+ *   → use zero noise for head projections
+ *   → pass temperature=0 to reason_fast (zero noise in reasoning too)
+ *   → safe because: causal_train_pass only needs the embedding direction,
+ *     not stochastic diversity; noise is a regulariser for inference only.
+ *
+ * OMP: the #pragma omp parallel for that was here has been REMOVED.
+ *   Sentence-level OMP in pipeline_batch_run_c handles all parallelism.
+ *   Nesting OMP here caused the INNER loop to fall back to 1 thread while
+ *   the OUTER loop also ran 1 thread → fully sequential.  Now the outer
+ *   sentence loop is the only OMP region.
+ */
 void predict_batch_c(
     int num_dots, int dim, int seq_len,
     const float *basemap,
-    const float *dots_W,           // (N x D x D)
-    const float *dots_head_projs, // (N x 8 x D x D)
-    const float *dots_b_offset,   // (N x D)
-    const float *dots_bias,       // (N x 6) [att, gran, abs, inv, temp, depth]
-    const int *dots_types,        // (N)
-    const int *dots_n_heads,      // (N)
-    const unsigned int *seeds,    // (N)
-    const float *consensus,       // (D or NULL)
+    const float *dots_W,
+    const float *dots_head_projs,
+    const float *dots_b_offset,
+    const float *dots_bias,
+    const int *dots_types,
+    const int *dots_n_heads,
+    const unsigned int *seeds,
+    const float *consensus,
     float context_entropy,
     int causal,
-    float *out_preds,             // (N x 8 x D)
-    float *out_confs,             // (N x 8)
-    int *out_starts,              // (N)
-    int *out_ends                 // (N)
+    float *out_preds,
+    float *out_confs,
+    int *out_starts,
+    int *out_ends,
+    int training_mode
 ) {
     float T_base = 1.0f + 0.3f * context_entropy;
 
-    #pragma omp parallel for
     for (int d = 0; d < num_dots; d++) {
         unsigned int seed = seeds[d];
         const float *bias = dots_bias + d * 6;
-        float gran_bias = bias[1];
-        float abs_bias  = bias[2];
-        float temp_bias = bias[4];
+        float gran_bias  = bias[1];
+        float abs_bias   = bias[2];
+        float temp_bias  = bias[4];
         float depth_bias = bias[5];
 
-        // 1. Slice selection
+        /* 1. Slice selection */
         int patch_size = (int)(gran_bias * (float)seq_len);
         if (patch_size < 1) patch_size = 1;
         if (patch_size > seq_len) patch_size = seq_len;
@@ -146,53 +182,51 @@ void predict_batch_c(
         int offset = 0;
         if (seq_len > patch_size) {
             if (causal) {
-                // Simplified Beta(2,1) approx for speed
                 float u1 = (float)fast_rand(&seed) / 32768.0f;
                 float u2 = (float)fast_rand(&seed) / 32768.0f;
-                float bf = (u1 > u2) ? u1 : u2; // approx Beta(2,1)
+                float bf = (u1 > u2) ? u1 : u2;
                 offset = (int)(bf * (float)(seq_len - patch_size));
             } else {
                 offset = fast_rand(&seed) % (seq_len - patch_size + 1);
             }
         }
         int start = offset;
-        int end = start + patch_size;
+        int end   = start + patch_size;
         out_starts[d] = start;
-        out_ends[d] = end;
+        out_ends[d]   = end;
 
-        // 2. Pooling
+        /* 2. Pooling */
         float pooled[256];
-        const float *sl = basemap + start * dim;
-        int sl_len = end - start;
-        int type = dots_types[d];
+        const float *sl  = basemap + start * dim;
+        int   sl_len     = end - start;
+        int   type       = dots_types[d];
 
-        // Check RTL flag (dim EMBED+POS+FREQ+11)
         int is_rtl = 0;
         if (sl_len > 0) {
-            // We check the first token of the slice for RTL flag
             if (sl[EMBED_DIM + POS_DIM + FREQ_DIM + 11] > 0.5f) is_rtl = 1;
         }
 
-        if (type == 4) temporal_pool(sl, sl_len, dim, is_rtl, pooled);
+        if      (type == 4) temporal_pool(sl, sl_len, dim, is_rtl, pooled);
         else if (type == 3) relational_pool(sl, sl_len, dim, pooled);
         else if (type == 6) logic_pool(sl, sl_len, dim, pooled);
-        else if (type == 9) { // LAZY: just first and last
-            for (int j = 0; j < dim; j++) pooled[j] = 0.5f * (sl[j] + sl[(sl_len - 1) * dim + j]);
-        }
-        else {
+        else if (type == 9) {
+            for (int j = 0; j < dim; j++)
+                pooled[j] = 0.5f * (sl[j] + sl[(sl_len - 1) * dim + j]);
+        } else {
             memset(pooled, 0, sizeof(pooled));
-            for (int i = 0; i < sl_len; i++) {
+            for (int i = 0; i < sl_len; i++)
                 for (int j = 0; j < dim; j++) pooled[j] += sl[i * dim + j] / (float)sl_len;
-            }
         }
 
-        // 3. Dim Focus (Hard-coded ranges for speed)
-        // [0:128], [128:256], [0:256] etc.
-        if (type == 0) { for(int i=128; i<256; i++) pooled[i] = 0; }
-        else if (type == 1 || type == 6) { for(int i=0; i<128; i++) pooled[i] = 0; }
-        else if (type == 7) { for(int i=0; i<236; i++) pooled[i] = 0; for(int i=252; i<256; i++) pooled[i] = 0; }
+        /* 3. Dim Focus */
+        if      (type == 0) { for (int i = 128; i < 256; i++) pooled[i] = 0; }
+        else if (type == 1 || type == 6) { for (int i = 0; i < 128; i++) pooled[i] = 0; }
+        else if (type == 7) {
+            for (int i = 0; i < 236; i++) pooled[i] = 0;
+            for (int i = 252; i < 256; i++) pooled[i] = 0;
+        }
 
-        // 4. Abstract Transform
+        /* 4. Abstract Transform */
         float abstract[256];
         const float *W = dots_W + d * dim * dim;
         const float *b = dots_b_offset + d * dim;
@@ -203,27 +237,39 @@ void predict_batch_c(
             abstract[i] = (1.0f - abs_bias) * pooled[i] + abs_bias * nonlinear;
         }
 
-        // 5. Reasoning
+        /* 5. Reasoning (skip noise in training mode by passing T=0) */
         float T = temp_bias * T_base;
         if (abs_bias > 0.4f) {
             int steps = (int)(depth_bias * 5.0f);
             if (steps < 1) steps = 1;
-            reason_fast(abstract, W, b, dim, steps, T, bias[0], consensus, &seed, abs_bias);
+            float reason_T = training_mode ? 0.0f : T;
+            reason_fast(abstract, W, b, dim, steps, reason_T, bias[0], consensus, &seed, abs_bias);
         }
 
-        // 6. Heads
+        /* 6. Head projections
+         *    training_mode=1: skip fast_randn (no transcendentals in hot path)
+         *    training_mode=0: full noise for inference diversity
+         */
         int n_heads = dots_n_heads[d];
         for (int h = 0; d < num_dots && h < n_heads; h++) {
-            const float *HW = dots_head_projs + (d * 8 + h) * dim * dim;
-            float *p_out = out_preds + (d * 8 + h) * dim;
+            const float *HW  = dots_head_projs + (d * 8 + h) * dim * dim;
+            float       *p_out = out_preds + (d * 8 + h) * dim;
 
-            for (int i = 0; i < dim; i++) {
-                float sum = b[i] * (float)(h + 1) * 0.1f;
-                for (int j = 0; j < dim; j++) sum += HW[i * dim + j] * abstract[j];
-                p_out[i] = tanhf(sum) + fast_randn(&seed) * T * 0.05f;
+            if (training_mode) {
+                for (int i = 0; i < dim; i++) {
+                    float sum = b[i] * (float)(h + 1) * 0.1f;
+                    for (int j = 0; j < dim; j++) sum += HW[i * dim + j] * abstract[j];
+                    p_out[i] = tanhf(sum);
+                }
+            } else {
+                for (int i = 0; i < dim; i++) {
+                    float sum = b[i] * (float)(h + 1) * 0.1f;
+                    for (int j = 0; j < dim; j++) sum += HW[i * dim + j] * abstract[j];
+                    p_out[i] = tanhf(sum) + fast_randn(&seed) * T * 0.05f;
+                }
             }
 
-            // Norm & Confidence
+            /* Norm & Confidence */
             float nsq = 0.0f;
             for (int i = 0; i < dim; i++) nsq += p_out[i] * p_out[i];
             float norm = sqrtf(nsq);

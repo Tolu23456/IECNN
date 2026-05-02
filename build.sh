@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -e
 GCC=$(which gcc 2>/dev/null || echo /usr/bin/gcc)
-FLAGS="-O3 -shared -fPIC -lm -march=native -fopenmp"
+FLAGS="-O3 -shared -fPIC -lm -lmvec -march=native -fopenmp -ffast-math -funroll-loops"
 
 echo "[build] Compiling formulas.c → formulas/formulas_c.so"
 $GCC $FLAGS -o formulas/formulas_c.so formulas/formulas.c

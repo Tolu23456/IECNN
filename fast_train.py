@@ -949,7 +949,8 @@ def fast_effective_train(
     for epoch in range(n_epochs):
         if verbose and n_epochs > 1:
             print(f"\n  Epoch {epoch + 1}/{n_epochs}")
-        model.causal_train_pass(sentences, max_pos=max_pos, verbose=verbose)
+        model.causal_train_pass(sentences, max_pos=max_pos, verbose=verbose,
+                                causal_batch=200, save_every=5000)
 
     elapsed = time.perf_counter() - t0
     rate = len(sentences) * n_epochs / max(elapsed, 1e-9)
