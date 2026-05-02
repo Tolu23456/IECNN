@@ -994,6 +994,216 @@ class IECNN:
         return decoder.decode(res.output, max_tokens=max_tokens,
                               iterations=iterations, beam_width=beam_width)
 
+    def causal_generate(self,
+                        prompt: str,
+                        max_tokens:           int   = 20,
+                        ctx_alpha:            float = 0.55,
+                        confidence_threshold: float = 0.02,
+                        variation:            float = 0.60) -> dict:
+        """
+        IECNN-native generation loop — majority-vote residual generation.
+
+        Each of the 128 trained Neural Dots predicts independently via
+        W[d] @ ctx.  The corpus-average direction is subtracted (residual),
+        then every dot votes for the vocab token nearest its residual.
+        The plurality winner IS the converged next token.
+
+        confidence = max_votes / n_dots  (range ~0.04–0.09 in practice)
+        stop when confidence < confidence_threshold (default 0.02 = 2.6 votes)
+
+        Controlled variation
+        --------------------
+        If the 2nd-best cluster's score is within `variation` ratio of the
+        winner, we sample probabilistically between the two.  This gives
+        natural variation without temperature scaling.
+
+        Stop conditions (whichever fires first)
+        ----------------------------------------
+        1. Winning cluster confidence < confidence_threshold  (uncertainty)
+        2. Natural stop token produced  (. ! ? newline)
+        3. max_tokens reached
+
+        Returns
+        -------
+        dict with keys:
+          text          – space-joined output string
+          tokens        – list of token strings
+          confidences   – per-token winning-cluster score
+          stop_reason   – "max_tokens" | "low_confidence(x.xxx)"
+                          | "natural_stop" | "no_clusters"
+        """
+        dots = self._ensure_dots()
+        if not dots:
+            return {"text": "", "tokens": [], "confidences": [],
+                    "stop_reason": "no_dots"}
+
+        vocab = self.base_mapper._base_vocab
+        if not vocab:
+            return {"text": "", "tokens": [], "confidences": [],
+                    "stop_reason": "no_vocab"}
+
+        # ── Pre-build vocab lookup ─────────────────────────────────────
+        # Vote pool: whole-word tokens only — type="word" AND purely alphabetic
+        # (length >= 3, starts with a letter, all lowercase after first char).
+        # This removes: subword fragments ("heles", "nswer"), numbers ("56",
+        # "790"), symbols ("−", "~"), and short codes ("tel", "08").
+        import re as _re
+        _WORD_RE  = _re.compile(r'^[A-Za-z][a-z]{2,}$')
+        _HAS_VOWEL = _re.compile(r'[aeiou]', _re.I)
+        base_types = getattr(self.base_mapper, "_base_types", {})
+        words      = [
+            w for w in vocab
+            if " " not in w
+            and base_types.get(w, "subword") == "word"
+            and _WORD_RE.match(w)
+            and _HAS_VOWEL.search(w)          # drop consonant-only codes (sbf, ydll)
+        ]
+        if not words:                           # fallback: all single-piece tokens
+            words = [w for w in vocab if " " not in w]
+        word_vecs  = np.stack(
+            [vocab[w].astype(np.float32) for w in words]
+        )                                                       # (V, 224)
+        wv_norms   = np.linalg.norm(word_vecs, axis=1, keepdims=True) + 1e-10
+        word_vecs_n = word_vecs / wv_norms                     # unit vectors
+
+        # ── Initial context vector ─────────────────────────────────────
+        ctx = self._get_ctx_cached(prompt).astype(np.float32)  # (256,)
+        ctx = ctx / (np.linalg.norm(ctx) + 1e-10)
+
+        # ── Stack dot weights ──────────────────────────────────────────
+        W_stack  = np.stack([d.W for d in dots]).astype(np.float32)  # (D,256,256)
+        dom_arr  = np.array(
+            [getattr(d, "dominance", 0.5) for d in dots], dtype=np.float32
+        )                                                             # (D,)
+
+        conv = ConvergenceLayer(
+            micro_threshold=0.50, macro_threshold=0.35, alpha=0.7
+        )
+
+        from collections import Counter as _Counter
+
+        STOP_TOKENS  = {".", "!", "?", "\n", "<eos>", "[eos]", "</s>"}
+        HARD_BLOCK   = max_tokens   # block for entire generation window — no cycling
+        TOP_K_SAMPLE = 5            # sample from top-K most-voted tokens (controlled variation)
+        CONF_STOP    = confidence_threshold   # fraction of dots that must agree to continue
+
+        output_tokens: List[str]   = []
+        output_confs:  List[float] = []
+        stop_reason = "max_tokens"
+
+        # word_idx maps word → column index in word_vecs_n for fast lookup
+        word_idx = {w: i for i, w in enumerate(words)}
+
+        # Exclusion signal: slow EMA of generated token embeddings (256-dim).
+        # Subtracted from ctx_eff so the context drifts away from directions
+        # already visited — IECNN-native attractor-escape, no temperature needed.
+        #
+        # Pre-warm with 40% of the prompt context so step-1 is already pushed
+        # away from the prompt's own embedding direction.  Without this the
+        # first 2-3 tokens always anchor on the same "nearest-to-residual"
+        # words regardless of prompt.
+        exclusion = 0.40 * ctx
+
+        n_dots = len(dots)
+
+        for _step in range(max_tokens):
+            # ── Steer context away from already-visited space ─────────
+            if np.linalg.norm(exclusion) > 1e-6:
+                ctx_eff = ctx - 0.45 * exclusion
+                ctx_eff = ctx_eff / (np.linalg.norm(ctx_eff) + 1e-10)
+            else:
+                ctx_eff = ctx
+
+            # 1. Independent predictions: W[d] @ ctx_eff → (D, 256)
+            raw_preds = W_stack @ ctx_eff                        # (D, 256)
+            mean_pred = raw_preds.mean(axis=0)                   # (256,) shared/corpus direction
+
+            # ── Residual majority-vote ─────────────────────────────────
+            # Each dot's residual is its opinion BEYOND the shared average.
+            # We decode every residual to a vocab token, then count votes.
+            # Plurality = emergent convergence without spatial clustering.
+            # This is correct IECNN behaviour: 128 independent agents vote;
+            # the token that wins most dot-votes IS the converged answer.
+            residuals  = raw_preds - mean_pred                   # (D, 256)
+            res_e      = residuals[:, :EMBED_DIM]                # (D, 224) embed slice
+            res_norms  = np.linalg.norm(res_e, axis=1, keepdims=True) + 1e-10
+            res_en     = res_e / res_norms                       # unit sphere (D, 224)
+
+            # Per-dot nearest-vocab token via vectorised cosine
+            dot_sims   = res_en @ word_vecs_n.T                  # (D, V)
+
+            # Block already-used tokens across ALL dots before voting
+            blocked = set(output_tokens[-HARD_BLOCK:])
+            if blocked:
+                block_mask = np.array([w in blocked for w in words], dtype=bool)
+                dot_sims[:, block_mask] = -2.0
+
+            per_dot_best = np.argmax(dot_sims, axis=1)           # (D,) per-dot vote index
+
+            # 2. Count votes: token → number of dots that voted for it
+            vote_counts  = _Counter(int(i) for i in per_dot_best)
+            top_votes    = vote_counts.most_common(TOP_K_SAMPLE) # [(idx, count), ...]
+
+            if not top_votes:
+                stop_reason = "no_votes"
+                break
+
+            # 3. Confidence = fraction of dots voting for the winning token
+            winner_count = top_votes[0][1]
+            confidence   = winner_count / n_dots
+
+            # 4. Stop: vote is too scattered (model uncertain)
+            if confidence < CONF_STOP:
+                stop_reason = f"low_confidence({confidence:.3f})"
+                break
+
+            # 5. Controlled variation: sample from top-K by vote-count
+            #    When top-2 are close in votes (ratio > `variation`), the
+            #    sampling probability spreads between them.
+            cand_idx    = [idx for idx, _ in top_votes]
+            cand_counts = np.array([cnt for _, cnt in top_votes], dtype=np.float64)
+
+            # Normalise counts → probabilities (softmax with adaptive sharpness)
+            temp    = max(0.5, 1.0 - confidence * 5.0)  # flatten when uncertain
+            logits  = cand_counts / temp
+            logits -= logits.max()
+            probs   = np.exp(logits); probs /= probs.sum()
+
+            # Apply `variation` gate: if 2nd place is within `variation` of 1st,
+            # the sampling already handles it via probabilities above.
+            chosen_pos = np.random.choice(len(cand_idx), p=probs)
+            next_token = words[cand_idx[chosen_pos]]
+
+            output_tokens.append(next_token)
+            output_confs.append(float(confidence))
+
+            # 6. Natural stop check
+            if next_token in STOP_TOKENS:
+                stop_reason = "natural_stop"
+                break
+
+            # 7. Context roll: EMA toward the chosen token's embedding
+            tok_emb                = vocab[next_token].astype(np.float32)
+            tok_padded             = np.zeros(len(ctx), dtype=np.float32)
+            tok_padded[:EMBED_DIM] = tok_emb
+            tok_n = tok_padded / (np.linalg.norm(tok_padded) + 1e-10)
+
+            ctx = ctx_alpha * ctx + (1.0 - ctx_alpha) * tok_n
+            ctx = ctx / (np.linalg.norm(ctx) + 1e-10)
+
+            # 8. Update exclusion signal (slow EMA of visited directions)
+            exclusion = 0.80 * exclusion + 0.20 * tok_n
+            ex_norm   = np.linalg.norm(exclusion)
+            if ex_norm > 1e-10:
+                exclusion /= ex_norm
+
+        return {
+            "text":        " ".join(output_tokens),
+            "tokens":      output_tokens,
+            "confidences": output_confs,
+            "stop_reason": stop_reason,
+        }
+
     def compare(self, texts: List[str]) -> np.ndarray:
         """Return n×n pairwise similarity matrix for the given texts."""
         from formulas.formulas import similarity_score

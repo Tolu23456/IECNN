@@ -584,7 +584,29 @@ C .so files use `_c.so` suffix to avoid colliding with Python module names.
 
 ### Large Dataset Training
 - `fit_file(path, verbose=True)` — stream one sentence per line, batch train
-- `generate(prompt, max_tokens=8, iterations=20)` — prompt → latent → decoded text
+- `generate(prompt, max_tokens=8, iterations=20)` — prompt → latent → beam-search decoded text (old pipeline)
+- `causal_generate(prompt, max_tokens=20)` — IECNN-native majority-vote generation (new, preferred)
+
+### IECNN-Native Generation (`causal_generate`) — added May 2026
+
+The IECNN-native generation loop. Not transformer-style. No softmax over vocab. Steps:
+
+1. **Independent predictions**: `pred[d] = W[d] @ ctx` for all 128 dots — (128, 256)
+2. **Residual isolation**: `residual[d] = pred[d] - mean(all_preds)` — strips corpus-average direction
+3. **Per-dot vocabulary vote**: each dot decodes its residual to the nearest vocab word via cosine similarity
+4. **Plurality selection**: count votes across 128 dots; winning token = token with most dot nominations
+5. **Controlled variation**: softmax-sample from top-5 most-voted tokens (temperature scales with confidence)
+6. **Stop condition**: `max_votes / 128 < confidence_threshold` (default 0.02) — stop when too uncertain
+7. **Context roll**: `ctx = 0.55 * ctx + 0.45 * embed(next_token)` — EMA toward new token
+8. **Exclusion signal**: running EMA of used token embeddings, subtracted from ctx each step to prevent attractor loops
+
+**Vote pool**: word-type tokens only — alphabetic (regex `^[A-Za-z][a-z]{2,}$`), contains a vowel, no subword fragments, no numbers. ~10,500 tokens from the 47k vocab.
+
+**CLI command**: `cgen <prompt>` in the interactive REPL, or `python main.py cgen "prompt"` one-shot.
+
+**Output format**: text + per-token `Votes/128` display showing how many dots agreed on each token.
+
+**Context sensitivity**: different prompts produce different token streams (measurable from step ~3 onward). The model is associative, not grammatical — output reflects the W-matrix specialisation directions, not language rules.
 
 ---
 

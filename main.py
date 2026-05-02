@@ -379,6 +379,34 @@ def cmd_train(filepath: str, limit: int = 0, evolve: bool = False,
     cmd_memory(model)
 
 
+def _run_cgen(model, prompt: str):
+    """Run causal_generate and print verbose per-token output."""
+    print("  [thinking...]", end="", flush=True)
+    result = model.causal_generate(prompt)
+    tokens = result["tokens"]
+    confs  = result["confidences"]
+    reason = result["stop_reason"]
+
+    if not tokens:
+        print(f"\r  Output: (empty — {reason})            ")
+        return
+
+    # Print output and per-token dot-vote breakdown
+    print(f"\r  Output: {result['text']}            ")
+    print()
+    # confidence = max_votes/128; scale to % of dots for display
+    n_dots = 128
+    token_line = ""
+    for tok, conf in zip(tokens, confs):
+        votes = int(round(conf * n_dots))
+        token_line += f"{tok}[{votes}] "
+    print(f"  Votes/128: {token_line.strip()}")
+    avg_conf = sum(confs) / len(confs) if confs else 0.0
+    avg_votes = int(round(avg_conf * n_dots))
+    print(f"  Avg votes: {avg_votes}/128  |  Tokens: {len(tokens)}  |  Stop: {reason}")
+    model.save_brain()
+
+
 def cmd_generate_oneshot(prompt: str):
     _build_c()
     model = _make_model()
@@ -386,6 +414,13 @@ def cmd_generate_oneshot(prompt: str):
     out = model.generate(prompt)
     print(f"  Output: {out}")
     model.save_brain()
+
+
+def cmd_cgen_oneshot(prompt: str):
+    _build_c()
+    model = _make_model()
+    print(f"[IECNN] IECNN-native generation from: '{prompt}'")
+    _run_cgen(model, prompt)
 
 
 def cmd_chat(model=None):
@@ -429,7 +464,8 @@ def _interactive_loop(model):
             print("  Goodbye."); break
         if low in ("help", "?"):
             print("  Commands:")
-            print("    generate <prompt>   encode prompt then decode output")
+            print("    cgen <prompt>       IECNN-native generation (convergence voting)")
+            print("    generate <prompt>   encode prompt then beam-search decode")
             print("    encode <text>       encode and show vector summary")
             print("    sim A | B           pairwise similarity")
             print("    train <filepath>    train on a text file")
@@ -455,6 +491,10 @@ def _interactive_loop(model):
             vb = model.encode(parts[1].strip())
             print(f"  Similarity: {similarity_score(va, vb):+.4f}")
             model.save_brain(); continue
+        if low.startswith("cgen "):
+            prompt = user[5:].strip()
+            if not prompt: print("  Usage: cgen <prompt>"); continue
+            _run_cgen(model, prompt); continue
         if low.startswith("generate "):
             prompt = user[9:].strip()
             if not prompt: print("  Usage: generate <prompt>"); continue
@@ -481,11 +521,8 @@ def _interactive_loop(model):
             except FileNotFoundError as e:
                 print(f"  Error: {e}")
             continue
-        # Default: treat raw input as a prompt to generate text from
-        print("  [generating...]", end="", flush=True)
-        out = model.generate(user)
-        print(f"\r  Output: {out}            ")
-        model.save_brain()
+        # Default: IECNN-native generation
+        _run_cgen(model, user)
 
 
 def cmd_interactive():
@@ -565,6 +602,8 @@ if __name__ == "__main__":
         cmd_prune(dry_run=dry, min_outcomes=min_outcomes, min_age_gens=min_age)
     elif args[0] == "encode" and len(args) >= 2:
         cmd_encode(" ".join(args[1:]))
+    elif args[0] == "cgen" and len(args) >= 2:
+        cmd_cgen_oneshot(" ".join(args[1:]))
     elif args[0] == "generate" and len(args) >= 2:
         cmd_generate_oneshot(" ".join(args[1:]))
     elif args[0] == "sim" and len(args) >= 2:
