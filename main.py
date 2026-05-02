@@ -249,7 +249,8 @@ def cmd_prune(dry_run: bool = False, min_outcomes: int = 2, min_age_gens: int = 
 
 
 def cmd_train(filepath: str, limit: int = 0, evolve: bool = False,
-              causal: bool = False, prune_every: int = 0):
+              causal: bool = False, prune_every: int = 0,
+              fast: bool = False, workers: int = None):
     _build_c()
     if not os.path.exists(filepath):
         print(f"[IECNN] Corpus not found: {filepath}")
@@ -265,6 +266,32 @@ def cmd_train(filepath: str, limit: int = 0, evolve: bool = False,
                 out.append(line)
                 if cap and len(out) >= cap: break
         return out
+
+    if fast:
+        # ── Ultra-fast parallel training path ──────────────────────────
+        import fast_train as _ft
+        import multiprocessing as mp
+        n_workers = workers or min(mp.cpu_count(), 8)
+
+        if evolve:
+            print(f"[IECNN] Fast full-pipeline training: {filepath}  "
+                  f"(workers={n_workers})")
+            _ft.fast_full_train(
+                corpus_path=filepath,
+                brain_path=PERSISTENCE,
+                n_workers=n_workers,
+                verbose=True,
+            )
+        else:
+            print(f"[IECNN] Fast vocab training: {filepath}  "
+                  f"(workers={n_workers})")
+            _ft.fast_vocab_train(
+                corpus_path=filepath,
+                brain_path=PERSISTENCE,
+                n_workers=n_workers,
+                verbose=True,
+            )
+        return
 
     if causal:
         sentences = _read_lines(filepath, limit)
@@ -500,12 +527,15 @@ if __name__ == "__main__":
     elif args[0] == "chat":
         cmd_chat()
     elif args[0] == "train" and len(args) >= 2:
-        # python main.py train <file> [--limit N] [--evolve] [--causal] [--prune-every N]
+        # python main.py train <file> [--limit N] [--evolve] [--causal]
+        #                             [--prune-every N] [--fast] [--workers N]
         filepath = args[1]
         limit = 0
         prune_every = 0
-        evolve = "--evolve" in args
-        causal = "--causal" in args
+        evolve    = "--evolve"  in args
+        causal    = "--causal"  in args
+        fast      = "--fast"    in args
+        workers   = None
         if "--limit" in args:
             i = args.index("--limit")
             if i + 1 < len(args):
@@ -518,7 +548,12 @@ if __name__ == "__main__":
                 except ValueError: prune_every = 0
             if not causal:
                 evolve = True
+        if "--workers" in args:
+            i = args.index("--workers")
+            if i + 1 < len(args):
+                try: workers = int(args[i+1])
+                except ValueError: workers = None
         cmd_train(filepath, limit=limit, evolve=evolve, causal=causal,
-                  prune_every=prune_every)
+                  prune_every=prune_every, fast=fast, workers=workers)
     else:
         print(__doc__)
