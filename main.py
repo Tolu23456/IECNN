@@ -24,6 +24,8 @@ Usage:
                                         # targeting >1M sent/s throughput
   python main.py demo                   # run the original 6-example showcase
   python main.py build                  # compile C extensions
+  python main.py rebuild                # re-embed vocab with char n-gram embeddings
+                                        # (run before calibrate for best quality)
 
   Global flag (any subcommand or interactive mode):
   --phase-coding      enable IECNN-native phase-coherence binding so cluster
@@ -419,6 +421,57 @@ def _run_cgen(model, prompt: str):
     model.save_brain()
 
 
+def cmd_rebuild():
+    """Re-embed all vocabulary words with FastText-style char n-gram embeddings.
+
+    Replaces the old hash-based vectors with n-gram vectors so morphologically
+    related words become cosine-similar (run/running, good/goodness, etc.).
+    Vocabulary, co-occurrence data, and dot W-matrices are left unchanged.
+
+    After rebuild, run 'calibrate' to realign the dot W-matrices with the
+    new embedding space — this is required for good generation quality.
+    """
+    _build_c()
+    model = _make_model()
+
+    print(f"\n{BAR}")
+    print("  IECNN — Vocab Embedding Rebuild (char n-gram / FastText-style)")
+    print(BAR)
+    print(f"  Vocab size  : {len(model.base_mapper._base_vocab):,} tokens")
+
+    import time
+    t0 = time.time()
+    n = model.base_mapper.rebuild_vocab_embeddings(verbose=True)
+    elapsed = time.time() - t0
+    print(f"  Rebuilt     : {n:,} embeddings in {elapsed:.1f}s")
+
+    # Verify morphological similarity improvement
+    import numpy as np
+    vocab = model.base_mapper._base_vocab
+    def cos(a, b):
+        return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-9))
+
+    print()
+    print("  Morphological similarity check (should be ≥ 0.20):")
+    checks = [
+        ("run", "running"),  ("walk", "walked"),
+        ("nation", "national"), ("good", "goodness"),
+    ]
+    for a, b in checks:
+        if a in vocab and b in vocab:
+            c = cos(vocab[a], vocab[b])
+            mark = "OK" if c >= 0.20 else "low"
+            print(f"    {a:10} / {b:10} = {c:+.3f}  {mark}")
+        else:
+            print(f"    {a}/{b}: not in vocab (needs training first)")
+
+    model._ctx_cache.clear()
+    model.save_brain()
+    print()
+    print("  Saved. Run 'calibrate' next to realign dot W-matrices.")
+    print(BAR)
+
+
 def cmd_calibrate(corpus_path: str = "/tmp/corpus_300k.txt",
                   limit: int = 0):
     """
@@ -461,10 +514,13 @@ def cmd_calibrate(corpus_path: str = "/tmp/corpus_300k.txt",
 
     if model.peep is not None:
         stats = model.peep.stats()
+        div   = stats.get("diversity", 0.0)
+        div_ok = "healthy" if div >= 0.35 else "needs re-calibration"
         print(f"\n  Peep calibration complete:")
         print(f"    Active dots : {stats['active_dots']} / 128")
         print(f"    Total hits  : {stats['total_hits']:,}")
         print(f"    Max hits    : {stats['max_hits']:,}")
+        print(f"    Diversity   : {div:.4f}  ({div_ok})")
         print(f"    Top 5 dots  : {stats['top5_dots']}")
     else:
         print("  Warning: Peep was not created (no training positions?)")
@@ -532,6 +588,7 @@ def _interactive_loop(model):
         if low in ("help", "?"):
             print("  Commands:")
             print("    cgen <prompt>       IECNN-native generation (Peep+Grammar if calibrated)")
+            print("    rebuild             re-embed vocab with char n-gram embeddings (run before calibrate)")
             print("    calibrate [path]    build Peep specialisations from corpus (enables Peep)")
             print("    generate <prompt>   encode prompt then beam-search decode")
             print("    encode <text>       encode and show vector summary")
@@ -559,6 +616,8 @@ def _interactive_loop(model):
             vb = model.encode(parts[1].strip())
             print(f"  Similarity: {similarity_score(va, vb):+.4f}")
             model.save_brain(); continue
+        if low == "rebuild":
+            cmd_rebuild(); continue
         if low.startswith("calibrate"):
             parts = user.split(None, 1)
             corpus = parts[1].strip() if len(parts) > 1 else "/tmp/corpus_300k.txt"
@@ -674,6 +733,8 @@ if __name__ == "__main__":
         cmd_prune(dry_run=dry, min_outcomes=min_outcomes, min_age_gens=min_age)
     elif args[0] == "encode" and len(args) >= 2:
         cmd_encode(" ".join(args[1:]))
+    elif args[0] == "rebuild":
+        cmd_rebuild()
     elif args[0] == "calibrate":
         corpus = args[1] if len(args) >= 2 else "/tmp/corpus_300k.txt"
         limit  = 0

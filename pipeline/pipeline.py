@@ -776,9 +776,10 @@ class IECNN:
             mt_norms     = np.linalg.norm(mean_targets, axis=1, keepdims=True).clip(1e-10)
             mean_targets /= mt_norms                            # normalised
 
-            # Diversity push: subtract 50% of the shared centroid, then renorm
+            # Diversity push: subtract 70% of the shared centroid, then renorm.
+            # (was 50% — increased to 70% to fight W-matrix collapse harder)
             global_dir   = mean_targets.mean(axis=0)           # (dim,) centroid
-            div_targets  = mean_targets - 0.50 * global_dir[None, :]
+            div_targets  = mean_targets - 0.70 * global_dir[None, :]
             dt_norms     = np.linalg.norm(div_targets, axis=1, keepdims=True).clip(1e-10)
             eff_targets  = div_targets / dt_norms               # (n_dots, dim)
 
@@ -787,6 +788,24 @@ class IECNN:
             W[idx, rows] = (1.0 - lre) * W[idx, rows] + lre * eff_targets
             row_vecs     = W[idx, rows]
             W[idx, rows] = row_vecs / np.linalg.norm(row_vecs, axis=1, keepdims=True).clip(1e-10)
+
+            # ── Inter-dot W repulsion (vectorised) ───────────────────────────
+            # Push W-matrix rows that are too similar apart.  Threshold 0.70 so
+            # only genuinely similar rows are repelled; lr=0.008 keeps it gentle.
+            WREP_THRESH = 0.70
+            WREP_LR     = 0.008
+            cur_rows    = W[idx, rows]                          # (n_dots, dim)
+            row_norms   = np.linalg.norm(cur_rows, axis=1, keepdims=True).clip(1e-9)
+            rows_n      = cur_rows / row_norms                  # unit vectors
+            row_sims    = rows_n @ rows_n.T                     # (n_dots, n_dots)
+            np.fill_diagonal(row_sims, 0.0)
+            too_close   = np.clip(row_sims - WREP_THRESH, 0.0, None)
+            if too_close.sum() > 0.0:
+                rep_dir     = too_close @ rows_n                # (n_dots, dim)
+                pair_cnt    = (too_close > 0).sum(axis=1, keepdims=True).clip(1)
+                cur_rows   -= WREP_LR * rep_dir / pair_cnt
+                row_norms2  = np.linalg.norm(cur_rows, axis=1, keepdims=True).clip(1e-9)
+                W[idx, rows] = cur_rows / row_norms2
 
             # Sync back to dot objects (once per batch, not per-position)
             for i, dot in enumerate(dots):
@@ -1046,7 +1065,7 @@ class IECNN:
                         prompt: str,
                         max_tokens:           int   = 20,
                         ctx_alpha:            float = 0.55,
-                        confidence_threshold: float = 0.02,
+                        confidence_threshold: float = 0.08,
                         variation:            float = 0.60) -> dict:
         """
         IECNN-native generation loop — majority-vote residual generation.
@@ -1131,7 +1150,7 @@ class IECNN:
         from collections import Counter as _Counter
 
         STOP_TOKENS  = {".", "!", "?", "\n", "<eos>", "[eos]", "</s>"}
-        HARD_BLOCK   = max_tokens
+        HARD_BLOCK   = 8          # block last 8 tokens (not max_tokens — avoids over-blocking)
         TOP_K_SAMPLE = 5
         CONF_STOP    = confidence_threshold
 
@@ -1142,7 +1161,7 @@ class IECNN:
         # ── Grammar guide (cached; rebuilt only when vocab size changes) ──
         if (self._grammar_guide is None
                 or self._grammar_vocab_size != len(words)):
-            self._grammar_guide     = GrammarGuide(words, bias_strength=0.30)
+            self._grammar_guide     = GrammarGuide(words, bias_strength=0.50)
             self._grammar_vocab_size = len(words)
         _grammar_guide = self._grammar_guide
 
@@ -1173,7 +1192,10 @@ class IECNN:
 
             # ── Grammar weights for this step ──────────────────────────
             last_tok  = output_tokens[-1] if output_tokens else ""
-            gram_w    = _grammar_guide.weights(last_tok)         # (V,) additive bias
+            prev_tok  = output_tokens[-2] if len(output_tokens) >= 2 else ""
+            gram_w    = _grammar_guide.weights(last_tok, prev_tok)  # (V,) bigram bias
+            # Anti-repetition: penalise same POS 3x in a row
+            gram_w    = gram_w + _grammar_guide.anti_rep_mask(output_tokens[-4:])
 
             # ══════════════════════════════════════════════════════════
             # PATH A — Peep-guided generation (Peep calibrated)
@@ -1231,7 +1253,7 @@ class IECNN:
 
                 # 6a. Softmax-sample from top-K (controlled variation)
                 top_sims  = sims[top5_idx].astype(np.float64)
-                temp      = max(0.30, 1.0 - confidence)
+                temp      = max(0.15, 0.80 - confidence)        # lower base temp → more focused
                 logits    = top_sims / temp
                 logits   -= logits.max()
                 probs     = np.exp(logits); probs /= probs.sum()

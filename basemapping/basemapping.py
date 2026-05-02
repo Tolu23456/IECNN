@@ -154,15 +154,72 @@ _SUFFIXES = _VERB_SUFFIXES + _NOUN_SUFFIXES + _ADJ_SUFFIXES + (_ADV_SUFFIX,)
 def _stable_embedding(token: str, dim: int) -> np.ndarray:
     """Stable hash-based unit-sphere embedding for a token string (v6 deterministic).
 
-    Uses md5 + numpy default_rng (PCG64) — 14x faster than sha256 + RandomState
-    because default_rng avoids the os.urandom entropy-pool call that RandomState
-    triggers on every construction.  Output distribution is statistically identical.
+    Used for primitive characters (a-z, 0-9) and as a fast fallback.
+    For vocabulary words, prefer _ngram_embedding() which gives semantic
+    similarity between morphologically related words.
     """
     h = int(hashlib.md5(token.encode("utf-8")).hexdigest(), 16) & 0xFFFFFFFFFFFFFFFF
     rng = np.random.default_rng(h)
     v = rng.standard_normal(dim).astype(np.float32)
     n = np.linalg.norm(v) + 1e-10
     return v / n
+
+
+# Module-level cache for n-gram embeddings (up to 200k entries)
+_NGRAM_EMBS: Dict[str, np.ndarray] = {}
+
+
+def _ngram_embedding(token: str, dim: int) -> np.ndarray:
+    """FastText-style character n-gram embedding.
+
+    Morphologically related words share character n-grams and therefore have
+    cosine-similar embeddings without any external pre-trained data:
+      • "run" / "running" / "runner"  share  "run", "<run", "unn", etc.
+      • "good" / "goodness" / "goods" share  "good", "<goo", "ood>", etc.
+      • "beautiful" / "beauty"        share  "beau", "eaut", "auti", etc.
+
+    Algorithm
+    ---------
+    1. Pad word as  <word>
+    2. Extract all 3, 4, 5-char n-grams from the padded form
+    3. Also add the whole word itself as one "n-gram"
+    4. Hash each n-gram → PCG64 → random unit vector
+    5. Sum all vectors and L2-normalise
+
+    Performance
+    -----------
+    Results are cached in _NGRAM_EMBS; regeneration for a 10-char word
+    is ~15 µs (13 n-grams × 1 µs per PCG64 call).  Cache miss rate is
+    low after the first training pass.
+    """
+    key = token
+    cached = _NGRAM_EMBS.get(key)
+    if cached is not None and cached.shape[0] == dim:
+        return cached
+
+    w = token.lower()
+    padded = f"<{w}>"
+    ngrams: list = []
+    for n in (3, 4, 5):
+        for i in range(len(padded) - n + 1):
+            ngrams.append(padded[i : i + n])
+    ngrams.append(w)
+
+    acc = np.zeros(dim, dtype=np.float32)
+    for ng in ngrams:
+        h = int(hashlib.md5(ng.encode("utf-8")).hexdigest(), 16) & 0xFFFFFFFFFFFFFFFF
+        rng = np.random.default_rng(h)
+        acc += rng.standard_normal(dim).astype(np.float32)
+
+    nm = float(np.linalg.norm(acc))
+    if nm < 1e-10:
+        acc = _stable_embedding(token, dim)
+    else:
+        acc /= nm
+
+    if len(_NGRAM_EMBS) < 200_000:
+        _NGRAM_EMBS[key] = acc
+    return acc
 
 
 class BaseMap:
@@ -371,7 +428,7 @@ class BaseMapper:
         for sub, cnt in self._subword_freq.most_common(self.max_vocab_size // 4):
             if cnt >= self.min_base_freq * 2 and sub not in self._base_vocab:
                 # Subwords get their own stable embedding
-                self._base_vocab[sub] = _stable_embedding(sub, EMBED_DIM)
+                self._base_vocab[sub] = _ngram_embedding(sub, EMBED_DIM)
                 self._base_types[sub] = "subword"
 
         # Cooccurrence smoothing pass: blend each word's embedding with a
@@ -529,7 +586,7 @@ class BaseMapper:
         if not skip_subwords:
             for sub, cnt in self._subword_freq.most_common(self.max_vocab_size // 4):
                 if cnt >= self.min_base_freq * 2 and sub not in self._base_vocab:
-                    self._base_vocab[sub] = _stable_embedding(sub, EMBED_DIM)
+                    self._base_vocab[sub] = _ngram_embedding(sub, EMBED_DIM)
                     self._base_types[sub] = "subword"
 
         # ── 6. Cooccurrence smoothing (same as fit()) ─────────────────
@@ -540,39 +597,61 @@ class BaseMapper:
 
     def _batch_stable_embeddings(self, tokens: List[str]) -> np.ndarray:
         """
-        Build stable unit-sphere embeddings for multiple tokens in one shot.
+        Build char n-gram embeddings for multiple tokens in one shot.
 
-        Uses vectorized numpy seeding — avoids per-token object construction
-        overhead.  ~14x faster per-token vs the old RandomState approach,
-        plus an additional ~2x from amortising loop overhead across the batch.
+        Replaces the old per-token hash approach with FastText-style character
+        n-gram embeddings so morphologically similar words get similar vectors.
+        Results are cached in the module-level _NGRAM_EMBS dict.
         """
         n = len(tokens)
         out = np.zeros((n, EMBED_DIM), dtype=np.float32)
         for i, token in enumerate(tokens):
-            h = int(hashlib.md5(token.encode("utf-8")).hexdigest(), 16) & 0xFFFFFFFFFFFFFFFF
-            rng = np.random.default_rng(h)
-            v = rng.standard_normal(EMBED_DIM).astype(np.float32)
-            nrm = np.linalg.norm(v)
-            out[i] = v / (nrm + 1e-10)
+            out[i] = _ngram_embedding(token, EMBED_DIM)
         return out
 
     def _batch_build_word_embeddings(self, words: List[str]) -> None:
         """
         Build and register embeddings for a batch of new words.
 
-        Vectorizes the stable-embedding half of _build_embedding() across
-        the entire new-word list, then blends with per-word character
-        composition (which is already cached after the first call).
+        Each word's embedding is a 60/40 blend of:
+          • char n-gram embedding  — morphological semantic similarity
+          • character composition  — structural letter-distribution signal
         """
         if not words:
             return
-        stable_batch = self._batch_stable_embeddings(words)
+        ngram_batch = self._batch_stable_embeddings(words)           # now n-gram
         for i, w in enumerate(words):
             composed = self._compose_word_embedding(w)
-            v = (0.6 * stable_batch[i] + 0.4 * composed).astype(np.float32)
+            v = (0.60 * ngram_batch[i] + 0.40 * composed).astype(np.float32)
             nrm = np.linalg.norm(v)
             self._base_vocab[w] = v / nrm if nrm > 1e-10 else v
             self._base_types[w] = "word"
+
+    def rebuild_vocab_embeddings(self, verbose: bool = True) -> int:
+        """Re-embed all vocabulary words with char n-gram embeddings.
+
+        Replaces old hash-based vectors in _base_vocab with FastText-style
+        n-gram vectors.  The vocabulary, co-occurrence data, and dot weights
+        are unchanged — only the token representation improves.
+
+        Clears _embed_cache and _NGRAM_EMBS so fresh vectors are computed.
+        Returns the number of words re-embedded.
+        """
+        global _NGRAM_EMBS
+        _NGRAM_EMBS.clear()
+        self._embed_cache.clear()
+
+        words = [w for w, t in self._base_types.items() if t in ("word", "subword")]
+        n = 0
+        for w in words:
+            self._base_vocab[w] = self._build_embedding(
+                w, self._base_types.get(w, "word")
+            )
+            n += 1
+
+        if verbose:
+            print(f"  [BaseMapper] Rebuilt {n:,} word embeddings with char n-gram method.")
+        return n
 
     def _batch_build_phrase_embeddings(self, phrases: List[str]) -> None:
         """
@@ -1088,15 +1167,21 @@ class BaseMapper:
     # ── Embedding construction ───────────────────────────────────────
 
     def _build_embedding(self, token: str, token_type: str) -> np.ndarray:
-        """Build the EMBED_DIM embedding for a known base."""
+        """Build the EMBED_DIM embedding for a known base.
+
+        For words: blend char n-gram embedding (semantic, morphological) with
+        character-composition embedding (structural).  The n-gram component
+        gives similarity between related words; the composed component gives
+        additional character-distribution signal.
+        """
         if token_type == "phrase":
             words       = token.split()
             word_embeds = [self._compose_word_embedding(w) for w in words]
             v = np.mean(np.stack(word_embeds), axis=0).astype(np.float32)
         else:
-            stable   = _stable_embedding(token, EMBED_DIM)
+            ngram    = _ngram_embedding(token, EMBED_DIM)
             composed = self._compose_word_embedding(token)
-            v = (0.6 * stable + 0.4 * composed).astype(np.float32)
+            v = (0.60 * ngram + 0.40 * composed).astype(np.float32)
         n = np.linalg.norm(v)
         return v / n if n > 1e-10 else v
 
@@ -1154,7 +1239,7 @@ class BaseMapper:
                 weights.append(0.5 / (1.0 + k * 0.1))
 
         if not char_embeds:
-            v = _stable_embedding(word, EMBED_DIM)
+            v = _ngram_embedding(word, EMBED_DIM)
             if depth == 0: self._embed_cache[word] = v
             return v
 
@@ -1245,7 +1330,9 @@ class BaseMapper:
         if token_type == "primitive":
             return self._primitive_embeddings.get(token, _stable_embedding(token, EMBED_DIM))
         if token_type in ("word", "phrase"):
-            return self._base_vocab.get(token, self._compose_word_embedding(token))
+            if token in self._base_vocab:
+                return self._base_vocab[token]
+            return self._build_embedding(token, token_type)
         return self._compose_word_embedding(token)
 
     # ── Position encoding ────────────────────────────────────────────

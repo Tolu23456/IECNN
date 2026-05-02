@@ -110,6 +110,44 @@ class PeepMechanism:
 
         self.calibrated = True
 
+        # ── Diversity push: subtract global centroid × 0.45, renorm ──────────
+        # Prevents all specialisations from converging toward the corpus-mean
+        # direction after many batches.  Each dot's unique direction is amplified
+        # by removing the shared "average Wikipedia direction".
+        centroid  = self.specialisations.mean(axis=0)               # (dim,)
+        cn        = float(np.linalg.norm(centroid))
+        if cn > 1e-9:
+            self.specialisations -= 0.45 * centroid[None, :]
+            sn = np.linalg.norm(self.specialisations, axis=1, keepdims=True)
+            self.specialisations /= sn.clip(1e-9)
+
+        # ── Pairwise repulsion: push highly similar specialisations apart ─────
+        # Vectorised: for each dot, subtract the weighted sum of directions
+        # whose cosine similarity exceeds the repulsion threshold.
+        # Runs in O(n_dots²) ≈ 16k ops — negligible for n_dots=128.
+        REP_THRESH = 0.80
+        REP_LR     = 0.025
+        sims = self.specialisations @ self.specialisations.T         # (n, n)
+        np.fill_diagonal(sims, 0.0)
+        too_similar  = np.clip(sims - REP_THRESH, 0.0, None)        # (n, n) ≥ 0
+        if too_similar.sum() > 0:
+            repulsion    = too_similar @ self.specialisations         # (n, dim)
+            pair_counts  = (too_similar > 0).sum(axis=1, keepdims=True).clip(1)
+            self.specialisations -= REP_LR * repulsion / pair_counts
+            sn = np.linalg.norm(self.specialisations, axis=1, keepdims=True)
+            self.specialisations /= sn.clip(1e-9)
+
+    def diversity_score(self) -> float:
+        """Mean pairwise (1 − cosine) across all dot specialisations.
+
+        Range: 0 (all identical) → 1 (all orthogonal).
+        A score > 0.35 indicates healthy specialisation diversity.
+        """
+        sp   = self.specialisations                                  # (n, dim)
+        sims = sp @ sp.T                                             # (n, n)
+        mask = ~np.eye(self.n_dots, dtype=bool)
+        return float(1.0 - sims[mask].mean())
+
     def select(self,
                ctx_eff:   np.ndarray,
                raw_preds: np.ndarray) -> int:
@@ -147,6 +185,7 @@ class PeepMechanism:
     def stats(self) -> dict:
         active = int((self.hit_counts > 0).sum())
         total  = int(self.hit_counts.sum())
+        div    = self.diversity_score() if self.calibrated else 0.0
         return {
             "calibrated":   self.calibrated,
             "active_dots":  active,
@@ -154,6 +193,7 @@ class PeepMechanism:
             "max_hits":     int(self.hit_counts.max()) if active else 0,
             "top5_dots":    list(np.argsort(self.hit_counts)[::-1][:5].tolist()),
             "hit_counts":   self.hit_counts.tolist(),
+            "diversity":    round(div, 4),
         }
 
     def save(self, path: str) -> None:
