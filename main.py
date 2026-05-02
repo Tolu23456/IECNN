@@ -297,15 +297,26 @@ def cmd_train(filepath: str, limit: int = 0, evolve: bool = False,
         return out
 
     if ultra:
-        # ── OMP single-call corpus scan — maximum counting throughput ───
         import fast_train as _ft
-        print(f"[IECNN] OMP ultra-fast vocab scan: {filepath}")
-        _ft.fast_vocab_train_omp(
-            corpus_path=filepath,
-            brain_path=PERSISTENCE,
-            n_threads=0,
-            verbose=True,
-        )
+        if causal:
+            # ── OMP vocab scan + per-dot causal training → MaxEff > 0.5 ──
+            print(f"[IECNN] Effective training (OMP vocab + causal): {filepath}")
+            _ft.fast_effective_train(
+                corpus_path=filepath,
+                brain_path=PERSISTENCE,
+                n_threads=0,
+                n_sentences=limit if limit > 0 else 20_000,
+                verbose=True,
+            )
+        else:
+            # ── OMP single-call corpus scan — maximum counting throughput ─
+            print(f"[IECNN] OMP ultra-fast vocab scan: {filepath}")
+            _ft.fast_vocab_train_omp(
+                corpus_path=filepath,
+                brain_path=PERSISTENCE,
+                n_threads=0,
+                verbose=True,
+            )
         return
 
     if fast:

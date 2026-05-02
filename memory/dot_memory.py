@@ -88,6 +88,45 @@ class DotMemory:
         if dot_id not in self._phase_acc:
             self._phase_acc[dot_id] = (0.0, 0.0, 0)
 
+    def batch_record(self,
+                     dot_ids: List[int],
+                     predictions: np.ndarray,
+                     wins: np.ndarray) -> None:
+        """Fast vectorised recording for all dots in a single Python call.
+
+        Parameters
+        ----------
+        dot_ids    : list of n_dots dot IDs (stable within a training session)
+        predictions: (n_dots, dim) float32 — each dot's output vector
+        wins       : (n_dots,) bool — per-dot win flag
+
+        Compared with calling record() n_dots times, this avoids:
+          - n_dots function-call overheads (~1-5 μs each)
+          - n_dots _ensure_id() hash lookups on every call
+          - n_dots optional-parameter branch evaluations
+          - The expensive similarity_score() call from causal_target
+        All counters, Welford stats, and windows are updated identically.
+        """
+        for i, did in enumerate(dot_ids):
+            self._ensure_id(did)
+            self._total_counts[did] += 1.0
+            if wins[i]:
+                self._success_counts[did] += 1.0
+                self._surprise_history[did] = (
+                    0.9 * self._surprise_history[did] + 0.1
+                )
+            p = predictions[i]
+            self._windows[did].append(p.copy())
+            # Welford online variance update
+            mean, M2, count = self._var_stats.get(
+                did, (np.zeros_like(p), np.zeros_like(p), 0)
+            )
+            count += 1
+            delta  = p - mean
+            mean   = mean + delta / count
+            M2     = M2 + delta * (p - mean)
+            self._var_stats[did] = (mean, M2, count)
+
     def record_phase_sample(self, dot_id: int, phase: float):
         """Record a phase sample for a dot (e.g. from winning a token slot)."""
         self._ensure_id(dot_id)

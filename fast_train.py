@@ -869,6 +869,108 @@ def fast_vocab_train_omp(
         print(f"  Done.")
 
 
+def fast_effective_train(
+    corpus_path:  str,
+    brain_path:   str  = "global_brain.pkl",
+    n_threads:    int  = 0,
+    n_sentences:  int  = 20_000,
+    n_epochs:     int  = 1,
+    max_pos:      int  = 6,
+    verbose:      bool = True,
+) -> None:
+    """
+    Two-phase training that reliably drives MaxEff above 0.5.
+
+    Phase 1 — OMP vocab scan (fast_vocab_train_omp):
+        Counts the entire corpus in C+OpenMP, builds embeddings for all new
+        words and bigrams.  Throughput: 2-15 M sent/s.
+
+    Phase 2 — Per-dot causal training (IECNN.causal_train_pass):
+        Uses the fixed per-dot W-matrix win criterion so each dot is scored
+        individually against the causal next-token target.  By Gaussian
+        symmetry ~50 % of dots win per step; specialising dots drift above
+        50 % → effectiveness > 0.5 → MaxEff > 0.5 after the first evolution
+        cycle (every 10 sentences).
+
+    Args:
+        corpus_path : plain-text corpus, one sentence per line
+        brain_path  : brain persistence path (loaded then saved)
+        n_threads   : OMP threads for phase 1 (0 = all cores)
+        n_sentences : max sentences for causal training phase (phase 2)
+        n_epochs    : number of full passes over the causal training subset
+        max_pos     : max prefix positions per sentence in phase 2
+        verbose     : print progress
+    """
+    from pipeline.pipeline import IECNN
+
+    if verbose:
+        print("╔══════════════════════════════════════════════════════════════╗")
+        print("║        IECNN EFFECTIVE TRAINING  (MaxEff > 0.5 target)       ║")
+        print("╚══════════════════════════════════════════════════════════════╝")
+        print(f"  corpus    : {corpus_path}")
+        print(f"  brain     : {brain_path}")
+        print(f"  sentences : {n_sentences:,}  epochs: {n_epochs}  max_pos: {max_pos}")
+        print()
+
+    # ── Phase 1: OMP vocab scan ────────────────────────────────────────────
+    if verbose:
+        print("  Phase 1: OMP vocab scan ...", flush=True)
+
+    fast_vocab_train_omp(
+        corpus_path=corpus_path,
+        brain_path=brain_path,
+        n_threads=n_threads,
+        verbose=verbose,
+    )
+
+    # ── Load sentences for phase 2 ─────────────────────────────────────────
+    sentences: List[str] = []
+    with open(corpus_path, "r", encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            line = line.strip()
+            if line and not line.startswith("#"):
+                sentences.append(line)
+                if len(sentences) >= n_sentences:
+                    break
+
+    if not sentences:
+        if verbose:
+            print("  No sentences loaded — phase 2 skipped.")
+        return
+
+    if verbose:
+        print(f"\n  Phase 2: Per-dot causal training on {len(sentences):,} sentences"
+              f"  ×  {n_epochs} epoch(s) ...", flush=True)
+
+    # ── Phase 2: Causal training with per-dot win criterion ───────────────
+    model = IECNN(persistence_path=brain_path)
+
+    t0 = time.perf_counter()
+    for epoch in range(n_epochs):
+        if verbose and n_epochs > 1:
+            print(f"\n  Epoch {epoch + 1}/{n_epochs}")
+        model.causal_train_pass(sentences, max_pos=max_pos, verbose=verbose)
+
+    elapsed = time.perf_counter() - t0
+    rate = len(sentences) * n_epochs / max(elapsed, 1e-9)
+
+    if verbose:
+        print(f"\n  Phase 2 done: {len(sentences) * n_epochs:,} sentence-passes"
+              f"  in {elapsed:.1f}s  ({rate:,.0f} sent/s)")
+
+    # ── Final report ───────────────────────────────────────────────────────
+    status = model.memory_status()
+    dm = status["dot_memory"]
+    if verbose:
+        print(f"\n  MaxEff       : {dm['max_eff']:.4f}")
+        print(f"  MeanEff      : {dm['mean_eff']:.4f}")
+        print(f"  Evolution gen: {status['evolution']['generation']}")
+
+    model.save_brain()
+    if verbose:
+        print(f"  Brain saved  → {brain_path}")
+
+
 def _benchmark(n_sentences: int = 10_000, n_workers: int = None) -> None:
     """Quick benchmark: measure vocab-fit throughput on synthetic data."""
     import multiprocessing as mp

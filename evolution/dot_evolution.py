@@ -31,7 +31,7 @@ class EvolutionConfig:
     weight_noise_std: float = 0.01   # std of Gaussian noise added to weights during mutation
     tournament_size:  int   = 4      # k for tournament selection
     min_generations:  int   = 3      # minimum calls before evolution kicks in
-    evolution_interval: int = 25     # Only evolve every N calls to save time
+    evolution_interval: int = 50     # Only evolve every N calls to save time
     max_dot_pool_size: int  = 1000   # Hard cap to prevent OOM
 
 
