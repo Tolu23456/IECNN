@@ -83,6 +83,7 @@ for pass_no in range(1, args.passes + 1):
         path         = CORPUS,
         chunk_size   = args.chunk,
         max_pos      = args.max_pos,
+        max_sub_pos  = 4,
         causal_batch = 200,
         save_every   = 10_000,
         verbose      = True,

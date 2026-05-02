@@ -1,11 +1,12 @@
 """
-evaluate_iecnn.py — IECNN performance evaluation suite.
+evaluate_iecnn.py — IECNN performance evaluation suite (v2).
 
 Tests:
-  T1: Next-word top-1 / top-5 accuracy on held-out sentences
-  T2: Semantic coherence (dot wins vs random baseline)
-  T3: Dot specialization (MaxEff, mean effectiveness distribution)
-  T4: Convergence quality (win-rate stability across iterations)
+  T1: Next-word top-1 / top-5 accuracy using predict_word() NN inference
+  T2: Causal win-rate vs random 50% baseline
+  T3: Dot specialization metrics (effectiveness, win-rate distribution)
+  T4: Dot diversity (inter-dot W cosine — the collapse metric)
+  T5: Qualitative next-word samples
 
 Usage:
   python evaluate_iecnn.py [--brain global_brain.pkl] [--corpus /tmp/corpus_300k.txt]
@@ -19,18 +20,18 @@ from pipeline.pipeline import IECNN
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
 parser = argparse.ArgumentParser(description="Evaluate IECNN performance")
-parser.add_argument("--brain",  default="global_brain.pkl",       help="Brain file path")
-parser.add_argument("--corpus", default="/tmp/corpus_300k.txt",   help="Corpus for held-out test")
-parser.add_argument("--n_test", type=int, default=500,            help="Held-out sentences for accuracy test")
-parser.add_argument("--seed",   type=int, default=99,             help="RNG seed")
+parser.add_argument("--brain",  default="global_brain.pkl",     help="Brain file path")
+parser.add_argument("--corpus", default="/tmp/corpus_300k.txt", help="Corpus for held-out test")
+parser.add_argument("--n_test", type=int, default=500,          help="Held-out sentences")
+parser.add_argument("--seed",   type=int, default=99,           help="RNG seed")
 args = parser.parse_args()
 
 random.seed(args.seed)
 np.random.seed(args.seed)
 
-print("=" * 65)
-print("  IECNN EVALUATION SUITE")
-print("=" * 65)
+print("=" * 68)
+print("  IECNN EVALUATION SUITE  v2")
+print("=" * 68)
 
 # ── Load brain ────────────────────────────────────────────────────────────────
 print(f"\nLoading brain from {args.brain!r} ...")
@@ -38,16 +39,15 @@ if not os.path.exists(args.brain):
     print("ERROR: brain file not found. Run training first.")
     sys.exit(1)
 
-nn = IECNN(persistence_path=args.brain, num_dots=128, feature_dim=256, max_iterations=12)
+nn   = IECNN(persistence_path=args.brain, num_dots=128, feature_dim=256, max_iterations=12)
 dots = nn._ensure_dots()
 dim  = nn.feature_dim
 
 print(f"  dots     : {len(dots)}")
 print(f"  dim      : {dim}")
 print(f"  vocab    : {len(nn.base_mapper._base_vocab):,} tokens")
-print(f"  ctx_cache: {len(nn._ctx_cache):,} entries")
 
-# ── Load corpus and split train / held-out ────────────────────────────────────
+# ── Load corpus ───────────────────────────────────────────────────────────────
 print(f"\nLoading corpus from {args.corpus!r} ...")
 with open(args.corpus, encoding="utf-8", errors="replace") as fh:
     all_lines = [l.strip() for l in fh if len(l.split()) >= 5]
@@ -59,132 +59,79 @@ print(f"  total lines : {len(all_lines):,}")
 print(f"  held-out    : {n_test:,}")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TEST 1: Next-word accuracy (top-1 and top-5) via win-rate voting
+# TEST 1: Next-word accuracy using predict_word() (NN inference)
 # ─────────────────────────────────────────────────────────────────────────────
-print("\n" + "─" * 65)
-print("TEST 1: Next-word prediction accuracy")
-print("─" * 65)
-print("  Method: for each prefix, build context vector, ask each dot to")
-print("  vote for a target token via cosine similarity → rank candidates.\n")
-
-def predict_next_word(nn_model, prefix_tokens, top_k=5):
-    """Predict next word given a list of prefix tokens."""
-    prefix_str = " ".join(prefix_tokens)
-    ctx = nn_model._get_ctx_cached(prefix_str)          # (dim,)
-    _dots = nn_model._ensure_dots()
-
-    # Collect candidate tokens from vocab (subsample for speed)
-    vocab = list(nn_model.base_mapper._base_vocab.keys())
-    if len(vocab) > 3000:
-        # Score only the top-3000 most frequent + the true target later
-        random.shuffle(vocab)
-        vocab = vocab[:3000]
-
-    if not vocab:
-        return []
-
-    # Build target matrix for all candidates
-    tok_cache = nn_model._tok_emb_cache
-    dim_      = nn_model.feature_dim
-    cand_vecs = np.zeros((len(vocab), dim_), dtype=np.float32)
-    for j, tok in enumerate(vocab):
-        v = tok_cache.get(tok)
-        if v is not None:
-            cand_vecs[j] = v
-        else:
-            te = nn_model.base_mapper._token_embedding(
-                tok, nn_model.base_mapper._base_types.get(tok, "word")
-            )
-            nc = min(len(te), dim_)
-            v  = np.zeros(dim_, dtype=np.float32)
-            v[:nc] = np.real(te[:nc])
-            n  = float(np.linalg.norm(v))
-            if n > 1e-10:
-                v /= n
-            cand_vecs[j] = v
-
-    # Each dot: predict = W[d] @ ctx  → score = pred · cand_vecs.T
-    W = np.stack([d.W for d in _dots])                  # (n_dots, dim, dim)
-    preds = (W @ ctx).reshape(len(_dots), dim_)         # (n_dots, dim)
-    # scores[cand] = sum over dots of (pred_d · cand_vec_c)
-    scores = (preds @ cand_vecs.T).sum(axis=0)          # (n_cands,)
-    top_idx = np.argsort(scores)[::-1][:top_k]
-    return [vocab[i] for i in top_idx]
-
+print("\n" + "─" * 68)
+print("TEST 1: Next-word prediction accuracy (NN inference via predict_word)")
+print("─" * 68)
+print("  Method: effectiveness-weighted mean prediction → cosine NN over top-3000 vocab\n")
 
 top1_hits = 0
 top5_hits = 0
 skipped   = 0
-t0 = time.time()
+t0        = time.time()
 
 for sent in held_out:
     toks = nn.base_mapper._tokenize(sent)
     if len(toks) < 3:
         skipped += 1
         continue
-    # Pick a random position (not first or last)
-    pos = random.randint(1, min(len(toks) - 1, 6))
-    prefix = toks[:pos]
+    pos    = random.randint(1, min(len(toks) - 1, 6))
+    prefix = " ".join(toks[:pos])
     truth  = toks[pos]
 
-    # Ensure truth is in our vocab subsample by checking it separately
-    preds = predict_next_word(nn, prefix, top_k=5)
+    if truth not in nn.base_mapper._base_vocab:
+        skipped += 1
+        continue
 
-    # Also add truth to vocab if missing (fair test)
-    if truth not in preds:
-        # Check if truth is in vocab at all
-        if truth not in nn.base_mapper._base_vocab:
-            skipped += 1
-            continue
+    preds = nn.predict_word(prefix, top_k=5, n_cands=3000)
 
     if preds and preds[0] == truth:
         top1_hits += 1
     if truth in preds:
         top5_hits += 1
 
-n_eval = n_test - skipped
+n_eval  = n_test - skipped
 elapsed = time.time() - t0
 print(f"  Evaluated : {n_eval} sentences  ({elapsed:.1f}s, {n_eval/max(elapsed,1e-6):.0f} sent/s)")
 print(f"  Skipped   : {skipped} (too short or OOV target)")
 print()
-print(f"  ┌─────────────────────────────────┐")
-print(f"  │  Top-1 accuracy : {top1_hits/max(n_eval,1)*100:5.1f}%         │")
-print(f"  │  Top-5 accuracy : {top5_hits/max(n_eval,1)*100:5.1f}%         │")
-print(f"  │  Random baseline: ~0.03% (top-1) │")
-print(f"  └─────────────────────────────────┘")
+print(f"  ┌────────────────────────────────────────┐")
+print(f"  │  Top-1 accuracy : {top1_hits/max(n_eval,1)*100:5.2f}%              │")
+print(f"  │  Top-5 accuracy : {top5_hits/max(n_eval,1)*100:5.2f}%              │")
+print(f"  │  Random baseline: ~0.033% top-1 (1/3k) │")
+print(f"  └────────────────────────────────────────┘")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TEST 2: Win-rate vs random baseline
+# TEST 2: Causal win-rate vs random 50% baseline
 # ─────────────────────────────────────────────────────────────────────────────
-print("\n" + "─" * 65)
+print("\n" + "─" * 68)
 print("TEST 2: Causal win-rate vs random baseline")
-print("─" * 65)
-print("  Method: run causal_train_pass on held-out sentences (no weight")
-print("  update), measure fraction of (pos,dot) pairs where dot predicts")
-print("  in the correct direction.  Random = 50%.\n")
+print("─" * 68)
+print("  Method: for each (prefix, next-token) pair, check what fraction of")
+print("  dots predict in the correct direction.  Random = 50%.\n")
 
-# We do a mini causal eval pass
 sample_sents = held_out[:100]
-nn_copy = IECNN(persistence_path=args.brain, num_dots=128, feature_dim=256, max_iterations=12)
-_dots_c  = nn_copy._ensure_dots()
+_dots_c  = nn._ensure_dots()
 n_dots_c = len(_dots_c)
 W_eval   = np.ascontiguousarray(np.stack([d.W for d in _dots_c]), dtype=np.float32)
+W_flat_e = W_eval.reshape(n_dots_c * dim, dim)
 
 total_pairs = 0
 total_wins  = 0
 
 for sent in sample_sents:
-    toks = nn_copy.base_mapper._tokenize(sent)
+    toks = nn.base_mapper._tokenize(sent)
     if len(toks) < 2:
         continue
     for pos in range(1, min(len(toks), 7)):
-        pfx = " ".join(toks[:pos])
-        ctx = nn_copy._get_ctx_cached(pfx)                  # (dim,)
+        pfx     = " ".join(toks[:pos])
+        ctx     = nn._get_ctx_cached(pfx)               # (dim,)
         tgt_tok = toks[pos]
-        v = nn_copy._tok_emb_cache.get(tgt_tok)
+        v       = nn._tok_emb_cache.get(tgt_tok)
         if v is None:
-            te = nn_copy.base_mapper._token_embedding(
-                tgt_tok, nn_copy.base_mapper._base_types.get(tgt_tok, "word")
+            te = nn.base_mapper._token_embedding(
+                tgt_tok, nn.base_mapper._base_types.get(tgt_tok, "word")
             )
             nc = min(len(te), dim)
             v  = np.zeros(dim, dtype=np.float32)
@@ -192,10 +139,10 @@ for sent in sample_sents:
             n = float(np.linalg.norm(v))
             if n > 1e-10:
                 v /= n
-        # preds[d] = W[d] @ ctx;  win if (W[d]@ctx) · tv > 0
-        preds = (W_eval @ ctx).reshape(n_dots_c, dim)       # (n_dots, dim)
-        sims  = (preds * v[None]).sum(axis=1)               # (n_dots,)
-        wins  = (sims > 0).sum()
+        # One BLAS call for all dots
+        preds   = (ctx @ W_flat_e.T).reshape(n_dots_c, dim)  # (n_dots, dim)
+        sims    = preds @ v                                    # (n_dots,)
+        wins    = (sims > 0).sum()
         total_wins  += int(wins)
         total_pairs += n_dots_c
 
@@ -203,21 +150,29 @@ win_rate = total_wins / max(total_pairs, 1) * 100
 print(f"  Total (pos, dot) pairs : {total_pairs:,}")
 print(f"  Total wins             : {total_wins:,}")
 print()
-print(f"  ┌──────────────────────────────────────┐")
-print(f"  │  Causal win-rate : {win_rate:5.1f}%            │")
-print(f"  │  Random baseline : 50.0%            │")
-print(f"  │  Improvement     : {win_rate - 50.0:+.1f}%            │")
-print(f"  └──────────────────────────────────────┘")
+print(f"  ┌──────────────────────────────────────────┐")
+print(f"  │  Causal win-rate : {win_rate:5.1f}%              │")
+print(f"  │  Random baseline : 50.0%              │")
+print(f"  │  Delta           : {win_rate - 50.0:+.1f}%              │")
+print(f"  └──────────────────────────────────────────┘")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TEST 3: Dot specialization (MaxEff + distribution)
+# TEST 3: Dot specialization
 # ─────────────────────────────────────────────────────────────────────────────
-print("\n" + "─" * 65)
-print("TEST 3: Dot specialization")
-print("─" * 65)
+print("\n" + "─" * 68)
+print("TEST 3: Dot specialization (effectiveness & win-rate distribution)")
+print("─" * 68)
 
 all_dot_ids = [d.dot_id for d in dots]
 effs        = nn.dot_memory.all_effectivenesses(all_dot_ids)
+
+win_rates = []
+for did in all_dot_ids:
+    tc = nn.dot_memory._total_counts.get(did, 0)
+    sc = nn.dot_memory._success_counts.get(did, 0)
+    if tc > 0:
+        win_rates.append(sc / tc)
+wr_arr = np.array(win_rates) if win_rates else np.array([])
 
 if len(effs) > 0:
     max_eff  = float(np.max(effs))
@@ -226,112 +181,129 @@ if len(effs) > 0:
     above60  = int((effs > 0.6).sum())
     above70  = int((effs > 0.7).sum())
 
-    # Win-rates
-    win_rates = []
-    for did in all_dot_ids:
-        tc = nn.dot_memory._total_counts.get(did, 0)
-        sc = nn.dot_memory._success_counts.get(did, 0)
-        if tc > 0:
-            win_rates.append(sc / tc)
-    wr_arr = np.array(win_rates)
-
     print(f"  Dots active           : {len(effs)}")
     print(f"  MaxEff                : {max_eff:.4f}")
-    print(f"  Mean effectiveness    : {mean_eff:.4f}")
+    print(f"  MeanEff               : {mean_eff:.4f}")
     print(f"  Dots with eff > 0.5   : {above50} / {len(effs)}")
     print(f"  Dots with eff > 0.6   : {above60} / {len(effs)}")
     print(f"  Dots with eff > 0.7   : {above70} / {len(effs)}")
     print()
+
     print(f"  Effectiveness histogram:")
-    bins = [0.0, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.01]
+    bins   = [0.0, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.01]
     labels = ["0.0–0.3","0.3–0.4","0.4–0.5","0.5–0.6","0.6–0.7","0.7–0.8","0.8–0.9","0.9–1.0"]
     hist, _ = np.histogram(effs, bins=bins)
     for label, count in zip(labels, hist):
-        bar = "█" * int(count * 30 / max(hist.max(), 1))
+        bar = "█" * int(count * 32 / max(hist.max(), 1))
         print(f"    {label}: {bar} {count}")
 
     if len(wr_arr) > 0:
-        print(f"\n  Win-rate per dot (across all training):")
-        print(f"    Mean  : {wr_arr.mean()*100:.1f}%")
-        print(f"    Min   : {wr_arr.min()*100:.1f}%")
-        print(f"    Max   : {wr_arr.max()*100:.1f}%")
-        print(f"    Std   : {wr_arr.std()*100:.1f}%")
+        print(f"\n  Win-rate per dot (WTA → each dot wins ~1/n_dots positions):")
+        print(f"    Mean : {wr_arr.mean()*100:.3f}%   (WTA expected: {100/n_dots_c:.3f}%)")
+        print(f"    Min  : {wr_arr.min()*100:.3f}%")
+        print(f"    Max  : {wr_arr.max()*100:.3f}%")
+        print(f"    Std  : {wr_arr.std()*100:.4f}%")
 else:
-    print("  No effectiveness data available (train first).")
+    print("  No effectiveness data (run training first).")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TEST 4: Sample predictions (qualitative)
+# TEST 4: Dot diversity — the collapse metric
 # ─────────────────────────────────────────────────────────────────────────────
-print("\n" + "─" * 65)
-print("TEST 4: Qualitative next-word samples")
-print("─" * 65)
+print("\n" + "─" * 68)
+print("TEST 4: Dot diversity (inter-dot W cosine — collapse metric)")
+print("─" * 68)
+print("  Goal: < 0.30 inter-dot cosine (was 0.657 pre-fix, random = ~0.00)\n")
+
+W_stack = np.stack([d.W for d in dots])               # (n_dots, dim, dim)
+Wf      = W_stack.reshape(len(dots), -1)              # (n_dots, dim*dim)
+Wn      = Wf / (np.linalg.norm(Wf, axis=1, keepdims=True) + 1e-10)
+pw      = Wn @ Wn.T                                   # (n_dots, n_dots)
+np.fill_diagonal(pw, 0.0)
+n_pairs = len(dots) * (len(dots) - 1)
+
+mean_cos = pw.sum() / n_pairs
+max_cos  = pw.max()
+min_cos  = pw.min()
+# Fraction of pairs with cosine > 0.5 (still-similar pairs)
+frac_sim = (pw > 0.5).sum() / n_pairs * 100
+
+print(f"  Inter-dot W cosine  (mean) : {mean_cos:.4f}  {'✓ GOOD' if mean_cos < 0.30 else '✗ still collapsed'}")
+print(f"  Inter-dot W cosine  (max)  : {max_cos:.4f}")
+print(f"  Inter-dot W cosine  (min)  : {min_cos:.4f}")
+print(f"  Pairs with cosine > 0.5    : {(pw > 0.5).sum()//2} ({frac_sim:.1f}%)")
+
+# Context-sensitivity: variance of predictions across different contexts
+print(f"\n  Context-sensitivity test (10 diverse prefixes → pred variance):")
+test_pfxs = [
+    "the old", "she looked", "the government", "children love",
+    "the city", "science and", "in the beginning", "he could not",
+    "the weather", "a large number",
+]
+W_loc = np.ascontiguousarray(W_stack, dtype=np.float32)
+W_flat_loc = W_loc.reshape(len(dots) * dim, dim)
+ctx_vecs = []
+for pfx in test_pfxs:
+    ctx_vecs.append(nn._get_ctx_cached(pfx))
+ctx_mat = np.stack(ctx_vecs)                          # (10, dim)
+mean_preds = (ctx_mat @ W_flat_loc.T).reshape(10, len(dots), dim).mean(axis=1)
+                                                      # (10, dim) mean pred per prefix
+mp_n  = mean_preds / (np.linalg.norm(mean_preds, axis=1, keepdims=True) + 1e-10)
+# Pairwise cosine of mean predictions across prefixes
+pp = mp_n @ mp_n.T
+np.fill_diagonal(pp, 0)
+ctx_sens = 1.0 - pp.sum() / (10 * 9)
+print(f"    Mean pred pairwise cosine : {pp.sum()/(10*9):.4f}")
+print(f"    Context-sensitivity score : {ctx_sens:.4f}  {'✓ GOOD' if ctx_sens > 0.30 else '✗ low — model ignores context'}")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TEST 5: Qualitative samples
+# ─────────────────────────────────────────────────────────────────────────────
+print("\n" + "─" * 68)
+print("TEST 5: Qualitative next-word samples (predict_word)")
+print("─" * 68)
 
 sample_prefixes = [
-    ["the", "old", "man"],
-    ["she", "looked", "at"],
-    ["the", "government", "has"],
-    ["in", "the", "beginning"],
-    ["children", "love", "to"],
-    ["the", "city", "was"],
-    ["he", "could", "not"],
-    ["the", "book", "was"],
-    ["science", "and", "technology"],
-    ["the", "weather", "today"],
+    "the old man",
+    "she looked at",
+    "the government has",
+    "in the beginning",
+    "children love to",
+    "the city was",
+    "he could not",
+    "the book was",
+    "science and technology",
+    "the weather today",
+    "a large number of",
+    "they walked into the",
 ]
 
-print(f"  {'Prefix':<35} {'Predicted':<15} {'Top-5'}")
-print(f"  {'-'*35} {'-'*15} {'-'*30}")
-for pfx in sample_prefixes:
-    preds = predict_next_word(nn, pfx, top_k=5)
+print(f"  {'Prefix':<38} {'Top-1':<14} {'Top-2..5'}")
+print(f"  {'─'*38} {'─'*14} {'─'*28}")
+for pfx_str in sample_prefixes:
+    preds = nn.predict_word(pfx_str, top_k=5, n_cands=3000)
     if preds:
         top1 = preds[0]
         rest = ", ".join(preds[1:])
-        print(f"  {' '.join(pfx):<35} {top1:<15} [{rest}]")
+        print(f"  {pfx_str:<38} {top1:<14} [{rest}]")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Summary and improvement areas
+# Summary
 # ─────────────────────────────────────────────────────────────────────────────
-print("\n" + "=" * 65)
-print("  SUMMARY & WHERE TO IMPROVE")
-print("=" * 65)
-
+print("\n" + "=" * 68)
+print("  SUMMARY")
+print("=" * 68)
+_above50 = int((effs > 0.5).sum()) if len(effs) > 0 else 0
+_max_eff = float(np.max(effs)) if len(effs) > 0 else 0.0
+_mean_eff = float(np.mean(effs)) if len(effs) > 0 else 0.0
 print(f"""
-  Results at a glance:
-    Top-1 accuracy : {top1_hits/max(n_eval,1)*100:.1f}%  (random ≈ 0.03%)
-    Top-5 accuracy : {top5_hits/max(n_eval,1)*100:.1f}%
-    Win-rate       : {win_rate:.1f}%  (random = 50%)
-    MaxEff         : {max_eff:.4f}  (saturated > 0.8 = fully specialized)
-    Dots >0.5 eff  : {above50}/{len(effs)}
-
-  Improvement areas (in priority order):
-  ─────────────────────────────────────────────────────────────
-  1. MORE TRAINING DATA
-     Current corpus: {len(all_lines):,} sentences.  IECNN improves
-     monotonically with data — target 1M+ sentences for mature
-     dot specialization across many semantic categories.
-
-  2. LONGER TRAINING (more passes)
-     Run 2–3 full passes over the corpus.  Win-rate above 55%
-     indicates dots are still finding new signal — keep training.
-
-  3. INCREASE N_DOTS (currently 128)
-     Each dot learns one "feature detector".  With 128 dots and a
-     {len(nn.base_mapper._base_vocab):,}-token vocab, coverage is sparse.
-     Scaling to 256 dots would double representation capacity.
-
-  4. CONTEXT WINDOW (max_pos)
-     Current max_pos=6 limits each training signal to the 6-word
-     prefix.  Increasing to max_pos=12 gives richer long-range
-     context at the cost of ~2× compute.
-
-  5. EMBEDDING QUALITY (BaseMapper)
-     The base token embeddings feed both context and target vectors.
-     Initialising from pre-trained word vectors (GloVe/FastText)
-     instead of the polynomial hash would significantly boost
-     cold-start signal quality.
-
-  6. INFERENCE BEAM SEARCH
-     Current top-k scoring sums raw dot-product votes.  Adding
-     a small beam (width=4) that penalises repetition and enforces
-     grammar constraints (POS tagging) would improve coherence.
+  Metric                 | Value        | Target / Baseline
+  ─────────────────────────────────────────────────────────
+  Top-1 accuracy         | {top1_hits/max(n_eval,1)*100:5.2f}%       | >> 0.03% (random)
+  Top-5 accuracy         | {top5_hits/max(n_eval,1)*100:5.2f}%       | >> 0.15% (random)
+  Causal win-rate        | {win_rate:5.1f}%       | > 50% (random = 50%)
+  MaxEff                 | {_max_eff:.4f}       | > 0.70 (specialized)
+  MeanEff                | {_mean_eff:.4f}       | > 0.50
+  Dots > 0.5 eff         | {_above50:3d} / {len(effs)}    | > 64/128
+  Inter-dot cosine       | {mean_cos:.4f}       | < 0.30 (was 0.657)
+  Context-sensitivity    | {ctx_sens:.4f}       | > 0.30 (was 0.19)
 """)

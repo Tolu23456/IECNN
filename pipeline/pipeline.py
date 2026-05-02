@@ -503,10 +503,78 @@ class IECNN:
             self._ctx_cache[text] = ctx
         return ctx
 
+    def predict_word(
+        self,
+        prefix: str,
+        top_k: int = 5,
+        n_cands: int = 3000,
+    ) -> List[str]:
+        """Predict the next word after *prefix* using nearest-neighbour lookup.
+
+        Unlike the previous vote-counting approach, this computes a single
+        effectiveness-weighted mean prediction vector and returns the vocab
+        tokens whose normalised embeddings are most cosine-similar to it.
+
+        Args:
+            prefix:   The input text (tokenised internally).
+            top_k:    Number of candidate tokens to return (ranked).
+            n_cands:  How many vocab tokens to score (top-n by vocab order,
+                      which approximates frequency rank after fit_fast).
+        Returns:
+            List of token strings, highest-scoring first.
+        """
+        ctx  = self._get_ctx_cached(prefix)           # (dim,)
+        dots = self._ensure_dots()
+        dim  = self.feature_dim
+        nd   = len(dots)
+
+        W_loc = np.ascontiguousarray(
+            np.stack([d.W for d in dots]), dtype=np.float32
+        )                                             # (nd, dim, dim)
+
+        # All dot predictions in one BLAS call
+        preds = (ctx @ W_loc.reshape(nd * dim, dim).T).reshape(nd, dim)  # (nd, dim)
+
+        # Effectiveness-weighted mean — specialised dots get more weight
+        effs = np.array(
+            self.dot_memory.all_effectivenesses([d.dot_id for d in dots]),
+            dtype=np.float32,
+        )
+        w = effs / effs.sum() if effs.sum() > 1e-10 else np.ones(nd, dtype=np.float32) / nd
+        wmean = (w[:, None] * preds).sum(axis=0)     # (dim,)
+        wn    = float(np.linalg.norm(wmean))
+        if wn > 1e-10:
+            wmean /= wn
+
+        # Build/look-up candidate embedding matrix
+        vocab    = list(self.base_mapper._base_vocab.keys())[:n_cands]
+        n_v      = len(vocab)
+        cand_mat = np.zeros((n_v, dim), dtype=np.float32)
+        for j, tok in enumerate(vocab):
+            v = self._tok_emb_cache.get(tok)
+            if v is None:
+                te = self.base_mapper._token_embedding(
+                    tok, self.base_mapper._base_types.get(tok, "word")
+                )
+                nc = min(len(te), dim)
+                v  = np.zeros(dim, dtype=np.float32)
+                v[:nc] = np.real(te[:nc])
+                tn = float(np.linalg.norm(v))
+                if tn > 1e-10:
+                    v /= tn
+                if len(self._tok_emb_cache) < 50_000:
+                    self._tok_emb_cache[tok] = v
+            cand_mat[j] = v
+
+        scores = cand_mat @ wmean                    # (n_v,) cosine similarities
+        top_i  = np.argsort(scores)[::-1][:top_k]
+        return [vocab[i] for i in top_i]
+
     def causal_train_pass(self, sentences: List[str], max_pos: int = 6,
                           verbose: bool = True, prune_every: int = 0,
                           causal_batch: int = 200,
-                          save_every: int = 5000) -> None:
+                          save_every: int = 5000,
+                          max_sub_pos: int = 0) -> None:
         """
         Causal next-token prediction training (fast path).
 
@@ -548,10 +616,16 @@ class IECNN:
         dot_ids_list = [d.dot_id for d in dots]
         idx    = np.arange(n_dots, dtype=np.int64)
 
+        # max_sub_pos=0 means "use max_pos" (no subsampling)
+        _sub = max_sub_pos if max_sub_pos > 0 else max_pos
+
         for batch_start in range(0, len(sentences), causal_batch):
             batch_sents = sentences[batch_start:batch_start + causal_batch]
 
-            # ── PHASE 1: Collect ALL prefixes from ALL sentences in batch ─────
+            # ── PHASE 1: Collect prefixes — with optional position subsampling ─
+            # Subsampling: if a sentence has more candidate positions than _sub,
+            # randomly draw _sub of them.  Reduces n_total when sentences are
+            # long → shrinks Phase-4 BLAS cost proportionally (the dominant op).
             all_prefixes: List[str] = []
             all_tgt_toks: List[str] = []
 
@@ -560,7 +634,12 @@ class IECNN:
                 if len(tokens) < 2:
                     continue
                 n_pos = min(len(tokens), max_pos + 1)
-                for pos in range(1, n_pos):
+                positions = list(range(1, n_pos))
+                if len(positions) > _sub:
+                    positions = sorted(self._rng.choice(
+                        len(positions), _sub, replace=False
+                    ).tolist())
+                for pos in positions:
                     if pos < len(tokens):
                         all_prefixes.append(" ".join(tokens[:pos]))
                         all_tgt_toks.append(tokens[pos])
@@ -599,30 +678,54 @@ class IECNN:
             tvs_n = tvs                                     # already normalised
 
             # ── PHASE 4: BLAS win-criterion ───────────────────────────────────
-            # dot_pred[p, d] = W[d] @ ctx[p]  →  (n_total, n_dots, dim)
-            # win[p, d]  = (W[d] @ ctx[p]) · tv_n[p] > 0
-            #            = ctx[p] · (W[d].T @ tv_n[p]) > 0
+            # dot_pred[p, d] = ctx[p] @ W[d].T  →  (n_total, n_dots, dim)
+            # raw_win[p, d]  = dot_pred[p,d] · tv_n[p] > 0
             #
-            # Route: ctx @ W_flat.T  →  (n_total, n_dots*dim)
-            #        reshape          →  (n_total, n_dots, dim)
-            #        batched @        →  causal_sims (n_total, n_dots)
+            # COMPETITIVE FIX — WINNER-TAKE-ALL per position:
+            # For each context position, only the SINGLE highest-scoring dot
+            # (by causal cosine) trains on that position.  Every other dot is
+            # excluded.  This is the strongest possible specialisation pressure:
+            # 128 dots partition the n_total positions into 128 disjoint subsets,
+            # so each dot must learn to handle its unique slice of the corpus.
             #
-            # Memory note: W_flat view; no transpose copy (C-contiguous already).
-            W_flat        = W.reshape(n_dots * dim, dim)    # (32768, 256) — view
+            # Why not top-50%?  Empirically, top-50% still collapsed to
+            # inter-dot cosine ≈ 0.66 after 200 sentences because all dots
+            # share ~50% of positions and converge to the same mean direction.
+            # Winner-take-all gives ~1/128 = 0.78% of positions per dot, which
+            # forces genuine divergence.
+            #
+            # Route: ctx @ W_flat.T → (n_total, n_dots*dim) → reshape → sims
+            W_flat        = W.reshape(n_dots * dim, dim)        # (32768, 256) view
             dot_preds_all = (all_ctxs @ W_flat.T).reshape(n_total, n_dots, dim)
             causal_sims   = (dot_preds_all @ tvs_n[:, :, None]).squeeze(2)
-            causal_wins   = causal_sims > 0.0               # (n_total, n_dots) bool
+                                                                # (n_total, n_dots)
 
-            # ── PHASE 5a: Vectorized W-row update ────────────────────────────
-            lr       = 0.005
-            lr_eff   = 1.0 - (1.0 - lr) ** n_total          # compound lr
-            win_counts_f = causal_wins.sum(axis=0).astype(np.float32).clip(1.0)
-            mean_targets = (causal_wins.T.astype(np.float32) @ tvs_n) / win_counts_f[:, None]
+            # Winner-take-all: each position → one dot (the argmax scorer)
+            best_dot     = np.argmax(causal_sims, axis=1)      # (n_total,) int
+            causal_wins  = np.zeros((n_total, n_dots), dtype=np.float32)
+            causal_wins[np.arange(n_total), best_dot] = 1.0    # one-hot rows
+
+            # ── PHASE 5a: Vectorized W-row update with diversity push ─────────
+            # DIVERSITY FIX: after computing each dot's mean target direction,
+            # subtract the global average direction (50% weight) and re-normalise.
+            # This amplifies each dot's unique direction and suppresses the shared
+            # "average corpus direction" that causes collapse.
+            lr           = 0.005
+            lr_eff       = 1.0 - (1.0 - lr) ** n_total
+            win_counts_f = causal_wins.sum(axis=0).clip(1.0)   # (n_dots,)
+            mean_targets = (causal_wins.T @ tvs_n) / win_counts_f[:, None]
+                                                                # (n_dots, dim)
             mt_norms     = np.linalg.norm(mean_targets, axis=1, keepdims=True).clip(1e-10)
-            mean_targets /= mt_norms                         # (n_dots, dim)
+            mean_targets /= mt_norms                            # normalised
+
+            # Diversity push: subtract 50% of the shared centroid, then renorm
+            global_dir   = mean_targets.mean(axis=0)           # (dim,) centroid
+            div_targets  = mean_targets - 0.50 * global_dir[None, :]
+            dt_norms     = np.linalg.norm(div_targets, axis=1, keepdims=True).clip(1e-10)
+            eff_targets  = div_targets / dt_norms               # (n_dots, dim)
 
             rows = np.array([d._rng.randint(0, dim) for d in dots], dtype=np.int64)
-            W[idx, rows] = (1.0 - lr_eff) * W[idx, rows] + lr_eff * mean_targets
+            W[idx, rows] = (1.0 - lr_eff) * W[idx, rows] + lr_eff * eff_targets
             row_vecs     = W[idx, rows]
             W[idx, rows] = row_vecs / np.linalg.norm(row_vecs, axis=1, keepdims=True).clip(1e-10)
 
@@ -699,6 +802,7 @@ class IECNN:
         path: str,
         chunk_size: int = 5000,
         max_pos: int = 6,
+        max_sub_pos: int = 4,
         causal_batch: int = 200,
         save_every: int = 10000,
         encoding: str = "utf-8",
@@ -747,6 +851,7 @@ class IECNN:
                 self.causal_train_pass(
                     chunk,
                     max_pos=max_pos,
+                    max_sub_pos=max_sub_pos,
                     causal_batch=causal_batch,
                     verbose=False,
                 )
@@ -780,6 +885,7 @@ class IECNN:
                 self.causal_train_pass(
                     chunk,
                     max_pos=max_pos,
+                    max_sub_pos=max_sub_pos,
                     causal_batch=causal_batch,
                     verbose=False,
                 )
