@@ -47,20 +47,26 @@ class PruningLayer:
 
         # Near-duplicate removal
         deduped = []
-        if lib and kept:
-            n_cap = len(kept)
-            dim = len(kept[0][0])
-            # Explicitly take real part for C-accelerated deduplication
-            stk = np.ascontiguousarray(np.real(np.stack([x[0] for x in kept])), np.float32)
-            kept_indices = np.zeros(n_cap, dtype=np.int32)
-            num_kept = lib.deduplicate_fast(_fp(stk)[0], ctypes.c_int(n_cap), ctypes.c_int(dim),
-                                           ctypes.c_float(self.near_dup), ctypes.c_float(self.alpha),
-                                           kept_indices.ctypes.data_as(ctypes.POINTER(ctypes.c_int)))
-            deduped = [kept[idx] for idx in kept_indices[:num_kept]]
-        else:
-            for c in kept:
-                if not any(similarity_score(c[0], d[0], self.alpha) > self.near_dup for d in deduped):
-                    deduped.append(c)
+        if kept:
+            from formulas.formulas import batch_similarity
+            n_kept = len(kept)
+            stk = np.stack([np.real(x[0]) for x in kept]).astype(np.float32)
+
+            # Fast GEMM-based duplicate check
+            # Instead of nested loops, use one big batch similarity
+            sim_matrix = batch_similarity(stk, stk, self.alpha)
+
+            # Greedy pick: keep item if it's not a duplicate of an ALREADY KEPT item
+            kept_mask = np.zeros(n_kept, dtype=bool)
+            for i in range(n_kept):
+                # Is i a duplicate of any already kept j?
+                # Vectorized near-dup check: compare against already-kept indices
+                is_dup = False
+                if np.any(kept_mask[:i]) and np.any(sim_matrix[i, :i][kept_mask[:i]] > self.near_dup):
+                    is_dup = True
+                if not is_dup:
+                    kept_mask[i] = True
+                    deduped.append(kept[i])
 
         if len(deduped) < self.min_survivors:
             # deduplicated candidates are already in 'deduped', we just need to pick the top remaining

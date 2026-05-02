@@ -46,12 +46,18 @@ class ToolExecutor:
                 os.remove("tmp_exec.py")
 
     def parse_and_execute(self, text: str) -> Optional[str]:
-        """Heuristic parser for ACTION tokens in generated text."""
-        if "RUN_CODE" in text:
-            # Extract code block between triple backticks or simply the rest of text
-            parts = text.split("RUN_CODE")
-            if len(parts) > 1:
-                code = parts[1].strip().strip("`")
-                return self.execute("RUN_CODE", code)
+        """Heuristic parser for ACTION tokens in generated text (v6 SOTA)."""
+        # Look for action keywords in the text
+        actions = ["WRITE_CODE", "RUN_CODE", "SEARCH", "GENERATE_IMAGE", "SPEAK", "REASON"]
+
+        for action in actions:
+            if action in text:
+                parts = text.split(action)
+                if len(parts) > 1:
+                    payload = parts[1].strip().strip("`").split("bot")[0].strip()
+                    if action == "WRITE_CODE" or action == "RUN_CODE":
+                        return self.execute("RUN_CODE", payload)
+                    else:
+                        return self.execute(action, payload)
 
         return None

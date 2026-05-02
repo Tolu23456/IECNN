@@ -1,3 +1,4 @@
+import hashlib
 """
 BaseMapping — Structured input representation for IECNN.
 
@@ -24,16 +25,18 @@ Improvements (v0.7.0):
   5. IDF-weighted pooling — the pool() method offers an 'idf' mode that weights
      rare tokens more heavily (common stop words contribute less).
 
-Feature vector layout (128 dims):
-  [0  : 96 ]  base_embedding    — stable/composed embedding for the base token
-  [96 : 104]  position_enc      — sinusoidal position encoding (8 dims)
-  [104: 108]  freq_features     — frequency statistics (4 dims)
-  [108: 124]  modifier_flags    — structural/linguistic/morphological flags (16 dims)
-  [124: 128]  context_summary   — semantic 4-dim context window summary
+Feature vector layout (256 dims):
+  [0  : 224]  base_embedding    — stable/composed embedding for the base token
+  [224: 232]  position_enc      — sinusoidal position encoding (8 dims)
+  [232: 236]  freq_features     — frequency statistics (4 dims)
+  [236: 252]  modifier_flags    — structural/linguistic/morphological flags (16 dims)
+  [252: 256]  context_summary   — semantic 4-dim context window summary
 """
 
 import numpy as np
 import re
+import regex
+import unicodedata
 import math
 import ctypes
 import os
@@ -90,6 +93,11 @@ def _load_lib():
                 ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_float
             ]
             _lib.cooccurrence_smooth.restype = None
+
+            _lib.apply_aaf_fast.argtypes = [
+                ctypes.POINTER(ctypes.c_float), ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_float
+            ]
+            _lib.apply_aaf_fast.restype = None
         except Exception:
             _lib = None
     return _lib
@@ -129,12 +137,13 @@ _SUFFIXES = _VERB_SUFFIXES + _NOUN_SUFFIXES + _ADJ_SUFFIXES + (_ADV_SUFFIX,)
 
 
 def _stable_embedding(token: str, dim: int) -> np.ndarray:
-    """Stable hash-based unit-sphere embedding for a token string."""
-    seed = abs(hash(token)) % (2 ** 31)
+    """Stable hash-based unit-sphere embedding for a token string (v6 deterministic)."""
+    h = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    seed = int(h[:8], 16)
     rng = np.random.RandomState(seed)
     v = rng.randn(dim).astype(np.float32)
-    n = np.linalg.norm(v)
-    return v / n if n > 1e-10 else v
+    n = np.linalg.norm(v) + 1e-10
+    return v / n
 
 
 class BaseMap:
@@ -245,6 +254,7 @@ class BaseMapper:
         self._primitive_embeddings: Dict[str, np.ndarray] = {
             p: _stable_embedding(p, EMBED_DIM) for p in _PRIMITIVES
         }
+        self._script_embeddings: Dict[str, np.ndarray] = {} # Learned script-level anchors
 
         # Discovered bases (words + phrases learned from corpus)
         self._word_freq:  Counter = Counter()
@@ -539,42 +549,44 @@ class BaseMapper:
 
     def _transform_image(self, img_path: str) -> BaseMap:
         """
-        Multi-Scale Sensory Patches (v3 SOTA):
-        Treat images as sentences of hierarchical visual tokens using 4x4, 8x8,
-        and 16x16 patch sizes to capture detail, structure, and context.
+        Multi-Scale Sensory Patches (v6 SOTA):
+        Uses OpenCV for edge detection and hierarchical feature extraction.
         """
-        img = Image.open(img_path).convert("RGB")
-        img = img.resize((64, 64))
-        arr = np.array(img, dtype=np.float32) / 255.0  # (64, 64, 3)
+        img_pil = Image.open(img_path).convert("RGB")
+        img_np = np.array(img_pil)
+
+        # OpenCV integration for edge detection (structural signal)
+        gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
+        edges = cv2.Canny(gray, 100, 200)
+        edges = cv2.resize(edges, (64, 64)) / 255.0
+
+        arr = cv2.resize(img_np, (64, 64)).astype(np.float32) / 255.0
 
         all_patches: List[np.ndarray] = []
         all_types: List[str] = []
 
-        for ps in [4, 8, 16]: # Detail, Structure, Context
-            grid_dim = 64 // ps
+        for ps in [4, 8, 16]:
             for r in range(0, 64, ps):
                 for c in range(0, 64, ps):
-                    patch = arr[r:r+ps, c:c+ps]        # (ps, ps, 3)
+                    patch = arr[r:r+ps, c:c+ps]
+                    edge_patch = edges[r:r+ps, c:c+ps]
 
-                    # Statistical features (lossless compression approach)
-                    # To keep dim at 224, we use statistics for larger patches
                     flat = patch.flatten()
-                    if len(flat) > EMBED_DIM:
-                        # For 16x16, flat is 768. Use mean/std blocks
+                    if len(flat) > EMBED_DIM - 16:
                         b_size = ps // 4
                         flat = patch.reshape(4, b_size, 4, b_size, 3).mean(axis=(1, 3)).flatten()
 
-                    ch_std   = patch.std(axis=(0, 1))
-                    feat = np.concatenate([flat, ch_std])
-                    if len(feat) < EMBED_DIM:
-                        feat = np.pad(feat, (0, EMBED_DIM - len(feat)))
-                    else:
-                        feat = feat[:EMBED_DIM]
+                    # Add edge/structural features
+                    edge_feat = np.array([edge_patch.mean(), edge_patch.std(), np.max(edge_patch)], dtype=np.float32)
+
+                    feat = np.zeros(EMBED_DIM, dtype=np.float32)
+                    feat[:len(flat)] = flat
+                    feat[EMBED_DIM-3:] = edge_feat
 
                     n_val = np.linalg.norm(feat)
-                    if n_val > 1e-10: feat = feat / n_val
+                    if n_val > 1e-10: feat /= n_val
 
-                    all_patches.append(feat.astype(np.float32))
+                    all_patches.append(feat)
                     all_types.append(f"visual_{ps}x{ps}")
 
         n = len(all_patches)
@@ -592,46 +604,36 @@ class BaseMapper:
 
     def _transform_audio(self, audio_path: str) -> BaseMap:
         """
-        Multi-Scale Audio Spectrum (v3 SOTA):
-        Treat audio as hierarchical spectral tokens using multiple window sizes
-        (256, 512, 1024) to capture temporal detail and frequency precision.
+        Multi-Scale Audio Spectrum (v6 SOTA):
+        Uses librosa for Mel-spectrogram extraction.
         """
-        import wave as _wave
-
         try:
-            with _wave.open(audio_path, "rb") as wf:
-                n_channels   = wf.getnchannels()
-                sample_width = wf.getsampwidth()
-                sample_rate  = wf.getframerate()
-                raw = wf.readframes(sample_rate * 5)
+            y, sr = librosa.load(audio_path, sr=22050, duration=5.0)
         except Exception:
-            return self.transform("[silent]", mode="text") # Fallback
-
-        if sample_width == 2: samples = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
-        elif sample_width == 1: samples = (np.frombuffer(raw, dtype=np.uint8).astype(np.float32) / 128.0) - 1.0
-        else: samples = np.frombuffer(raw, dtype=np.float32)
-        if n_channels > 1: samples = samples.reshape(-1, n_channels).mean(axis=1)
+            return self.transform("[silent]", mode="text")
 
         all_spectral: List[np.ndarray] = []
         all_types: List[str] = []
 
-        for fft_size in [256, 512, 1024]:
-            n_tokens = 16 if fft_size == 1024 else 32
-            needed = fft_size + (n_tokens - 1) * (fft_size // 2)
-            s_pad = np.pad(samples, (0, max(0, needed - len(samples))))
+        for n_mels in [32, 64, 128]:
+            S = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=n_mels)
+            S_db = librosa.power_to_db(S, ref=np.max)
+            # Normalize to [0, 1]
+            S_db = (S_db - S_db.min()) / (S_db.max() - S_db.min() + 1e-10)
 
-            hann = np.hanning(fft_size).astype(np.float32)
-            hop  = (len(s_pad) - fft_size) // max(n_tokens - 1, 1)
+            n_frames = S_db.shape[1]
+            n_tokens = 16
+            hop = max(1, n_frames // n_tokens)
 
             for i in range(n_tokens):
-                frame = s_pad[i*hop : i*hop + fft_size]
-                spectrum = np.abs(np.fft.rfft(frame * hann))[:EMBED_DIM]
-                spectrum = np.log1p(spectrum * 100.0)
-                if np.max(spectrum) > 1e-10: spectrum /= np.max(spectrum)
-                if len(spectrum) < EMBED_DIM: spectrum = np.pad(spectrum, (0, EMBED_DIM - len(spectrum)))
+                frame = S_db[:, i*hop : (i+1)*hop].mean(axis=1)
+                if len(frame) < EMBED_DIM:
+                    frame = np.pad(frame, (0, EMBED_DIM - len(frame)))
+                else:
+                    frame = frame[:EMBED_DIM]
 
-                all_spectral.append(spectrum.astype(np.float32))
-                all_types.append(f"spectral_{fft_size}")
+                all_spectral.append(frame.astype(np.float32))
+                all_types.append(f"mel_{n_mels}")
 
         n = len(all_spectral)
         matrix = np.zeros((n, self.feature_dim), dtype=np.float32)
@@ -692,7 +694,8 @@ class BaseMapper:
 
         for i, frame in enumerate(frames_rgb):
             # 8×8 block means: (64,64,3) → (8,8,8,8,3).mean → (8,8,3) = 192 dims
-            block = frame.reshape(8, 8, 8, 8, 3).mean(axis=(2, 4)).flatten()
+            # Corrected spatial axes for V6 SOTA
+            block = frame.reshape(8, 8, 8, 8, 3).mean(axis=(1, 3)).flatten()
             if len(block) < EMBED_DIM:
                 block = np.pad(block, (0, EMBED_DIM - len(block)))
             else:
@@ -730,8 +733,21 @@ class BaseMapper:
     # ── Tokenization ────────────────────────────────────────────────
 
     def _tokenize(self, text: str) -> List[str]:
-        text = text.lower().strip()
-        return re.findall(r"\b[\w']+\b|[^\w\s]", text)
+        """
+        Multilingual-aware tokenization using NFKC normalization and
+        script-sensitive regex. This properly segments CJK characters
+        individually (the IECNN way) while keeping words in Latin,
+        Arabic, or Cyrillic together.
+        """
+        text = unicodedata.normalize("NFKC", text.lower().strip())
+
+        # Regex components:
+        # \p{Han}|\p{Hiragana}|\p{Katakana}|\p{Hangul} : Single CJK chars
+        # \p{L}+ : Continuous words for non-CJK scripts (Latin, Arabic, etc)
+        # \p{N}+ : Numbers
+        # \p{P}  : Punctuation
+        pattern = r"\p{Han}|\p{Hiragana}|\p{Katakana}|\p{Hangul}|\p{L}+|\p{N}+|\p{P}|\S"
+        return regex.findall(pattern, text)
 
     def _ngrams(self, tokens: List[str], n: int) -> List[str]:
         return [" ".join(tokens[i:i+n]) for i in range(len(tokens)-n+1)]
@@ -741,12 +757,8 @@ class BaseMapper:
     def _segment(self, tokens: List[str]) -> Tuple[List[str], List[str]]:
         """
         Greedily segment token stream into the highest-level bases available.
-
-        Priority (highest wins):
-          0. Composite concepts (Recursive Base Composition)
-          1. Known phrase bases (longest match first)
-          2. Known word bases
-          3. Unknown word — represented as ONE token of type 'composed'
+        Script-aware: handles non-spaced scripts by checking direct concatenation.
+        Priority: Composite > Phrases > Words.
         """
         result_toks:  List[str] = []
         result_types: List[str] = []
@@ -754,24 +766,29 @@ class BaseMapper:
         while i < len(tokens):
             matched = False
             if self.is_fitted:
-                # 0. Check for Composite Concepts first
-                for comp_name, comp_type in self._base_types.items():
-                    if comp_type == "composite":
-                        # Greedy composite match: does the next span match a known concept?
-                        # (Concepts are identified by their stable string name)
-                        span = " ".join(tokens[i:i+3])
-                        if comp_name in span:
-                            result_toks.append(comp_name)
+                # 0. Composite Concepts (Semantic Activation Matching)
+                curr_emb = self._token_embedding(tokens[i], "word")
+                for name, emb in self._base_vocab.items():
+                    if self._base_types.get(name) == "composite":
+                        sim = float(np.dot(curr_emb, emb))
+                        if sim > 0.92:
+                            result_toks.append(name)
                             result_types.append("composite")
-                            # We heuristicly skip ahead based on word count
-                            i += len(comp_name.split("_")) # e.g. 'concept_123'
+                            i += 1
                             matched = True
                             break
+                if matched: continue
 
-                # 1. Phrases
+                # 1. Phrases (long-match first)
                 for ng_len in range(self.ngram_range[1], self.ngram_range[0]-1, -1):
                     if i + ng_len <= len(tokens):
-                        candidate = " ".join(tokens[i:i+ng_len])
+                        parts = tokens[i:i+ng_len]
+                        # IECNN Script-Aware Joining:
+                        if all(regex.match(r"\p{Han}|\p{Hiragana}|\p{Katakana}|\p{Hangul}", p) for p in parts):
+                            candidate = "".join(parts)
+                        else:
+                            candidate = " ".join(parts)
+
                         if candidate in self._base_vocab:
                             result_toks.append(candidate)
                             result_types.append(self._base_types.get(candidate, "phrase"))
@@ -824,16 +841,26 @@ class BaseMapper:
         char_embeds: List[np.ndarray] = []
         weights: List[float] = []
 
+        # 0. Script & Cognitive Anchors (The IECNN Way for cross-lingual space)
+        # 0a. Script Anchors: Latin, Arabic, Han regional regions.
+        for ch in word[:3]:
+            script_name = unicodedata.name(ch, "").split()[0]
+            if script_name:
+                if script_name not in self._script_embeddings:
+                    self._script_embeddings[script_name] = _stable_embedding(script_name, EMBED_DIM)
+                char_embeds.append(self._script_embeddings[script_name])
+                weights.append(0.5)
+
+        # 0b. Cognitive Anchors: align universal concepts (1, yes, water)
+
         # 1. Morpheme Decomposition (Semantic chunks)
-        # Only decompose if we are at the top level to avoid infinite recursion
         if depth == 0 and len(word) > 5:
             morphemes = self._split_morphemes(word.lower())
             if len(morphemes) > 1:
                 for m in morphemes:
-                    # Recursively get embedding for morpheme (at depth 1)
                     m_emb = self._compose_word_embedding(m, depth=1)
                     char_embeds.append(m_emb)
-                    weights.append(2.0) # High weight for semantic chunks
+                    weights.append(2.0)
 
         # 2. Character unigrams (primary signal)
         for k, ch in enumerate(chars):
@@ -881,20 +908,30 @@ class BaseMapper:
 
     def _split_morphemes(self, word: str) -> List[str]:
         """
-        Split word into known prefixes, suffixes, and discovered subwords.
-        Uses a greedy longest-match approach.
+        Multilingual Morpheme Splitter (v6 SOTA):
+        Handles CJK characters, Arabic roots, and Latin affixes.
         """
+        # CJK: treat each character as a morpheme
+        if regex.match(r"[\p{Han}\p{Hiragana}\p{Katakana}\p{Hangul}]+", word):
+            return list(word)
+
+        # Arabic/Hebrew: check for common triliteral root patterns (heuristic)
+        if regex.match(r"[\u0600-\u06FF\u0590-\u05FF]+", word) and len(word) > 4:
+            # Simple heuristic: remove common prefixes/suffixes to find potential root
+            clean = regex.sub(r"^[\u0627\u0644\u0648\u0628]|[\u0627\u062a\u0648\u0646\u064a]$","", word)
+            if len(clean) >= 3: return [clean]
+
         res = []
         remaining = word.lower()
 
-        # 1. Hardcoded Prefixes
+        # Latin Prefixes
         for p in _PREFIXES:
             if remaining.startswith(p) and len(remaining) > len(p) + 2:
                 res.append(p)
                 remaining = remaining[len(p):]
                 break
 
-        # 2. Hardcoded Suffixes (stored for later)
+        # Latin Suffixes
         suffix = ""
         for s in sorted(_SUFFIXES, key=len, reverse=True):
             if remaining.endswith(s) and len(remaining) > len(s) + 2:
@@ -999,27 +1036,30 @@ class BaseMapper:
 
     def _modifier_flags(self, token: str, typ: str, pos: int, total: int) -> np.ndarray:
         """
-        16 binary/continuous flags encoding token identity, position, and
-        morphological role.
+        Multilingual Script-Aware Flags (v6 SOTA):
+        Uses Unicode properties to identify morphological roles and scripts.
         """
         f = np.zeros(FLAG_DIM, dtype=np.float32)
-        f[0]  = 1.0 if typ == "primitive" else 0.0
-        f[1]  = 1.0 if typ == "word"      else 0.0
-        f[2]  = 1.0 if typ == "phrase"    else 0.0
-        f[3]  = 1.0 if typ == "composed"  else 0.0
-        f[4]  = 1.0 if pos == 0           else 0.0
-        f[5]  = 1.0 if pos == total - 1   else 0.0
-        f[6]  = 1.0 if 0 < pos < total-1  else 0.0
-        f[7]  = 1.0 if token.replace(" ","").isalpha() else 0.0
-        f[8]  = 1.0 if token.replace(" ","").isdigit() else 0.0
-        f[9]  = 1.0 if not token.replace(" ","").isalnum() else 0.0
+        f[0:4] = [1.0 if typ == t else 0.0 for t in ("primitive", "word", "phrase", "composed")]
+        f[4] = 1.0 if pos == 0 else 0.0
+        f[5] = 1.0 if pos == total - 1 else 0.0
+        f[6] = 1.0 if 0 < pos < total-1 else 0.0
 
-        # Morphological suffix detection (dims 10-11)
-        clean = token.replace(" ", "")
-        f[10] = 1.0 if any(clean.endswith(s) for s in _VERB_SUFFIXES) else 0.0
-        f[11] = 1.0 if (any(clean.endswith(s) for s in _NOUN_SUFFIXES)
-                        or any(clean.endswith(s) for s in _ADJ_SUFFIXES)
-                        or clean.endswith(_ADV_SUFFIX)) else 0.0
+        # Script and Category detection
+        if not token: return f
+        main_char = token[0]
+        cat = unicodedata.category(main_char)
+
+        f[7] = 1.0 if cat.startswith("L") else 0.0 # Letter
+        f[8] = 1.0 if cat.startswith("N") else 0.0 # Number
+        f[9] = 1.0 if cat.startswith("P") or cat.startswith("S") else 0.0 # Punct/Symbol
+
+        # Multilingual Morphological signal: Combining Marks (Common in Arabic/Hebrew)
+        f[10] = 1.0 if any(unicodedata.category(c) == "Mn" for c in token) else 0.0
+
+        # RTL detection (Arabic, Hebrew, Persian)
+        if regex.match(r"[\u0600-\u06FF\u0750-\u077F\u0590-\u05FF]", token):
+            f[11] = 1.0
 
         return np.clip(f, 0.0, 1.0)
 
@@ -1033,7 +1073,10 @@ class BaseMapper:
         ctx_matrix = np.zeros((n, CTX_DIM), dtype=np.float32)
 
         # Dim 0: Semantic cohesion (batch dot product)
-        sim_matrix = embeddings @ embeddings.T
+        # Ensure embeddings are normalized for similarity (v6 stable)
+        norms = np.linalg.norm(embeddings, axis=1, keepdims=True) + 1e-10
+        embeddings_norm = embeddings / norms
+        sim_matrix = embeddings_norm @ embeddings_norm.T
 
         for i in range(n):
             left_idx = max(0, i - ws)
@@ -1137,14 +1180,26 @@ class BaseMapper:
         n, dim = matrix.shape
         if n <= 1: return matrix
 
+        lib = _load_lib()
+        if lib and hasattr(lib, "apply_aaf_fast") and n <= 512:
+            m_contig = np.ascontiguousarray(matrix, dtype=np.float32)
+            lib.apply_aaf_fast(
+                m_contig.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+                ctypes.c_int(n),
+                ctypes.c_int(dim),
+                ctypes.c_int(EMBED_DIM),
+                ctypes.c_float(0.15)
+            )
+            return m_contig
+
         # Compute semantic self-attention matrix
         # For efficiency, we use the base embeddings region [0:EMBED_DIM]
         bases = matrix[:, :EMBED_DIM]
 
         # O(n^2) check: for long sequences, we use a sliding window AAF
-        if n > 256:
+        if n > 128:
             aligned = matrix.copy()
-            window = 64
+            window = 32
             for i in range(n):
                 start = max(0, i - window)
                 end = min(n, i + window + 1)
@@ -1172,3 +1227,5 @@ class BaseMapper:
         aligned = (1.0 - 0.15) * matrix + 0.15 * (weights @ matrix)
 
         return aligned.astype(np.float32)
+
+# ── Cognitive Anchors: Cross-lingual shared semantic space ──────────

@@ -138,3 +138,48 @@ void cooccurrence_smooth(float *embeddings, const int *neighbor_indices, const f
     free(delta);
     free(updates);
 }
+
+/* ── Attention Allocation Field (AAF) Fast ──────────────────────── */
+void apply_aaf_fast(float *matrix, int n, int dim, int embed_dim, float blend) {
+    if (n <= 1) return;
+    float *aligned = (float *)malloc(n * dim * sizeof(float));
+    if (!aligned) return;
+
+    #pragma omp parallel for
+    for (int i = 0; i < n; i++) {
+        float *row_i = matrix + i * dim;
+        float *res_row = aligned + i * dim;
+
+        float *scores = (float *)malloc(n * sizeof(float));
+        float max_s = -1e30f;
+
+        for (int j = 0; j < n; j++) {
+            float *row_j = matrix + j * dim;
+            float dot = 0.0f;
+            for (int d = 0; d < embed_dim; d++) dot += row_i[d] * row_j[d];
+            scores[j] = dot * 5.0f; // sharpness
+            if (scores[j] > max_s) max_s = scores[j];
+        }
+
+        float sum_e = 0.0f;
+        for (int j = 0; j < n; j++) {
+            scores[j] = expf(scores[j] - max_s);
+            sum_e += scores[j];
+        }
+
+        memset(res_row, 0, dim * sizeof(float));
+        for (int j = 0; j < n; j++) {
+            float w = scores[j] / (sum_e + 1e-10f);
+            float *row_j = matrix + j * dim;
+            for (int d = 0; d < dim; d++) res_row[d] += w * row_j[d];
+        }
+
+        for (int d = 0; d < dim; d++) {
+            res_row[d] = (1.0f - blend) * row_i[d] + blend * res_row[d];
+        }
+        free(scores);
+    }
+
+    memcpy(matrix, aligned, n * dim * sizeof(float));
+    free(aligned);
+}

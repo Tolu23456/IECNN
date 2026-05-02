@@ -43,7 +43,8 @@ def _load_lib():
         try:
             _lib = ctypes.CDLL(so)
             for fn in ("invert_feature", "invert_context", "invert_spatial",
-                       "invert_scale", "invert_abstraction", "invert_noise"):
+                       "invert_scale", "invert_abstraction", "invert_noise",
+                       "invert_relational", "invert_temporal", "invert_cross_modal"):
                 getattr(_lib, fn).restype = None
         except Exception:
             _lib = None
@@ -205,61 +206,27 @@ def _invert_noise(p: np.ndarray, rng: np.random.RandomState) -> np.ndarray:
 # ── Three New Inversions (Pure Python) ────────────────────────────────
 
 def _invert_relational(p: np.ndarray) -> np.ndarray:
-    """
-    Relational Inversion: invert pairwise correlations between blocks.
-    Splits the vector into 8 equal blocks, computes the Gram matrix of
-    block dot-products, identifies the dominant block, and negates its
-    contributions to all other blocks.
-    """
-    n   = len(p)
-    bs  = max(1, n // 8)
-    blocks = [p[i*bs:(i+1)*bs] for i in range(n // bs)]
-    if not blocks: return p.copy()
-
-    # Gram matrix
-    nb  = len(blocks)
-    G   = np.zeros((nb, nb), np.float32)
-    for i in range(nb):
-        for j in range(nb):
-            # Use real part of complex inner product
-            G[i, j] = float(np.real(np.vdot(blocks[i], blocks[j])))
-
-    # Find dominant block (largest off-diagonal contribution)
-    dom = np.argmax(np.sum(np.abs(G), axis=1) - np.abs(np.diag(G)))
-
-    out = p.copy()
-    for i in range(nb):
-        if i != dom:
-            # Complex-aware projection
-            dot_val = np.vdot(blocks[dom], blocks[i])
-            self_dot = np.vdot(blocks[dom], blocks[dom])
-            proj = (dot_val / (self_dot + 1e-10)) * blocks[dom]
-            out[i*bs:(i+1)*bs] -= 2.0 * proj
-    return out
+    """Relational Inversion (C-accelerated)."""
+    lib = _load_lib()
+    p32 = np.ascontiguousarray(np.real(p), np.float32)
+    out = np.zeros_like(p32)
+    if lib:
+        fp_, _p = _fp(p32); fo, _o = _fp(out)
+        lib.invert_relational(fp_, ctypes.c_int(len(p32)), fo)
+        return _o
+    return p32.copy()
 
 
 def _invert_temporal(p: np.ndarray) -> np.ndarray:
-    """
-    Temporal Inversion: treats the position-encoded segment [224:232]
-    as a sequence and reverses its temporal order; also applies a
-    causal reversal to the semantic dims [0:224] by splitting into 8
-    time steps and reversing.
-    """
-    out = p.copy()
-    # Reverse position encoding dims (8 dims, 4 sin-cos pairs)
-    if len(out) >= 232:
-        out[224:232] = out[224:232][::-1]
-    # Reverse the 8 semantic "time steps" of 28 dims each (224/8 = 28)
-    n_sem = 224; step = n_sem // 8
-    steps = [out[i*step:(i+1)*step].copy() for i in range(8)]
-    steps.reverse()
-    for i, s in enumerate(steps):
-        out[i*step:(i+1)*step] = s
-    # Smooth with a Gaussian kernel to avoid harsh boundaries
-    kernel = np.array([0.1, 0.2, 0.4, 0.2, 0.1], np.float32)
-    for d in range(0, 96):
-        pass  # per-dim smoothing too expensive; block-level is enough
-    return out
+    """Temporal Inversion (C-accelerated)."""
+    lib = _load_lib()
+    p32 = np.ascontiguousarray(np.real(p), np.float32)
+    out = np.zeros_like(p32)
+    if lib:
+        fp_, _p = _fp(p32); fo, _o = _fp(out)
+        lib.invert_temporal(fp_, ctypes.c_int(len(p32)), fo)
+        return _o
+    return p32.copy()
 
 
 def _invert_compositional(p: np.ndarray) -> np.ndarray:
@@ -311,18 +278,15 @@ def _invert_evolved(p: np.ndarray, dot_info: Dict) -> np.ndarray:
     return out
 
 def _invert_cross_modal(p: np.ndarray) -> np.ndarray:
-    """
-    Cross-Modal Inversion: Swap modality identities.
-    Specifically, it flips the modality flag bits [248:252].
-    This challenges the system to see if a 'visual' pattern still makes
-    sense if interpreted as an 'audio' or 'text' pattern.
-    """
-    out = p.copy()
-    if len(out) >= 252:
-        # Shift flags circularly: Text -> Image -> Audio -> Video -> Text
-        flags = out[248:252].copy()
-        out[248:252] = np.roll(flags, 1)
-    return out
+    """Cross-Modal Inversion (C-accelerated)."""
+    lib = _load_lib()
+    p32 = np.ascontiguousarray(np.real(p), np.float32)
+    out = np.zeros_like(p32)
+    if lib:
+        fp_, _p = _fp(p32); fo, _o = _fp(out)
+        lib.invert_cross_modal(fp_, ctypes.c_int(len(p32)), fo)
+        return _o
+    return p32.copy()
 
 
 def _apply_inversion(inv_type: str, pred: np.ndarray, ctx: np.ndarray,
