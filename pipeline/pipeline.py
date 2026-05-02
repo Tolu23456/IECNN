@@ -217,8 +217,10 @@ class IECNN:
         dots = self._ensure_dots()
 
         # Pipeline-C
+        # Bypassed when phase_coding=True: the C kernel is real-valued only
+        # and cannot propagate complex phase information through the forward pass.
         lib_p = _load_lib_p()
-        if use_c_pipeline and lib_p and not verbose:
+        if use_c_pipeline and lib_p and not verbose and not self.phase_coding:
             self.dot_gen._ensure_caches(dots)
             BM_mat = np.ascontiguousarray(np.real(basemap.matrix), dtype=np.float32)
             out_v = np.zeros(self.feature_dim, dtype=np.float32)
@@ -236,7 +238,7 @@ class IECNN:
                 _fp(out_v)[0], assign.ctypes.data_as(ctypes.POINTER(ctypes.c_int))
             )
 
-            # v6 SOTA: Outcome recording for C-pipeline
+            # Outcome recording for C-pipeline
             for i, dot in enumerate(dots):
                 for h in range(dot.n_heads):
                     idx = i * 8 + h
@@ -245,11 +247,18 @@ class IECNN:
 
             self._call_count += 1
             self.working_memory = out_v.copy()
+            # Scope cluster memory to this call and commit the result pattern
+            self.cluster_memory.reset_call()
+            self.cluster_memory.commit_pattern(out_v, 1.0)
             return IECNNResult(out_v, basemap, None, {"rounds": 0}, "Pipeline-C", [])
 
-        # Python Fallback
+        # Python Fallback (always used when phase_coding=True)
+        # Clear per-call round snapshots so temporal_stability() measures THIS
+        # run only, not whatever happened in the previous call.
+        self.cluster_memory.reset_call()
         self.iter_ctrl.reset()
         cur_bmap = basemap
+        surv: list = []
         while True:
             dot_preds = self.dot_gen.run_all(cur_bmap, dots, causal=causal)
             candidates = self.aim.transform(dot_preds, cur_bmap)
@@ -257,6 +266,15 @@ class IECNN:
             clusters, assign = self.convergence.run(filt)
             surv, _ = self.pruning.stage3(clusters)
             if not surv: break
+
+            # Record this round in cluster memory BEFORE advancing iter_ctrl
+            # (so the round index in the snapshot matches iter_ctrl._round)
+            round_centroids = [c.centroid for c in surv if c.centroid is not None]
+            round_scores    = [c.score   for c in surv]
+            self.cluster_memory.record_round(
+                self.iter_ctrl._round, round_centroids, round_scores
+            )
+
             self.iter_ctrl.record_round(surv, {})
 
             # Manual outcome recording for Python fallback
@@ -276,6 +294,9 @@ class IECNN:
         res_v = surv[0].centroid if (surv and surv[0].centroid is not None) else basemap.pool()
         self.working_memory = res_v.copy()
         summary = self.iter_ctrl.summary()
+        # Commit the winning centroid to the cross-call pattern library
+        if surv:
+            self.cluster_memory.commit_pattern(res_v, float(surv[0].score))
         return IECNNResult(res_v, basemap, surv[0] if surv else None, summary, self.iter_ctrl.stop_reason or "Python", [])
 
     def run_batch(self, inputs: List[str], use_c_pipeline: bool = True) -> np.ndarray:
@@ -318,6 +339,105 @@ class IECNN:
         self._call_count += n_sents
         return out_v
 
+    def causal_train_pass(self, sentences: List[str], max_pos: int = 6,
+                          verbose: bool = True, prune_every: int = 0) -> None:
+        """
+        Causal next-token prediction training.
+
+        For every sentence, we slide a context window across the token sequence.
+        At each position *i* (1 ≤ i < len(tokens)):
+          1. Encode the prefix tokens[0 : i] with causal=True (uses the Python
+             fallback so phase information flows end-to-end).
+          2. Look up the actual next-token embedding in the base vocabulary.
+          3. Score the pipeline output against that embedding.
+          4. Call local_update() on every dot towards the target, using a small
+             learning rate (0.005) so the update is incremental.
+          5. Bust the dot weight cache so the C-pipeline sees fresh weights.
+
+        Dots are evolved every 10 sentences; optional prune is applied every
+        `prune_every` sentences when prune_every > 0.
+        """
+        if not sentences:
+            return
+        t0 = time.time()
+        total_steps = 0
+        for sent_idx, sentence in enumerate(sentences):
+            tokens = self.base_mapper._tokenize(sentence)
+            if len(tokens) < 2:
+                continue
+
+            n_pos = min(len(tokens), max_pos + 1)
+            for pos in range(1, n_pos):
+                context = " ".join(tokens[:pos])
+                target_tok = tokens[pos] if pos < len(tokens) else None
+                if target_tok is None:
+                    continue
+
+                # Encode the prefix (force Python path via use_c_pipeline=False
+                # so complex phase channel is preserved end-to-end)
+                res = self.run(context, causal=True, use_c_pipeline=False)
+
+                # Build the target vector from the next token's base embedding
+                target_emb = self.base_mapper._token_embedding(
+                    target_tok,
+                    self.base_mapper._base_types.get(target_tok, "word"),
+                )
+                target_vec = np.zeros(self.feature_dim, dtype=np.float32)
+                n = min(len(target_emb), self.feature_dim)
+                target_vec[:n] = np.real(target_emb[:n]).astype(np.float32)
+                tn = np.linalg.norm(target_vec)
+                if tn > 1e-10:
+                    target_vec /= tn
+
+                # Score how well the pipeline output aligns with the next token.
+                # Take np.real() first: the Python path can return complex output
+                # when phase_coding is enabled.
+                out_real = np.real(res.output).astype(np.float32)
+                output_sim = float(np.dot(
+                    out_real / (np.linalg.norm(out_real) + 1e-10),
+                    target_vec
+                ))
+
+                # Update every dot toward the target embedding
+                dots = self._ensure_dots()
+                for dot in dots:
+                    win = output_sim > 0.3
+                    self.dot_memory.record(dot.dot_id, target_vec, win)
+                    dot.local_update(target_vec, winning_head=0, lr=0.005)
+
+                # The in-place weight updates invalidate the C weight caches
+                self.dot_gen.bust_cache()
+                total_steps += 1
+
+            # Periodic evolution
+            if (sent_idx + 1) % 10 == 0:
+                dots = self._ensure_dots()
+                self._dots = self.evolution.evolve(
+                    dots, self.dot_memory, call_count=self._call_count
+                )
+                # New list → _ensure_caches detects id() change automatically
+
+            if prune_every > 0 and (sent_idx + 1) % prune_every == 0:
+                self.prune_dots()
+
+            if verbose:
+                elapsed = time.time() - t0
+                rate = (sent_idx + 1) / max(elapsed, 1e-6)
+                effs = self.dot_memory.all_effectivenesses(
+                    [d.dot_id for d in self._ensure_dots()]
+                )
+                max_eff = float(np.max(effs)) if len(effs) > 0 else 0.0
+                print(
+                    f"\r[causal] {sent_idx+1}/{len(sentences)} sents"
+                    f" | {total_steps} steps"
+                    f" | {rate:.2f} sent/s"
+                    f" | MaxEff: {max_eff:.4f}",
+                    end="", flush=True,
+                )
+
+        if verbose:
+            print()
+
     def train_pass(self, sentences: List[str], use_c_pipeline: bool = True,
                    verbose: bool = True, prune_every: int = 0):
         if not sentences: return
@@ -355,7 +475,9 @@ class IECNN:
 
     def encode(self, text: str) -> np.ndarray: return self.run(text).output
 
-    def chat(self, message: str, history: List = None, verbose: bool = False) -> str:
+    def chat(self, message: str, history: List = None, verbose: bool = False,
+             beam_width: int = 4) -> str:
+        """Generate a chat reply using beam-search decoding (beam_width=4)."""
         from decoding.decoder import IECNNDecoder
         context = ""
         if history:
@@ -364,14 +486,17 @@ class IECNN:
         prompt = context + message
         res = self.run(prompt)
         decoder = IECNNDecoder(self)
-        return decoder.decode(res.output, max_tokens=12, iterations=40)
+        return decoder.decode(res.output, max_tokens=12, iterations=40,
+                              beam_width=beam_width)
 
-    def generate(self, prompt: str, max_tokens: int = 8, iterations: int = 20) -> str:
-        """Encode prompt → decode output text."""
+    def generate(self, prompt: str, max_tokens: int = 8, iterations: int = 20,
+                 beam_width: int = 4) -> str:
+        """Encode prompt → decode output text using beam-search (beam_width=4)."""
         from decoding.decoder import IECNNDecoder
         res = self.run(prompt)
         decoder = IECNNDecoder(self)
-        return decoder.decode(res.output, max_tokens=max_tokens, iterations=iterations)
+        return decoder.decode(res.output, max_tokens=max_tokens,
+                              iterations=iterations, beam_width=beam_width)
 
     def compare(self, texts: List[str]) -> np.ndarray:
         """Return n×n pairwise similarity matrix for the given texts."""

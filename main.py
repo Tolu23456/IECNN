@@ -13,10 +13,11 @@ Usage:
   python main.py memory                 # show dot memory and evolution state
   python main.py prune [--dry-run]      # compact the brain (drop dead dots + orphans)
                        [--min-outcomes N] [--min-age N]
-  python main.py train <file> [--limit N] [--evolve] [--prune-every N]
+  python main.py train <file> [--limit N] [--evolve] [--causal] [--prune-every N]
                                         # vocab-only by default; --evolve runs
-                                        # full pipeline; --prune-every keeps
-                                        # disk size bounded during long runs
+                                        # full pipeline; --causal runs
+                                        # next-token prediction training;
+                                        # --prune-every keeps disk size bounded
   python main.py demo                   # run the original 6-example showcase
   python main.py build                  # compile C extensions
 
@@ -248,7 +249,7 @@ def cmd_prune(dry_run: bool = False, min_outcomes: int = 2, min_age_gens: int = 
 
 
 def cmd_train(filepath: str, limit: int = 0, evolve: bool = False,
-              prune_every: int = 0):
+              causal: bool = False, prune_every: int = 0):
     _build_c()
     if not os.path.exists(filepath):
         print(f"[IECNN] Corpus not found: {filepath}")
@@ -265,7 +266,12 @@ def cmd_train(filepath: str, limit: int = 0, evolve: bool = False,
                 if cap and len(out) >= cap: break
         return out
 
-    if evolve:
+    if causal:
+        sentences = _read_lines(filepath, limit)
+        print(f"[IECNN] Causal next-token training on {len(sentences)} lines"
+              f"{f' (prune every {prune_every})' if prune_every else ''}")
+        model.causal_train_pass(sentences, verbose=True, prune_every=prune_every)
+    elif evolve:
         sentences = _read_lines(filepath, limit)
         print(f"[IECNN] Full-pipeline training on {len(sentences)} lines"
               f"{f' (prune every {prune_every})' if prune_every else ''}")
@@ -494,11 +500,12 @@ if __name__ == "__main__":
     elif args[0] == "chat":
         cmd_chat()
     elif args[0] == "train" and len(args) >= 2:
-        # python main.py train <file> [--limit N] [--evolve] [--prune-every N]
+        # python main.py train <file> [--limit N] [--evolve] [--causal] [--prune-every N]
         filepath = args[1]
         limit = 0
         prune_every = 0
         evolve = "--evolve" in args
+        causal = "--causal" in args
         if "--limit" in args:
             i = args.index("--limit")
             if i + 1 < len(args):
@@ -509,7 +516,9 @@ if __name__ == "__main__":
             if i + 1 < len(args):
                 try: prune_every = int(args[i+1])
                 except ValueError: prune_every = 0
-            evolve = True
-        cmd_train(filepath, limit=limit, evolve=evolve, prune_every=prune_every)
+            if not causal:
+                evolve = True
+        cmd_train(filepath, limit=limit, evolve=evolve, causal=causal,
+                  prune_every=prune_every)
     else:
         print(__doc__)

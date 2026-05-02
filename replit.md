@@ -31,6 +31,41 @@ implementing a novel neural architecture. It runs entirely in the terminal
 
 ---
 
+## Features Added (May 2026)
+
+### 1. Beam Search Decoding (`decoding/decoder.py`)
+`IECNNDecoder.decode()` now accepts `beam_width: int = 1`. When `beam_width > 1`,
+`_beam_search_text()` is used instead of the greedy decoder. It keeps `beam_width` partial
+sequences alive at each token step, uses incremental running-average embeddings for O(FEATURE_DIM)
+cost per extension, and stops early when no beam improves by more than `1e-4`. Default for
+`model.generate()` and `model.chat()` is `beam_width=4`.
+
+### 2. Causal Next-Token Prediction Training (`pipeline/pipeline.py`)
+`IECNN.causal_train_pass(sentences, max_pos=6, verbose=True, prune_every=0)` slides a context
+window across each sentence, encodes each prefix with `causal=True` through the Python path
+(preserving phase), looks up the actual next-token base embedding, scores the output against it,
+then calls `dot.local_update(target, lr=0.005)` on every dot. Dots are evolved every 10 sentences.
+Available on the CLI via `python main.py train <file> --causal`.
+
+### 3. Dot Weight Cache Invalidation (`neural_dot/neural_dot.py`)
+`DotGenerator` now has a `_dot_version: int` counter and a `bust_cache()` method.
+`_ensure_caches()` checks both `id(dots)` (list identity) and `_dot_version` (mutation version),
+so in-place weight mutations that don't replace the list still force a cache rebuild.
+`causal_train_pass` calls `bust_cache()` after every `local_update` batch.
+
+### 4. Phase-Coding End-to-End (`pipeline/pipeline.py`)
+When `phase_coding=True`, the C-pipeline path is bypassed (`not self.phase_coding` guard
+on the `if use_c_pipeline ...` branch). The Python path already produces complex64 predictions
+throughout. This means phase-coherence binding is actually functional at inference time.
+
+### 5. Cluster Memory Per-Call Scoping (`pipeline/pipeline.py`, `memory/cluster_memory.py`)
+`cluster_memory.reset_call()` is now called at the start of every `run()` (both C and Python
+paths), so `temporal_stability()` measures the current call only. The Python fallback loop
+calls `cluster_memory.record_round()` at every iteration. After convergence, the winning
+centroid is committed to the cross-call pattern library via `cluster_memory.commit_pattern()`.
+
+---
+
 ## Running the App
 
 ```bash

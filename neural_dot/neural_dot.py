@@ -362,6 +362,16 @@ class DotGenerator:
         self.num_dots = num_dots; self.feature_dim = feature_dim; self.base_bias = base_bias or BiasVector(); self.type_weights = type_weights or self.DEFAULT_TYPE_WEIGHTS
         self.n_heads = n_heads; self.seed = seed; self._rng = np.random.RandomState(seed)
         self._cached_W_stack = self._cached_HP_stack = self._cached_B_stack = self._cached_TYPES = self._cached_N_HEADS = self._cached_SEEDS = self._cached_BIAS = self._cached_dots_id = None
+        self._dot_version: int = 0
+        self._cached_version: int = -1
+
+    def bust_cache(self):
+        """
+        Increment the mutation version so _ensure_caches() rebuilds the C
+        weight stacks on the next forward pass.  Call after any in-place
+        weight mutation (e.g. local_update) that does NOT replace the list.
+        """
+        self._dot_version += 1
 
     def generate(self) -> List[NeuralDot]:
         types = list(self.type_weights.keys()); weights = np.array([self.type_weights[t] for t in types]); weights /= weights.sum(); dots = []
@@ -371,7 +381,12 @@ class DotGenerator:
         return dots
 
     def _ensure_caches(self, dots: List[NeuralDot]):
-        if self._cached_W_stack is None or self._cached_dots_id != id(dots):
+        stale = (
+            self._cached_W_stack is None
+            or self._cached_dots_id != id(dots)
+            or self._cached_version != self._dot_version
+        )
+        if stale:
             n = len(dots); dim = self.feature_dim
             self._cached_W_stack = np.ascontiguousarray(np.stack([d.W for d in dots]), dtype=np.float32)
             self._cached_HP_stack = np.ascontiguousarray(np.stack([np.pad(np.stack(d.head_projs), ((0, 8-len(d.head_projs)),(0,0),(0,0))) for d in dots]), dtype=np.float32)
@@ -381,6 +396,7 @@ class DotGenerator:
             self._cached_SEEDS = np.ascontiguousarray([int(d.dot_id * 31 + 7) for d in dots], dtype=np.uint32)
             self._cached_BIAS = np.ascontiguousarray(np.stack([d.bias.to_array() for d in dots]), dtype=np.float32)
             self._cached_dots_id = id(dots)
+            self._cached_version = self._dot_version
 
     def run_all(self, basemap, dots, memory_hints=None, context_entropy=0.5, consensus=None, causal=False) -> List[Tuple]:
         lib = _load_lib()

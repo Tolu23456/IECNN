@@ -50,15 +50,20 @@ class IECNNDecoder:
 
     def decode(self, latent: np.ndarray, target_mode: str = "text",
                max_tokens: int = 10, iterations: int = 20,
-               use_pipeline: bool = False) -> Any:
+               use_pipeline: bool = False,
+               beam_width: int = 1) -> Any:
         """
         Generative Convergence: Iteratively find a BaseMap that matches the latent.
+
+        beam_width > 1 activates beam search decoding: keeps the top-K partial
+        sequences at each token step, which recovers from locally greedy mistakes.
         """
         if use_pipeline:
-            # High-fidelity iterative refinement (v4 SOTA)
             return self._decode_pipeline_loop(latent, target_mode, max_tokens, iterations)
 
         if target_mode == "text":
+            if beam_width > 1:
+                return self._beam_search_text(latent, max_tokens, beam_width, iterations)
             return self._generative_reconstruction_text(latent, max_tokens, iterations)
         elif target_mode == "image":
             return self._decode_image(latent)
@@ -131,6 +136,85 @@ class IECNNDecoder:
             return best_w
 
         return top_k[0][1]
+
+    def _beam_search_text(self, target_latent: np.ndarray,
+                          max_tokens: int, beam_width: int,
+                          iterations: int) -> str:
+        """
+        Beam search text decoding.
+
+        Maintains `beam_width` partial sequences simultaneously.  At every
+        token step each beam is extended with every candidate from the top-K
+        vocabulary list; only the `beam_width` highest-scoring extensions
+        survive into the next step.  This prevents the greedy decoder from
+        getting trapped by a locally good but globally poor first token.
+
+        Incremental embedding update
+        ─────────────────────────────
+        Rather than recomputing the average embedding from scratch for every
+        (beam, candidate) pair we keep a running sum and divide by token count:
+            avg_{n+1} = (avg_n * n + emb_new) / (n + 1)
+        This makes the inner loop O(FEATURE_DIM) instead of O(n * FEATURE_DIM).
+        """
+        if not self.mapper.is_fitted or not self.mapper._base_vocab:
+            return "[unknown]"
+
+        target_base = np.real(target_latent[:EMBED_DIM]).astype(np.float32)
+
+        # Stage 1: build a shortlist of top-K candidate words by cosine sim
+        # to the target's base-embedding region.
+        vocab_words = [w for w in self.mapper._base_vocab if " " not in w]
+        if not vocab_words:
+            vocab_words = list(self.mapper._base_vocab.keys())
+        if not vocab_words:
+            return "..."
+
+        scored_vocab: list = []
+        for word in vocab_words:
+            emb = self.mapper._base_vocab[word].astype(np.float32)
+            scored_vocab.append((self._score_emb(emb, target_base), word))
+        scored_vocab.sort(key=lambda x: -x[0])
+
+        k = min(max(iterations, 30), len(scored_vocab))
+        top_k_words = [w for _, w in scored_vocab[:k]]
+
+        # Pre-fetch base embeddings for the shortlist (avoid repeated dict lookups)
+        word_embs: dict = {}
+        for w in top_k_words:
+            raw = self.mapper._base_vocab.get(w)
+            if raw is None:
+                raw = self.mapper._compose_word_embedding(w)
+            vec = np.zeros(FEATURE_DIM, dtype=np.float32)
+            vec[:min(len(raw), EMBED_DIM)] = raw.astype(np.float32)[:EMBED_DIM]
+            word_embs[w] = vec
+
+        # Stage 2: beam search
+        # Each beam: (cumulative_score, token_list, running_sum_vec, n_tokens)
+        zero = np.zeros(FEATURE_DIM, dtype=np.float32)
+        beams: list = [(0.0, [], zero.copy(), 0)]
+        best_score = -1.0
+
+        for _step in range(max_tokens):
+            all_extensions: list = []
+            for (b_score, b_toks, b_sum, b_n) in beams:
+                for word in top_k_words:
+                    w_vec = word_embs[word]
+                    new_n   = b_n + 1
+                    new_sum = b_sum + w_vec
+                    new_avg = new_sum / new_n
+                    sim = self._score_emb(new_avg, target_latent)
+                    all_extensions.append((sim, b_toks + [word], new_sum, new_n))
+
+            all_extensions.sort(key=lambda x: -x[0])
+            beams = [(s, toks, ssum, n)
+                     for s, toks, ssum, n in all_extensions[:beam_width]]
+
+            top_score = beams[0][0]
+            if top_score <= best_score + 1e-4:
+                break
+            best_score = top_score
+
+        return " ".join(beams[0][1]) if beams[0][1] else "..."
 
     def _score_emb(self, emb: np.ndarray, target: np.ndarray) -> float:
         """Fast cosine similarity between two vectors (no full pipeline)."""
