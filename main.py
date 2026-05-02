@@ -381,30 +381,97 @@ def cmd_train(filepath: str, limit: int = 0, evolve: bool = False,
 
 def _run_cgen(model, prompt: str):
     """Run causal_generate and print verbose per-token output."""
-    print("  [thinking...]", end="", flush=True)
+    peep_ready = model.peep is not None and model.peep.calibrated
+    tag = "[Peep+Grammar]" if peep_ready else "[majority-vote]"
+    print(f"  {tag} thinking...", end="", flush=True)
     result = model.causal_generate(prompt)
     tokens = result["tokens"]
     confs  = result["confidences"]
     reason = result["stop_reason"]
 
     if not tokens:
-        print(f"\r  Output: (empty — {reason})            ")
+        print(f"\r  Output: (empty — {reason})                      ")
         return
 
-    # Print output and per-token dot-vote breakdown
-    print(f"\r  Output: {result['text']}            ")
+    print(f"\r  Output: {result['text']}                      ")
     print()
-    # confidence = max_votes/128; scale to % of dots for display
-    n_dots = 128
-    token_line = ""
-    for tok, conf in zip(tokens, confs):
-        votes = int(round(conf * n_dots))
-        token_line += f"{tok}[{votes}] "
-    print(f"  Votes/128: {token_line.strip()}")
-    avg_conf = sum(confs) / len(confs) if confs else 0.0
-    avg_votes = int(round(avg_conf * n_dots))
-    print(f"  Avg votes: {avg_votes}/128  |  Tokens: {len(tokens)}  |  Stop: {reason}")
+
+    if peep_ready:
+        import numpy as _np
+        ctx_eff = model._get_ctx_cached(prompt)
+        top3    = model.peep.top_k(ctx_eff, _np.zeros((128, 256)), k=3)
+        ctx_n   = ctx_eff / (float(_np.linalg.norm(ctx_eff)) + 1e-9)
+        top3_cs = model.peep.specialisations[top3] @ ctx_n
+        dot_str = "  ".join(f"d{d}({cs:.2f})" for d, cs in zip(top3, top3_cs))
+        token_line = " ".join(f"{tok}[{conf:.2f}]" for tok, conf in zip(tokens, confs))
+        avg_conf = sum(confs) / len(confs) if confs else 0.0
+        print(f"  Peep top-3: {dot_str}")
+        print(f"  Confidence: {token_line}")
+        print(f"  Avg conf: {avg_conf:.3f}  |  Tokens: {len(tokens)}  |  Stop: {reason}")
+    else:
+        n_dots = 128
+        token_line = " ".join(f"{tok}[{int(round(c * n_dots))}]" for tok, c in zip(tokens, confs))
+        avg_conf = sum(confs) / len(confs) if confs else 0.0
+        print(f"  Votes/128: {token_line}")
+        print(f"  Avg votes: {int(round(avg_conf * n_dots))}/128  |  Tokens: {len(tokens)}  |  Stop: {reason}")
+        print(f"  (run 'calibrate' to enable Peep+Grammar generation)")
+
     model.save_brain()
+
+
+def cmd_calibrate(corpus_path: str = "/tmp/corpus_300k.txt",
+                  limit: int = 0):
+    """
+    Run a Peep calibration pass over a corpus.
+
+    Reads the corpus line by line, runs causal_train_pass in calibration
+    mode (ctx cache cleared first so recency-weighted vectors are used),
+    then saves the trained Peep to disk alongside the brain.
+
+    After this command, cgen will use Peep+Grammar generation instead of
+    majority-vote.
+    """
+    _build_c()
+    model = _make_model()
+
+    if not os.path.exists(corpus_path):
+        print(f"  Corpus not found: {corpus_path}")
+        print(f"  Usage: calibrate [corpus_path]")
+        return
+
+    print(f"\n{BAR}")
+    print("  IECNN — Peep Mechanism Calibration")
+    print(f"  Corpus : {corpus_path}")
+    print(BAR)
+
+    model._ctx_cache.clear()
+
+    sentences = []
+    with open(corpus_path, "r", encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            line = line.strip()
+            if line and not line.startswith("#"):
+                sentences.append(line)
+                if limit and len(sentences) >= limit:
+                    break
+
+    print(f"  Lines loaded : {len(sentences):,}")
+    print(f"  Running causal pass to build Peep specialisations...")
+    model.causal_train_pass(sentences, verbose=True)
+
+    if model.peep is not None:
+        stats = model.peep.stats()
+        print(f"\n  Peep calibration complete:")
+        print(f"    Active dots : {stats['active_dots']} / 128")
+        print(f"    Total hits  : {stats['total_hits']:,}")
+        print(f"    Max hits    : {stats['max_hits']:,}")
+        print(f"    Top 5 dots  : {stats['top5_dots']}")
+    else:
+        print("  Warning: Peep was not created (no training positions?)")
+
+    model.save_brain()
+    print(f"  Saved. Run 'cgen <prompt>' to use Peep+Grammar generation.")
+    print(BAR)
 
 
 def cmd_generate_oneshot(prompt: str):
@@ -464,7 +531,8 @@ def _interactive_loop(model):
             print("  Goodbye."); break
         if low in ("help", "?"):
             print("  Commands:")
-            print("    cgen <prompt>       IECNN-native generation (convergence voting)")
+            print("    cgen <prompt>       IECNN-native generation (Peep+Grammar if calibrated)")
+            print("    calibrate [path]    build Peep specialisations from corpus (enables Peep)")
             print("    generate <prompt>   encode prompt then beam-search decode")
             print("    encode <text>       encode and show vector summary")
             print("    sim A | B           pairwise similarity")
@@ -491,6 +559,10 @@ def _interactive_loop(model):
             vb = model.encode(parts[1].strip())
             print(f"  Similarity: {similarity_score(va, vb):+.4f}")
             model.save_brain(); continue
+        if low.startswith("calibrate"):
+            parts = user.split(None, 1)
+            corpus = parts[1].strip() if len(parts) > 1 else "/tmp/corpus_300k.txt"
+            cmd_calibrate(corpus); continue
         if low.startswith("cgen "):
             prompt = user[5:].strip()
             if not prompt: print("  Usage: cgen <prompt>"); continue
@@ -602,6 +674,15 @@ if __name__ == "__main__":
         cmd_prune(dry_run=dry, min_outcomes=min_outcomes, min_age_gens=min_age)
     elif args[0] == "encode" and len(args) >= 2:
         cmd_encode(" ".join(args[1:]))
+    elif args[0] == "calibrate":
+        corpus = args[1] if len(args) >= 2 else "/tmp/corpus_300k.txt"
+        limit  = 0
+        if "--limit" in args:
+            i = args.index("--limit")
+            if i + 1 < len(args):
+                try: limit = int(args[i + 1])
+                except ValueError: pass
+        cmd_calibrate(corpus, limit=limit)
     elif args[0] == "cgen" and len(args) >= 2:
         cmd_cgen_oneshot(" ".join(args[1:]))
     elif args[0] == "generate" and len(args) >= 2:

@@ -23,6 +23,8 @@ os.environ.setdefault("OMP_WAIT_POLICY", "active")
 
 from basemapping.basemapping import BaseMapper, BaseMap, EMBED_DIM, FEATURE_DIM
 from neural_dot.neural_dot   import BiasVector, DotGenerator, DotType, N_HEADS
+from peep.peep               import PeepMechanism
+from grammar.grammar         import GrammarGuide
 from aim.aim                 import AIMLayer
 from convergence.convergence import ConvergenceLayer, Cluster
 from pruning.pruning         import PruningLayer
@@ -177,7 +179,7 @@ class IECNN:
         self._call_count: int = 0
         self._rng = np.random.RandomState(seed)
 
-        # LRU ctx cache: text → mean-pooled basemap float32 vector (dim,)
+        # LRU ctx cache: text → recency-weighted token-embedding vector (dim,)
         # Eliminates re-transforming repeated causal prefixes (major speedup).
         self._ctx_cache: Dict[str, np.ndarray] = {}
 
@@ -186,6 +188,14 @@ class IECNN:
         # common words appear in many positions).  Caching avoids re-running
         # _token_embedding (complex polynomial + normalisation) per duplicate.
         self._tok_emb_cache: Dict[str, np.ndarray] = {}
+
+        # Peep Mechanism — calibrated during causal_train_pass, loaded from disk.
+        # None until first calibration batch or successful load_brain.
+        self.peep: Optional[PeepMechanism] = None
+
+        # GrammarGuide — built lazily in causal_generate, cached per vocab size.
+        self._grammar_guide: Optional[GrammarGuide] = None
+        self._grammar_vocab_size: int = 0
 
         if persistence_path:
             try:
@@ -206,6 +216,8 @@ class IECNN:
         with open(p["clustmem"], "wb") as f: pickle.dump(self.cluster_memory.state_dict(), f)
         with open(p["evo"], "wb") as f: pickle.dump(self.evolution.state_dict(), f)
         with open(p["meta"], "wb") as f: pickle.dump({"call_count": self._call_count, "next_dot_id": _NEXT_DOT_ID}, f)
+        if self.peep is not None:
+            self.peep.save(path + ".peep.pkl")
 
     def load_brain(self, persistence_path: Optional[str] = None) -> None:
         import pickle
@@ -226,6 +238,9 @@ class IECNN:
             with open(p["clustmem"], "rb") as f: self.cluster_memory.load_state(pickle.load(f))
         if os.path.exists(p["evo"]):
             with open(p["evo"], "rb") as f: self.evolution.load_state(pickle.load(f))
+        peep_path = path + ".peep.pkl"
+        if os.path.exists(peep_path):
+            self.peep = PeepMechanism.load(peep_path)
 
     def _learned_paths(self, base: str) -> dict:
         return {k: f"{base}.{k}.pkl" for k in ["dots", "dotmem", "clustmem", "evo", "meta"]}
@@ -467,14 +482,24 @@ class IECNN:
         return out_v
 
     def _get_ctx_cached(self, text: str) -> np.ndarray:
-        """Return mean-pooled token-embedding context for text.
+        """Return recency-weighted token-embedding context for text.
 
         Fast path for the causal training hot loop — bypasses the full
-        basemapping.transform() pipeline (_apply_aaf costs ~129 ms,
-        _segment regex/enum costs ~105 ms) and goes straight to
-        _token_embedding (~0.19 ms/token).  For training we only need
-        the static mean-pool of token vectors; the attention filter is
-        only useful for inference refinement.
+        basemapping.transform() pipeline and goes straight to
+        _token_embedding (~0.19 ms/token).
+
+        Encoding strategy — recency-weighted pooling
+        ---------------------------------------------
+        Instead of a plain mean, later tokens are weighted more heavily:
+          weight[i] = 0.70^(n-1-i)   (last token = 1.0, each step back × 0.70)
+        This means a single-word prompt ("Hello") produces a very different
+        vector from a multi-word prompt ("The president signed the bill"),
+        because the last word dominates.  Plain mean-pooling washes this out
+        and causes all multi-word prompts to cluster together regardless of
+        topic.
+
+        The result is L2-normalised to unit length so cosine comparisons
+        are meaningful across prompts of different lengths.
 
         Cache is a plain dict capped at 100 k entries to avoid unbounded
         memory growth on large corpora (~100 MB at dim=256 float32).
@@ -497,7 +522,22 @@ class IECNN:
                 v = np.zeros(dim, dtype=np.float32)
                 v[:n] = np.real(te[:n])
                 vecs.append(v)
-            ctx = np.mean(vecs, axis=0).astype(np.float32)
+
+            n_toks = len(vecs)
+            if n_toks == 1:
+                ctx = vecs[0].copy()
+            else:
+                decay   = 0.70
+                weights = np.array(
+                    [decay ** (n_toks - 1 - i) for i in range(n_toks)],
+                    dtype=np.float32,
+                )
+                weights /= weights.sum()
+                ctx = (np.stack(vecs) * weights[:, None]).sum(axis=0).astype(np.float32)
+
+        ctx_norm = float(np.linalg.norm(ctx))
+        if ctx_norm > 1e-9:
+            ctx = ctx / ctx_norm
 
         if len(self._ctx_cache) < 100_000:
             self._ctx_cache[text] = ctx
@@ -704,6 +744,14 @@ class IECNN:
             best_dot     = np.argmax(causal_sims, axis=1)      # (n_total,) int
             causal_wins  = np.zeros((n_total, n_dots), dtype=np.float32)
             causal_wins[np.arange(n_total), best_dot] = 1.0    # one-hot rows
+
+            # ── Peep calibration: update dot specialisations ──────────────────
+            # best_dot already tells us which dot won each position — we just
+            # need to teach Peep which context directions each dot specialises in.
+            # Cost is negligible: one groupby over n_total rows.
+            if self.peep is None:
+                self.peep = PeepMechanism(n_dots, self.feature_dim)
+            self.peep.observe_batch(all_ctxs, best_dot)
 
             # ── PHASE 5a: Vectorized W-row update with diversity push ─────────
             # DIVERSITY FIX: after computing each dot's mean target direction,
@@ -1083,25 +1131,23 @@ class IECNN:
         from collections import Counter as _Counter
 
         STOP_TOKENS  = {".", "!", "?", "\n", "<eos>", "[eos]", "</s>"}
-        HARD_BLOCK   = max_tokens   # block for entire generation window — no cycling
-        TOP_K_SAMPLE = 5            # sample from top-K most-voted tokens (controlled variation)
-        CONF_STOP    = confidence_threshold   # fraction of dots that must agree to continue
+        HARD_BLOCK   = max_tokens
+        TOP_K_SAMPLE = 5
+        CONF_STOP    = confidence_threshold
 
         output_tokens: List[str]   = []
         output_confs:  List[float] = []
         stop_reason = "max_tokens"
 
-        # word_idx maps word → column index in word_vecs_n for fast lookup
-        word_idx = {w: i for i, w in enumerate(words)}
+        # ── Grammar guide (cached; rebuilt only when vocab size changes) ──
+        if (self._grammar_guide is None
+                or self._grammar_vocab_size != len(words)):
+            self._grammar_guide     = GrammarGuide(words, bias_strength=0.30)
+            self._grammar_vocab_size = len(words)
+        _grammar_guide = self._grammar_guide
 
-        # Exclusion signal: slow EMA of generated token embeddings (256-dim).
-        # Subtracted from ctx_eff so the context drifts away from directions
-        # already visited — IECNN-native attractor-escape, no temperature needed.
-        #
-        # Pre-warm with 40% of the prompt context so step-1 is already pushed
-        # away from the prompt's own embedding direction.  Without this the
-        # first 2-3 tokens always anchor on the same "nearest-to-residual"
-        # words regardless of prompt.
+        # Exclusion signal — EMA of visited directions; pre-warmed with the
+        # prompt context so step-1 already steers away from the prompt itself.
         exclusion = 0.40 * ctx
 
         n_dots = len(dots)
@@ -1114,65 +1160,122 @@ class IECNN:
             else:
                 ctx_eff = ctx
 
-            # 1. Independent predictions: W[d] @ ctx_eff → (D, 256)
+            # 1. All dot predictions: W[d] @ ctx_eff → (D, 256)
             raw_preds = W_stack @ ctx_eff                        # (D, 256)
-            mean_pred = raw_preds.mean(axis=0)                   # (256,) shared/corpus direction
+            mean_pred = raw_preds.mean(axis=0)                   # (256,) corpus mean
 
-            # ── Residual majority-vote ─────────────────────────────────
-            # Each dot's residual is its opinion BEYOND the shared average.
-            # We decode every residual to a vocab token, then count votes.
-            # Plurality = emergent convergence without spatial clustering.
-            # This is correct IECNN behaviour: 128 independent agents vote;
-            # the token that wins most dot-votes IS the converged answer.
-            residuals  = raw_preds - mean_pred                   # (D, 256)
-            res_e      = residuals[:, :EMBED_DIM]                # (D, 224) embed slice
-            res_norms  = np.linalg.norm(res_e, axis=1, keepdims=True) + 1e-10
-            res_en     = res_e / res_norms                       # unit sphere (D, 224)
-
-            # Per-dot nearest-vocab token via vectorised cosine
-            dot_sims   = res_en @ word_vecs_n.T                  # (D, V)
-
-            # Block already-used tokens across ALL dots before voting
+            # ── Blocked token mask (shared by both paths) ──────────────
             blocked = set(output_tokens[-HARD_BLOCK:])
             if blocked:
                 block_mask = np.array([w in blocked for w in words], dtype=bool)
-                dot_sims[:, block_mask] = -2.0
+            else:
+                block_mask = None
 
-            per_dot_best = np.argmax(dot_sims, axis=1)           # (D,) per-dot vote index
+            # ── Grammar weights for this step ──────────────────────────
+            last_tok  = output_tokens[-1] if output_tokens else ""
+            gram_w    = _grammar_guide.weights(last_tok)         # (V,) additive bias
 
-            # 2. Count votes: token → number of dots that voted for it
-            vote_counts  = _Counter(int(i) for i in per_dot_best)
-            top_votes    = vote_counts.most_common(TOP_K_SAMPLE) # [(idx, count), ...]
+            # ══════════════════════════════════════════════════════════
+            # PATH A — Peep-guided generation (Peep calibrated)
+            # Top-3 dots by cosine-to-context are selected; their
+            # residuals are averaged (weighted by cosine score) so no
+            # single dot can dominate the prediction.
+            # ══════════════════════════════════════════════════════════
+            if self.peep is not None and self.peep.calibrated:
 
-            if not top_votes:
-                stop_reason = "no_votes"
-                break
+                # 2a. Peep picks the 3 dots most aligned to current context
+                top3_idx  = self.peep.top_k(ctx_eff, raw_preds, k=3)   # (3,)
 
-            # 3. Confidence = fraction of dots voting for the winning token
-            winner_count = top_votes[0][1]
-            confidence   = winner_count / n_dots
+                # 2b. Per-dot cosine similarity to context (for weighting)
+                ctx_n     = ctx_eff / (float(np.linalg.norm(ctx_eff)) + 1e-9)
+                top3_sims = self.peep.specialisations[top3_idx] @ ctx_n  # (3,)
+                top3_sims = np.clip(top3_sims, 0.0, None)
+                sim_sum   = top3_sims.sum()
+                if sim_sum < 1e-9:
+                    top3_w = np.ones(3, dtype=np.float32) / 3.0
+                else:
+                    top3_w = (top3_sims / sim_sum).astype(np.float32)   # (3,)
 
-            # 4. Stop: vote is too scattered (model uncertain)
-            if confidence < CONF_STOP:
-                stop_reason = f"low_confidence({confidence:.3f})"
-                break
+                # 3a. Weighted average of the top-3 residuals
+                residuals_top = (raw_preds[top3_idx] - mean_pred[None, :])  # (3,256)
+                blended  = (top3_w[:, None] * residuals_top).sum(axis=0)    # (256,)
+                res_e    = blended[:EMBED_DIM]                               # (224,)
+                res_n    = float(np.linalg.norm(res_e))
 
-            # 5. Controlled variation: sample from top-K by vote-count
-            #    When top-2 are close in votes (ratio > `variation`), the
-            #    sampling probability spreads between them.
-            cand_idx    = [idx for idx, _ in top_votes]
-            cand_counts = np.array([cnt for _, cnt in top_votes], dtype=np.float64)
+                # If all residuals degenerate, fall through to PATH B
+                if res_n < 1e-9:
+                    for alt_d in range(raw_preds.shape[0]):
+                        alt_res = (raw_preds[alt_d] - mean_pred)[:EMBED_DIM]
+                        alt_n   = float(np.linalg.norm(alt_res))
+                        if alt_n > 1e-9:
+                            res_e, res_n = alt_res, alt_n
+                            break
 
-            # Normalise counts → probabilities (softmax with adaptive sharpness)
-            temp    = max(0.5, 1.0 - confidence * 5.0)  # flatten when uncertain
-            logits  = cand_counts / temp
-            logits -= logits.max()
-            probs   = np.exp(logits); probs /= probs.sum()
+                if res_n > 1e-9:
+                    res_e = res_e / res_n
 
-            # Apply `variation` gate: if 2nd place is within `variation` of 1st,
-            # the sampling already handles it via probabilities above.
-            chosen_pos = np.random.choice(len(cand_idx), p=probs)
-            next_token = words[cand_idx[chosen_pos]]
+                # 4a. Cosine similarity to all vocab words + grammar bias
+                sims = (word_vecs_n @ res_e) + gram_w            # (V,)
+
+                if block_mask is not None:
+                    sims[block_mask] = -2.0
+
+                # 5a. Confidence = cosine of the top candidate
+                top5_idx   = np.argpartition(sims, -TOP_K_SAMPLE)[-TOP_K_SAMPLE:]
+                top5_idx   = top5_idx[np.argsort(sims[top5_idx])[::-1]]
+                confidence = float(np.clip(sims[top5_idx[0]], 0.0, 1.0))
+
+                if confidence < CONF_STOP:
+                    stop_reason = f"low_confidence({confidence:.3f})"
+                    break
+
+                # 6a. Softmax-sample from top-K (controlled variation)
+                top_sims  = sims[top5_idx].astype(np.float64)
+                temp      = max(0.30, 1.0 - confidence)
+                logits    = top_sims / temp
+                logits   -= logits.max()
+                probs     = np.exp(logits); probs /= probs.sum()
+                chosen    = int(np.random.choice(len(top5_idx), p=probs))
+                next_token = words[top5_idx[chosen]]
+
+            # ══════════════════════════════════════════════════════════
+            # PATH B — Majority-vote fallback (Peep not calibrated yet)
+            # Identical to previous behaviour; used on first run before
+            # any causal training batch has been seen.
+            # ══════════════════════════════════════════════════════════
+            else:
+                residuals  = raw_preds - mean_pred
+                res_e_all  = residuals[:, :EMBED_DIM]
+                res_norms  = np.linalg.norm(res_e_all, axis=1, keepdims=True) + 1e-10
+                res_en     = res_e_all / res_norms
+
+                dot_sims   = (res_en @ word_vecs_n.T) + gram_w[None, :]
+                if block_mask is not None:
+                    dot_sims[:, block_mask] = -2.0
+
+                per_dot_best = np.argmax(dot_sims, axis=1)
+                vote_counts  = _Counter(int(i) for i in per_dot_best)
+                top_votes    = vote_counts.most_common(TOP_K_SAMPLE)
+
+                if not top_votes:
+                    stop_reason = "no_votes"
+                    break
+
+                winner_count = top_votes[0][1]
+                confidence   = winner_count / n_dots
+
+                if confidence < CONF_STOP:
+                    stop_reason = f"low_confidence({confidence:.3f})"
+                    break
+
+                cand_idx    = [idx for idx, _ in top_votes]
+                cand_counts = np.array([cnt for _, cnt in top_votes], dtype=np.float64)
+                temp        = max(0.5, 1.0 - confidence * 5.0)
+                logits      = cand_counts / temp
+                logits     -= logits.max()
+                probs       = np.exp(logits); probs /= probs.sum()
+                chosen_pos  = np.random.choice(len(cand_idx), p=probs)
+                next_token  = words[cand_idx[chosen_pos]]
 
             output_tokens.append(next_token)
             output_confs.append(float(confidence))

@@ -304,6 +304,49 @@ Raw win counting gave each dot ~0.78% win-rate (1/128), far below the 0.5 prior 
 
 ---
 
+## Generation Architecture (May 2026)
+
+### Peep Mechanism + Grammar Guide (`peep/peep.py`, `grammar/grammar.py`)
+
+Three improvements to semantic context and generation quality:
+
+#### 1. Recency-Weighted Context Encoding (`pipeline.py: _get_ctx_cached`)
+- Context vector = weighted sum of token embeddings with decay 0.70^(n−1−i)
+- Last word gets weight 1.0, second-to-last gets 0.70, etc.
+- L2-normalised to unit sphere
+- Prevents long prompts from diluting recent semantic signal
+
+#### 2. Peep Mechanism (`peep/peep.py`)
+- `PeepMechanism`: 128 specialisation vectors (one per dot), shape (128, FEATURE_DIM)
+- `observe_batch(ctxs, best_dots)`: after each causal training position, EMA-updates the context-direction centroid for each winning dot (lr=0.04)
+- `select(ctx_eff, raw_preds)`: pure cosine similarity selects the single dot most aligned to current context
+- `top_k(ctx_eff, raw_preds, k=3)`: returns top-3 aligned dots (used for generation averaging)
+- Saved/loaded from `global_brain.pkl.peep.pkl`
+- After 300k calibration: 128/128 active dots, 236k hits, strong std=2174 (specialisation spread confirmed)
+
+#### 3. Grammar Guide (`grammar/grammar.py`)
+- Rule-based POS tagger: 9 classes (ARTICLE, NOUN, VERB, ADJECTIVE, ADVERB, PRONOUN, PREPOSITION, CONJUNCTION, OTHER)
+- `GrammarGuide(vocab)`: pre-computes (9, 9) transition weight matrix × per-tag scores → additive vocab bias vector
+- `weights(last_token)` → (V,) additive bias applied to cosine scores before softmax sampling
+- Encourages grammatically plausible next-word POS class
+
+#### Generation Paths (PATH A / PATH B)
+- **PATH A (Peep+Grammar)**: top-3 dots by cosine alignment selected; residuals blended by cosine weight; decoded with grammar bias + softmax temperature. Shows `d{N}(score)` per dot.
+- **PATH B (majority-vote fallback)**: original 128-dot majority vote with grammar bias added; shown when Peep not yet calibrated.
+
+#### Calibration
+```bash
+python main.py calibrate                            # use default /tmp/corpus_300k.txt
+python main.py calibrate /path/to/corpus.txt        # custom corpus
+python main.py calibrate /path/to/corpus.txt --limit 50000  # limit lines
+```
+Or interactively:
+```
+> calibrate
+> calibrate /tmp/corpus_300k.txt
+```
+Calibration re-runs `causal_train_pass` with cleared ctx-cache, then saves Peep to disk. Subsequent `cgen` commands use PATH A automatically.
+
 ## Running the App
 
 ```bash
@@ -314,7 +357,9 @@ python main.py train corpus.txt --fast  # ultra-fast parallel training (100k+ se
 python main.py train corpus.txt --fast --evolve   # fast vocab + full dot evolution
 python main.py train corpus.txt --fast --workers 4  # specify CPU count explicitly
 python main.py train corpus.txt --limit N   # train on first N lines
+python main.py calibrate                # build Peep specialisations (enables PATH A)
 python main.py generate "prompt"        # encode prompt → decode output text
+python main.py cgen "prompt"            # IECNN-native generation (Peep+Grammar)
 python main.py encode "text"            # encode → 256-dim latent
 python main.py sim "text A" "text B"    # cosine similarity
 python main.py compare "a" "b" "c"      # n×n similarity table
