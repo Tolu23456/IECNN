@@ -6,6 +6,10 @@ IECNN (Iterative Emergent Convergent Neural Network) is a CLI-only research proj
 implementing a novel neural architecture. It runs entirely in the terminal
 (`python main.py`), has no web server, and requires no external API keys.
 
+## User Preferences
+
+- **No web server.** This project is intentionally CLI-only. Do not add Flask, Gunicorn, or any other web framework or HTTP server.
+
 ---
 
 ## Running the App
