@@ -420,9 +420,11 @@ class DotMemory:
         self._success_counts.clear()
         self._total_counts.clear()
         self._windows.clear()
-        self._var_sums.clear()
-        self._var_counts.clear()
+        self._var_stats.clear()
         self._phase_acc.clear()
+        self._surprise_history.clear()
+        self._exemplars.clear()
+        self._semantic_grounding.clear()
 
     def summary(self, current_dot_ids: Optional[List[int]] = None) -> dict:
         eff = self.all_effectivenesses(current_dot_ids)

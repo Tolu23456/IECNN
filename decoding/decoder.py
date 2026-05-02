@@ -134,11 +134,13 @@ class IECNNDecoder:
 
     def _score_emb(self, emb: np.ndarray, target: np.ndarray) -> float:
         """Fast cosine similarity between two vectors (no full pipeline)."""
-        a_norm = float(np.linalg.norm(emb))
-        b_norm = float(np.linalg.norm(target))
+        a = np.real(emb).astype(np.float32)
+        b = np.real(target).astype(np.float32)
+        a_norm = float(np.linalg.norm(a))
+        b_norm = float(np.linalg.norm(b))
         if a_norm < 1e-10 or b_norm < 1e-10:
             return 0.0
-        return float(np.dot(emb / a_norm, target / b_norm))
+        return float(np.dot(a / a_norm, b / b_norm))
 
     def _build_candidate_emb(self, tokens: list) -> np.ndarray:
         """
@@ -181,7 +183,7 @@ class IECNNDecoder:
         if not vocab_words:
             return "..."
 
-        target_base = target_latent[:EMBED_DIM].astype(np.float32)
+        target_base = np.real(target_latent[:EMBED_DIM]).astype(np.float32)
 
         scored: list = []
         for word in vocab_words:

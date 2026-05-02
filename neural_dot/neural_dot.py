@@ -321,7 +321,8 @@ class NeuralDot:
     def local_update(self, winning_centroid, winning_head, lr=0.01):
         target = np.real(winning_centroid).astype(np.float32); n = np.linalg.norm(target)
         if n > 1e-10: target /= n
-        self.W[self._rng.randint(0, self.feature_dim)] = (1.0 - lr) * self.W[self._rng.randint(0, self.feature_dim)] + lr * target
+        row = self._rng.randint(0, self.feature_dim)
+        self.W[row] = (1.0 - lr) * self.W[row] + lr * target
         self.head_projs[winning_head] = (1.0 - lr * 0.5) * self.head_projs[winning_head] + (lr * 0.5) * np.outer(target, target)
         self.W /= (np.linalg.norm(self.W, axis=1, keepdims=True) + 1e-10)
 

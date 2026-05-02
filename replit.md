@@ -12,6 +12,25 @@ implementing a novel neural architecture. It runs entirely in the terminal
 
 ---
 
+## Bug Fixes Applied (May 2026)
+
+### Critical
+1. **`pipeline/pipeline.py` — 5 missing methods** — `compare()`, `generate()`, `memory_status()`, `fit_file()`, and `prune_dots()` were called from `main.py` but never defined in the class. All five are now implemented.
+2. **`pipeline/pipeline.py` — `train_pass()` missing `prune_every` parameter** — `main.py` called `model.train_pass(..., prune_every=N)` which crashed with `TypeError`. Parameter added and wired to periodic `prune_dots()` calls.
+3. **`pipeline/pipeline.py` — `chat()` imported non-existent modules** — `cognition.router.AGIRouter` and `utils.tools.ToolExecutor` don't exist; chat crashed on every invocation. Replaced with a clean context-window + decoder implementation.
+4. **`memory/dot_memory.py` — `reset_all()` crashed** — referenced `self._var_sums` and `self._var_counts` which don't exist (correct attribute is `self._var_stats`). Also missing `_surprise_history`, `_exemplars`, `_semantic_grounding` clears.
+
+### Moderate
+5. **`pipeline/pipeline.py` — Python-fallback `run()` returned empty summary `{}`** — `cmd_encode` accessed `res.summary.get('rounds', ...)` which always fell back to an empty list `[]`. Now returns `iter_ctrl.summary()` like all other paths.
+6. **`neural_dot/neural_dot.py` — `local_update()` row-index collision** — two separate `_rng.randint()` calls were used as the read-index and write-index for the same W row update, so they picked *different* rows. Fixed to capture a single `row` variable used for both.
+7. **`pipeline/pipeline.py` — `import time` at bottom of file** — used inside `train_pass()` but placed after the class definition. Moved to the standard top-of-file imports.
+
+### Minor (silent data loss)
+8. **`pipeline/pipeline.py` `_blend()` — ComplexWarning on blend** — cast a complex centroid to float32 without taking `np.real()` first, silently dropping the imaginary part. Fixed.
+9. **`decoding/decoder.py` `_score_emb()` / `_generative_reconstruction_text()` — ComplexWarning on decode** — same silent imaginary-part drop when scoring or slicing a complex latent. Fixed with explicit `np.real()` before cast.
+
+---
+
 ## Running the App
 
 ```bash

@@ -6,6 +6,7 @@ import numpy as np
 import re
 import regex
 import unicodedata
+import time
 from typing import List, Dict, Optional, Tuple, Any
 import sys, os
 import ctypes
@@ -272,9 +273,10 @@ class IECNN:
             cur_bmap = self._blend(basemap, refined)
 
         self._call_count += 1
-        res_v = surv[0].centroid if surv else basemap.pool()
+        res_v = surv[0].centroid if (surv and surv[0].centroid is not None) else basemap.pool()
         self.working_memory = res_v.copy()
-        return IECNNResult(res_v, basemap, surv[0] if surv else None, {}, "Python", [])
+        summary = self.iter_ctrl.summary()
+        return IECNNResult(res_v, basemap, surv[0] if surv else None, summary, self.iter_ctrl.stop_reason or "Python", [])
 
     def run_batch(self, inputs: List[str], use_c_pipeline: bool = True) -> np.ndarray:
         lib_p = _load_lib_p()
@@ -316,7 +318,8 @@ class IECNN:
         self._call_count += n_sents
         return out_v
 
-    def train_pass(self, sentences: List[str], use_c_pipeline: bool = True, verbose: bool = True):
+    def train_pass(self, sentences: List[str], use_c_pipeline: bool = True,
+                   verbose: bool = True, prune_every: int = 0):
         if not sentences: return
         t0 = time.time()
         batch_size = 50
@@ -325,19 +328,24 @@ class IECNN:
             self.run_batch(batch, use_c_pipeline=use_c_pipeline)
             dots = self._ensure_dots()
             self._dots = self.evolution.evolve(dots, self.dot_memory, call_count=self._call_count)
+            if prune_every > 0 and (i + len(batch)) % prune_every == 0:
+                self.prune_dots()
             if verbose:
                 elapsed = time.time() - t0
-                rate = (i + len(batch)) / elapsed
+                rate = (i + len(batch)) / max(elapsed, 1e-6)
                 effs = self.dot_memory.all_effectivenesses([d.dot_id for d in self._dots])
                 max_eff = np.max(effs) if len(effs) > 0 else 0.0
                 print(f"\r[train] {i+len(batch)}/{len(sentences)} | {rate:.2f} lines/s | MaxEff: {max_eff:.4f}", end="", flush=True)
+        if prune_every > 0:
+            self.prune_dots()
         if verbose: print()
 
     def _blend(self, original: BaseMap, refined: np.ndarray, alpha: float = 0.85) -> BaseMap:
         mat = original.matrix.copy()
-        n = np.linalg.norm(refined)
+        r_real = np.real(refined).astype(np.float32)
+        n = np.linalg.norm(r_real)
         if n > 1e-10:
-            r = (refined / n).astype(np.float32)
+            r = r_real / n
             mat = (alpha * mat + (1.0 - alpha) * r[None, :]).astype(np.float32)
         return BaseMap(mat, original.tokens, original.token_types, original.modifiers, original.metadata)
 
@@ -347,18 +355,107 @@ class IECNN:
 
     def encode(self, text: str) -> np.ndarray: return self.run(text).output
 
-    def chat(self, message: str, history: List = None) -> str:
-        from cognition.router import AGIRouter
+    def chat(self, message: str, history: List = None, verbose: bool = False) -> str:
         from decoding.decoder import IECNNDecoder
-        from utils.tools import ToolExecutor
-        router = AGIRouter(self)
-        intent, prompt = router.route(message, history=history)
+        context = ""
+        if history:
+            turns = history[-3:]
+            context = " ".join(f"{u} {r}" for u, r in turns) + " "
+        prompt = context + message
         res = self.run(prompt)
         decoder = IECNNDecoder(self)
-        response = decoder.decode(res.output, iterations=40)
-        executor = ToolExecutor(self)
-        action_res = executor.parse_and_execute(response)
-        if action_res: response += f"\n[Action Result]: {action_res}"
-        return response
+        return decoder.decode(res.output, max_tokens=12, iterations=40)
 
-import time
+    def generate(self, prompt: str, max_tokens: int = 8, iterations: int = 20) -> str:
+        """Encode prompt → decode output text."""
+        from decoding.decoder import IECNNDecoder
+        res = self.run(prompt)
+        decoder = IECNNDecoder(self)
+        return decoder.decode(res.output, max_tokens=max_tokens, iterations=iterations)
+
+    def compare(self, texts: List[str]) -> np.ndarray:
+        """Return n×n pairwise similarity matrix for the given texts."""
+        from formulas.formulas import similarity_score
+        vecs = [self.encode(t) for t in texts]
+        n = len(vecs)
+        mat = np.zeros((n, n), dtype=np.float32)
+        for i in range(n):
+            mat[i, i] = 1.0
+            for j in range(i + 1, n):
+                s = similarity_score(vecs[i], vecs[j])
+                mat[i, j] = s
+                mat[j, i] = s
+        return mat
+
+    def memory_status(self) -> dict:
+        """Return a summary dict of dot memory, cluster memory, and evolution state."""
+        dots = self._ensure_dots()
+        dot_ids = [d.dot_id for d in dots]
+        dm = self.dot_memory.summary(dot_ids)
+        cm = self.cluster_memory.summary()
+        ev = self.evolution.stats(self.dot_memory, dot_ids)
+        return {
+            "call_count":     self._call_count,
+            "dot_memory":     dm,
+            "cluster_memory": cm,
+            "evolution":      ev,
+        }
+
+    def fit_file(self, filepath: str, verbose: bool = True) -> "IECNN":
+        """Stream one sentence per line from filepath and fit the BaseMapper vocabulary."""
+        if not os.path.exists(filepath):
+            raise FileNotFoundError(f"Corpus not found: {filepath}")
+        sentences = []
+        with open(filepath, "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    sentences.append(line)
+        if verbose:
+            print(f"[IECNN] fit_file: {len(sentences)} sentences from {filepath}")
+        self.base_mapper.fit(sentences)
+        self._call_count += 1
+        if verbose:
+            print(f"[IECNN] fit_file: vocab size = {len(self.base_mapper._base_vocab)}")
+        self.save_brain()
+        return self
+
+    def prune_dots(self, min_outcomes: int = 2, min_age_gens: int = 2,
+                   dry_run: bool = False) -> dict:
+        """
+        Remove under-performing dots and their orphaned memory history.
+
+        A dot is eligible for removal when:
+          - It is old enough: current_gen - birth_generation >= min_age_gens
+          - Its total prediction count < min_outcomes
+
+        Returns a stats dict with removed/kept counts.
+        """
+        dots = self._ensure_dots()
+        cur_gen = self.evolution.generation
+        keep_dots = []
+        remove_ids = []
+        for d in dots:
+            age = cur_gen - getattr(d, "birth_generation", 0)
+            total = self.dot_memory._total_counts.get(d.dot_id, 0.0)
+            if age >= min_age_gens and total < min_outcomes:
+                remove_ids.append(d.dot_id)
+            else:
+                keep_dots.append(d)
+
+        removed_history = 0
+        if not dry_run:
+            self._dots = keep_dots
+            before = sum(len(v) for v in self.dot_memory._windows.values())
+            keep_ids = [d.dot_id for d in keep_dots]
+            self.dot_memory.prune(keep_ids)
+            after = sum(len(v) for v in self.dot_memory._windows.values())
+            removed_history = before - after
+
+        return {
+            "generation":       cur_gen,
+            "removed_dots":     len(remove_ids),
+            "kept_dots":        len(keep_dots),
+            "removed_history":  removed_history,
+            "kept_history":     sum(len(v) for v in self.dot_memory._windows.values()),
+        }
