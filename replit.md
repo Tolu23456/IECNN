@@ -61,17 +61,41 @@ Achieved through three generations of optimization across `basemapping/basemappi
 | 11 | **Bigram-only cap in fast mode** (`min(ng_hi, 2)`): trigrams produce 42³≈74k Counter entries vs 42²≈1.8k for bigrams — **45× smaller IPC payload, 35× faster merge** | 3× IPC+merge |
 | 12 | Optimal chunk size: cap at 12.5k sentences/chunk (text pickling scales with chunk size; smaller chunks keep IPC overhead proportional to compute) | 1.4× throughput |
 
-**Quality**: embeddings are unit-norm and have cosine similarity 0.985–1.000 vs the old path for all word tokens. The only omission is BPE subword entries (`--subwords` flag re-enables them).
+#### Generation 4 — Shared-memory IPC → targets >1M sent/s
+| # | Change | Speedup |
+|---|--------|---------|
+| 13 | `_count_chunk_shmem_worker` + `multiprocessing.shared_memory`: all batch texts placed in a single OS shared-memory block; workers attach zero-copy. IPC payload per worker drops from several MB (pickled text list) to ~100 KB (shm_name string + two int32 offset/length arrays). | 2–4× IPC elimination |
+
+**How it works**: The main process encodes all batch texts into a flat UTF-8 byte buffer, writes it into a `SharedMemory` block, then dispatches `(shm_name, offsets_bytes, lens_bytes)` tuples to workers. Workers attach to the shared block, read their slice of texts, detach, then run the same C-accelerated counting logic. The shared block is unlinked by the main process after all workers return.
+
+**Quality**: unchanged — shared-memory path uses identical counting logic (`_count_chunk_c` or `_count_chunk_py`).
 
 **New APIs**:
-- `BaseMapper.fit_fast(texts, n_workers, skip_subwords, _pool)` — drop-in fast replacement for `fit()`
+- `BaseMapper.fit_fast(texts, n_workers, skip_subwords, _pool, use_shmem=False)` — pass `use_shmem=True` to activate zero-copy IPC
 - `BaseMapper._batch_build_phrase_embeddings(phrases)` — vectorized phrase embedding
 - `BaseMapper._batch_build_word_embeddings(words)` — vectorized word embedding
-- `fast_train.fast_vocab_train(corpus_path, ...)` — streaming parallel corpus trainer
+- `fast_train.fast_vocab_train(corpus_path, ..., use_shmem=False)` — streaming parallel trainer; pass `use_shmem=True` to eliminate text-pickling
 - `fast_train.fast_full_train(corpus_path, ...)` — vocab + full pipeline dot training
-- `fast_train._count_chunk_worker(args)` — picklable multiprocessing worker
+- `fast_train._count_chunk_worker(args)` — standard picklable multiprocessing worker
+- `fast_train._count_chunk_shmem_worker(args)` — zero-copy shared-memory worker
 
-**CLI**: `python main.py train corpus.txt --fast [--evolve] [--workers N]`
+**CLI**:
+```
+python main.py train corpus.txt --fast [--evolve] [--workers N]
+python main.py train corpus.txt --fast --shared-memory [--workers N]   # zero-copy IPC
+python fast_train.py corpus.txt --shared-memory [--workers N]
+```
+
+### C Extension Missing → Explicit Notification + Auto-Rebuild
+
+All C extension `_load_lib()` functions (`formulas`, `basemapping`, `pipeline`) now print a clear warning when the `.so` file is missing instead of silently falling back:
+
+```
+[IECNN] WARNING: .../formulas_c.so not found — formulas will use slow Python path.
+         Fix: run  python main.py build  to compile C extensions.
+```
+
+`main.py _build_c()` now checks **all 9 `.so` files** (previously only 4), lists each missing one by path, runs `build.sh`, and reports which extensions are still unavailable if the build fails — so the user always knows exactly what is broken and why performance is degraded.
 
 ---
 

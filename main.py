@@ -14,10 +14,14 @@ Usage:
   python main.py prune [--dry-run]      # compact the brain (drop dead dots + orphans)
                        [--min-outcomes N] [--min-age N]
   python main.py train <file> [--limit N] [--evolve] [--causal] [--prune-every N]
+                       [--fast] [--workers N] [--shared-memory]
                                         # vocab-only by default; --evolve runs
                                         # full pipeline; --causal runs
                                         # next-token prediction training;
-                                        # --prune-every keeps disk size bounded
+                                        # --prune-every keeps disk size bounded;
+                                        # --shared-memory (with --fast) eliminates
+                                        # text-pickling IPC via shared memory,
+                                        # targeting >1M sent/s throughput
   python main.py demo                   # run the original 6-example showcase
   python main.py build                  # compile C extensions
 
@@ -50,22 +54,45 @@ BAR             = "─" * 66
 PERSISTENCE     = "global_brain.pkl"
 
 
+# ── All C extension shared libraries ─────────────────────────────────
+_ALL_SO_FILES = [
+    "formulas/formulas_c.so",
+    "basemapping/basemapping_c.so",
+    "aim/aim_c.so",
+    "convergence/convergence_c.so",
+    "pruning/pruning_c.so",
+    "neural_dot/neural_dot_c.so",
+    "decoding/decoder_c.so",
+    "fast_count_c.so",
+    "pipeline/pipeline_c.so",
+]
+
 # ── Build C extensions ────────────────────────────────────────────────
 def _build_c(force: bool = False):
     import subprocess
-    need = force or not all(os.path.exists(p) for p in [
-        "formulas/formulas_c.so", "basemapping/basemapping_c.so",
-        "aim/aim_c.so", "convergence/convergence_c.so",
-    ])
-    if not need:
+    missing = [p for p in _ALL_SO_FILES if not os.path.exists(p)]
+    if not force and not missing:
         return
-    print("[IECNN] Compiling C extensions...")
+
+    if missing:
+        print("[IECNN] Missing C extensions:")
+        for p in missing:
+            print(f"  ✗  {p}")
+
+    print("[IECNN] Compiling C extensions (build.sh)...")
     result = subprocess.run(["bash", "build.sh"], capture_output=True, text=True)
     if result.returncode != 0:
-        print(f"[IECNN] C build warning:\n{result.stderr.strip()}")
-        print("[IECNN] Continuing with pure Python fallbacks.")
+        print(f"[IECNN] Build FAILED:\n{result.stderr.strip()}")
+        still_missing = [p for p in _ALL_SO_FILES if not os.path.exists(p)]
+        if still_missing:
+            print("[IECNN] The following C extensions are still unavailable:")
+            for p in still_missing:
+                print(f"  ✗  {p}")
+            print("[IECNN] Performance will be significantly degraded without C acceleration.")
+            print("[IECNN] Ensure gcc/openmp are installed then re-run: python main.py build")
     else:
-        print("[IECNN] C extensions compiled successfully.")
+        built = [p for p in _ALL_SO_FILES if os.path.exists(p)]
+        print(f"[IECNN] C extensions ready: {len(built)}/{len(_ALL_SO_FILES)}")
 
 
 # Minimal seed corpus used only when no global_brain.pkl exists yet, so that
@@ -250,7 +277,8 @@ def cmd_prune(dry_run: bool = False, min_outcomes: int = 2, min_age_gens: int = 
 
 def cmd_train(filepath: str, limit: int = 0, evolve: bool = False,
               causal: bool = False, prune_every: int = 0,
-              fast: bool = False, workers: int = None):
+              fast: bool = False, workers: int = None,
+              shared_memory: bool = False):
     _build_c()
     if not os.path.exists(filepath):
         print(f"[IECNN] Corpus not found: {filepath}")
@@ -284,12 +312,14 @@ def cmd_train(filepath: str, limit: int = 0, evolve: bool = False,
             )
         else:
             print(f"[IECNN] Fast vocab training: {filepath}  "
-                  f"(workers={n_workers})")
+                  f"(workers={n_workers}"
+                  f"{', shmem' if shared_memory else ''})")
             _ft.fast_vocab_train(
                 corpus_path=filepath,
                 brain_path=PERSISTENCE,
                 n_workers=n_workers,
                 verbose=True,
+                use_shmem=shared_memory,
             )
         return
 
@@ -532,10 +562,11 @@ if __name__ == "__main__":
         filepath = args[1]
         limit = 0
         prune_every = 0
-        evolve    = "--evolve"  in args
-        causal    = "--causal"  in args
-        fast      = "--fast"    in args
-        workers   = None
+        evolve         = "--evolve"         in args
+        causal         = "--causal"         in args
+        fast           = "--fast"           in args
+        shared_memory  = "--shared-memory"  in args
+        workers        = None
         if "--limit" in args:
             i = args.index("--limit")
             if i + 1 < len(args):
@@ -554,6 +585,7 @@ if __name__ == "__main__":
                 try: workers = int(args[i+1])
                 except ValueError: workers = None
         cmd_train(filepath, limit=limit, evolve=evolve, causal=causal,
-                  prune_every=prune_every, fast=fast, workers=workers)
+                  prune_every=prune_every, fast=fast, workers=workers,
+                  shared_memory=shared_memory)
     else:
         print(__doc__)

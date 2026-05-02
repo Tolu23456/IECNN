@@ -30,6 +30,14 @@ def _load_lib():
     _lib_check_done = True
     here    = os.path.dirname(os.path.abspath(__file__))
     so_path = os.path.join(here, "formulas_c.so")
+    if not os.path.exists(so_path):
+        import sys as _sys
+        print(
+            f"[IECNN] WARNING: {so_path} not found — formulas will use slow Python path.\n"
+            f"         Fix: run  python main.py build  to compile C extensions.",
+            file=_sys.stderr,
+        )
+        return _lib
     if os.path.exists(so_path):
         try:
             lib = ctypes.CDLL(so_path)

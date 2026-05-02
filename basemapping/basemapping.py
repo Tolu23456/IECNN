@@ -66,6 +66,14 @@ def _load_lib():
     _lib_check_done = True
     here = os.path.dirname(os.path.abspath(__file__))
     so_path = os.path.join(here, "basemapping_c.so")
+    if not os.path.exists(so_path):
+        import sys as _sys
+        print(
+            f"[IECNN] WARNING: {so_path} not found — BaseMapper will use slow Python path.\n"
+            f"         Fix: run  python main.py build  to compile C extensions.",
+            file=_sys.stderr,
+        )
+        return _lib
     if os.path.exists(so_path):
         try:
             _lib = ctypes.CDLL(so_path)
@@ -376,7 +384,8 @@ class BaseMapper:
         return self
 
     def fit_fast(self, texts: List[str], n_workers: Optional[int] = None,
-                 skip_subwords: bool = True, _pool=None) -> "BaseMapper":
+                 skip_subwords: bool = True, _pool=None,
+                 use_shmem: bool = False) -> "BaseMapper":
         """
         Ultra-fast parallel vocabulary fitting — ~100-400x faster than fit().
 
@@ -393,14 +402,22 @@ class BaseMapper:
         (rarely impacts downstream quality on corpora ≥ 10k sentences).
 
         Args:
-            _pool: Optional pre-created multiprocessing.Pool for reuse across
-                   batches (avoids the ~70ms per-batch spawn overhead).
+            _pool:     Optional pre-created multiprocessing.Pool for reuse across
+                       batches (avoids the ~70ms per-batch spawn overhead).
+            use_shmem: Route IPC through multiprocessing.shared_memory instead of
+                       pickle.  Eliminates text-pickling overhead entirely; only
+                       the shared-memory name + tiny int32 offset/length arrays
+                       are sent through the pipe (~100 KB vs several MB per batch).
+                       Targets >1 M sent/s on modern hardware.
         """
         import multiprocessing as mp
-        from fast_train import _count_chunk_worker
+        from fast_train import _count_chunk_worker, _count_chunk_shmem_worker, _SHMEM_AVAILABLE
 
         if n_workers is None:
             n_workers = min(mp.cpu_count(), 8)
+
+        if use_shmem and not _SHMEM_AVAILABLE:
+            use_shmem = False
 
         # ── 1. Parallel tokenization + counting ───────────────────────
         # In fast mode, cap ngrams at bigrams (2,2).
@@ -408,6 +425,7 @@ class BaseMapper:
         # a 45x larger IPC payload and 35x slower merge with negligible quality
         # difference for phrase discovery (bigrams cover >95% of useful phrases).
         fast_ngram_range = (self.ngram_range[0], min(self.ngram_range[1], 2))
+        ng_lo, ng_hi = fast_ngram_range
 
         # Optimal chunk size: ~12.5k sentences per task gives the best balance
         # between text-pickling IPC cost (which scales with chunk size) and
@@ -417,19 +435,68 @@ class BaseMapper:
         OPTIMAL_CHUNK = 12_500
         chunk_size = max(1_000, min(OPTIMAL_CHUNK, (len(texts) + n_workers - 1) // n_workers))
 
-        chunks = [
-            (texts[i:i + chunk_size], fast_ngram_range, self.cooc_window, skip_subwords)
-            for i in range(0, len(texts), chunk_size)
-        ]
+        if use_shmem:
+            # ── Shared-memory IPC path ─────────────────────────────────
+            # Build a flat UTF-8 byte buffer of all texts, place it in a
+            # SharedMemory block, then send only (name, offsets, lengths) to
+            # each worker — zero text pickling.
+            from multiprocessing.shared_memory import SharedMemory
+            encoded = [t.encode("utf-8") for t in texts]
+            total_bytes = sum(len(e) for e in encoded)
 
-        if _pool is not None:
-            # Reuse the caller's persistent pool (no spawn overhead)
-            results = _pool.map(_count_chunk_worker, chunks)
-        elif n_workers > 1 and len(chunks) > 1:
-            with mp.Pool(n_workers) as pool:
-                results = pool.map(_count_chunk_worker, chunks)
+            shm = SharedMemory(create=True, size=max(total_bytes, 1))
+            offsets_list: List[int] = []
+            lens_list: List[int] = []
+            pos = 0
+            for e in encoded:
+                offsets_list.append(pos)
+                ln = len(e)
+                lens_list.append(ln)
+                if ln:
+                    shm.buf[pos:pos + ln] = e
+                pos += ln
+
+            offs_arr = np.array(offsets_list, dtype=np.int32)
+            lens_arr = np.array(lens_list,    dtype=np.int32)
+
+            shmem_chunks = [
+                (
+                    shm.name,
+                    total_bytes,
+                    offs_arr[i:i + chunk_size].tobytes(),
+                    lens_arr[i:i + chunk_size].tobytes(),
+                    ng_lo,
+                    ng_hi,
+                )
+                for i in range(0, len(texts), chunk_size)
+            ]
+
+            try:
+                if _pool is not None:
+                    results = _pool.map(_count_chunk_shmem_worker, shmem_chunks)
+                elif n_workers > 1 and len(shmem_chunks) > 1:
+                    with mp.Pool(n_workers) as pool:
+                        results = pool.map(_count_chunk_shmem_worker, shmem_chunks)
+                else:
+                    results = [_count_chunk_shmem_worker(c) for c in shmem_chunks]
+            finally:
+                shm.close()
+                shm.unlink()
         else:
-            results = [_count_chunk_worker(c) for c in chunks]
+            # ── Standard pickle IPC path (default) ────────────────────
+            chunks = [
+                (texts[i:i + chunk_size], fast_ngram_range, self.cooc_window, skip_subwords)
+                for i in range(0, len(texts), chunk_size)
+            ]
+
+            if _pool is not None:
+                # Reuse the caller's persistent pool (no spawn overhead)
+                results = _pool.map(_count_chunk_worker, chunks)
+            elif n_workers > 1 and len(chunks) > 1:
+                with mp.Pool(n_workers) as pool:
+                    results = pool.map(_count_chunk_worker, chunks)
+            else:
+                results = [_count_chunk_worker(c) for c in chunks]
 
         # ── 2. Merge counters from all workers ────────────────────────
         for wf, nf, sf, cooc in results:

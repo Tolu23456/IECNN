@@ -37,6 +37,13 @@ def _load_lib_p():
         return _lib_p
     here = os.path.dirname(os.path.abspath(__file__))
     so_path = os.path.join(here, "pipeline_c.so")
+    if not os.path.exists(so_path):
+        print(
+            f"[IECNN] WARNING: {so_path} not found — pipeline will use slow Python path.\n"
+            f"         Fix: run  python main.py build  to compile C extensions.",
+            file=sys.stderr,
+        )
+        return _lib_p
     if os.path.exists(so_path):
         try:
             _lib_p = ctypes.CDLL(so_path)
