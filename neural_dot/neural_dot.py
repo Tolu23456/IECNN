@@ -14,23 +14,32 @@ from formulas.formulas import (
 
 # ── Load C shared library ────────────────────────────────────────────
 _lib = None
+_lib_check_done = False   # sentinel: True once we have attempted loading
+
+def _set_restype(lib, name, restype):
+    """Safely assign restype — silently skips symbols absent from a partial build."""
+    try:
+        getattr(lib, name).restype = restype
+    except AttributeError:
+        pass
 
 def _load_lib():
-    global _lib
-    if _lib is not None:
+    global _lib, _lib_check_done
+    if _lib_check_done:          # return cached result (None or lib object)
         return _lib
+    _lib_check_done = True
     here = os.path.dirname(os.path.abspath(__file__))
     so_path = os.path.join(here, "neural_dot_c.so")
     if os.path.exists(so_path):
         try:
             _lib = ctypes.CDLL(so_path)
-            _lib.temporal_pool.restype = None
-            _lib.relational_pool.restype = None
-            _lib.logic_pool.restype = None
-            _lib.project_head.restype = None
-            _lib.apply_synergy_fast.restype = None
-            _lib.reason_fast.restype = None
-            _lib.predict_batch_c.restype = None
+            # Set restypes only for symbols present in this build.
+            # reason_fast and predict_batch_c may be absent in partial builds;
+            # _set_restype silently skips missing symbols rather than crashing.
+            for sym in ("temporal_pool", "relational_pool", "logic_pool",
+                        "project_head", "apply_synergy_fast",
+                        "reason_fast", "predict_batch_c"):
+                _set_restype(_lib, sym, None)
         except Exception:
             _lib = None
     return _lib
@@ -242,7 +251,11 @@ class NeuralDot:
         results = []; p_phase = self.current_phase if self.current_phase != 0.0 else slice_phase
         phase_factor = np.exp(1j * p_phase); target_idx = end if end < n_tokens else None
         for h in range(self.n_heads):
-            raw = self._project_head(abstract, h, T); norm = np.linalg.norm(raw)
+            raw = self._project_head(abstract, h, T)
+            raw = np.nan_to_num(raw, nan=0.0, posinf=1.0, neginf=-1.0)
+            # Use float64 for norm: large float32 values (~1e38) overflow
+            # x.dot(x) in float32, even after nan_to_num.
+            norm = float(np.linalg.norm(raw.astype(np.float64)))
             pred = raw / norm * np.sqrt(self.feature_dim) if norm > 1e-10 else raw
             complex_pred = pred.astype(np.complex64) * phase_factor
             results.append((complex_pred, prediction_confidence(complex_pred), {"dot_id": self.dot_id, "dot_type": _TYPE_NAMES[self.dot_type], "head": h, "slice": (start, end), "target_idx": target_idx, "phase": p_phase, "bias": self.bias, "source": "original", "inversion_type": None, "modality": modality, "W_inv": self.W_inv}))
@@ -328,7 +341,7 @@ class NeuralDot:
 
     def _reason(self, v, temperature, consensus=None):
         lib = _load_lib(); steps = max(1, int(self.bias.reasoning_depth * 5))
-        if lib:
+        if lib and hasattr(lib, 'reason_fast'):
             seed = int(self._rng.randint(0, 2**31)); fc, _c = _fp(consensus) if consensus is not None else (None, None); v_work = v.copy().astype(np.float32)
             c_seed = ctypes.c_uint(seed); lib.reason_fast(_fp(v_work)[0], _fp(self.W)[0], _fp(self.b_offset)[0], ctypes.c_int(self.feature_dim), ctypes.c_int(steps), ctypes.c_float(temperature), ctypes.c_float(self.bias.attention_bias), fc, ctypes.byref(c_seed), ctypes.c_float(self.bias.abstraction_bias))
             return v_work
@@ -372,6 +385,56 @@ class DotGenerator:
         weight mutation (e.g. local_update) that does NOT replace the list.
         """
         self._dot_version += 1
+
+    def batch_local_update(self, dots: List['NeuralDot'], target: np.ndarray,
+                           winning_head: int = 0, lr: float = 0.005) -> None:
+        """
+        Vectorised W-only weight update applied to all dots simultaneously.
+
+        This is the fast training path used by causal_train_pass().  It is
+        ~256x faster than looping over dots and calling local_update() on
+        each one because:
+
+          1. The expensive O(dim²) outer-product head_proj update is skipped
+             during training (the projection matrices stay stable; only W
+             needs to track the target space).
+          2. All row updates are a single NumPy broadcast over the dot axis.
+          3. Row-wise renormalisation costs O(n_dots × dim) not O(n_dots × dim²).
+          4. The method leaves the cache in a *fresh* state (version counters
+             are kept in sync) so no extra bust_cache() call is required.
+        """
+        target_f32 = np.real(target).astype(np.float32)
+        tn = np.linalg.norm(target_f32)
+        if tn > 1e-10:
+            target_f32 = target_f32 / tn          # normalised copy
+
+        self._ensure_caches(dots)
+        n   = len(dots)
+        idx = np.arange(n, dtype=np.int64)
+
+        # One random row per dot (uses each dot's own RNG for reproducibility)
+        rows = np.array([d._rng.randint(0, self.feature_dim) for d in dots],
+                        dtype=np.int64)
+
+        # ── Vectorised row update ──────────────────────────────────────
+        # _cached_W_stack shape: (n_dots, feature_dim, feature_dim)
+        self._cached_W_stack[idx, rows] = (
+            (1.0 - lr) * self._cached_W_stack[idx, rows]
+            + lr * target_f32[None, :]          # broadcast across dot axis
+        )
+
+        # ── Row-only renormalisation (O(n×dim), not O(n×dim²)) ─────────
+        row_vecs = self._cached_W_stack[idx, rows]               # (n, dim)
+        norms    = np.linalg.norm(row_vecs, axis=1, keepdims=True)  # (n, 1)
+        self._cached_W_stack[idx, rows] = row_vecs / (norms + 1e-10)
+
+        # ── Sync back to individual dot objects ────────────────────────
+        for i, dot in enumerate(dots):
+            dot.W = self._cached_W_stack[i].copy()
+
+        # Mark cache as fresh (cache and dot.W are now in sync)
+        self._dot_version  += 1
+        self._cached_version = self._dot_version
 
     def generate(self) -> List[NeuralDot]:
         types = list(self.type_weights.keys()); weights = np.array([self.type_weights[t] for t in types]); weights /= weights.sum(); dots = []

@@ -33,10 +33,13 @@ from basemapping.basemapping import BaseMap
 
 # ── Load C shared library ─────────────────────────────────────────────
 _lib = None
+_lib_check_done = False
 
 def _load_lib():
-    global _lib
-    if _lib is not None: return _lib
+    global _lib, _lib_check_done
+    if _lib_check_done:
+        return _lib
+    _lib_check_done = True
     here = os.path.dirname(os.path.abspath(__file__))
     so   = os.path.join(here, "aim_c.so")
     if os.path.exists(so):
