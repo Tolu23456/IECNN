@@ -27,7 +27,10 @@ $GCC $FLAGS -o decoding/decoder_c.so decoding/decoder.c
 echo "[build] Compiling fast_count.c → fast_count_c.so"
 $GCC $FLAGS -o fast_count_c.so fast_count.c
 
+echo "[build] Compiling fast_scan.c → fast_scan_c.so"
+$GCC $FLAGS -o fast_scan_c.so fast_scan.c
+
 echo "[build] All C extensions built successfully."
 
 echo "[build] Compiling pipeline.c → pipeline/pipeline_c.so"
-$GCC $FLAGS -I. -o pipeline/pipeline_c.so pipeline/pipeline_c.c neural_dot/neural_dot_c.c convergence/convergence.c formulas/formulas.c
+$GCC $FLAGS -I. -o pipeline/pipeline_c.so pipeline/pipeline_c.c neural_dot/neural_dot_c.c convergence/convergence.c formulas/formulas.c aim/aim.c

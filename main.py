@@ -64,6 +64,7 @@ _ALL_SO_FILES = [
     "neural_dot/neural_dot_c.so",
     "decoding/decoder_c.so",
     "fast_count_c.so",
+    "fast_scan_c.so",
     "pipeline/pipeline_c.so",
 ]
 
@@ -278,7 +279,7 @@ def cmd_prune(dry_run: bool = False, min_outcomes: int = 2, min_age_gens: int = 
 def cmd_train(filepath: str, limit: int = 0, evolve: bool = False,
               causal: bool = False, prune_every: int = 0,
               fast: bool = False, workers: int = None,
-              shared_memory: bool = False):
+              shared_memory: bool = False, ultra: bool = False):
     _build_c()
     if not os.path.exists(filepath):
         print(f"[IECNN] Corpus not found: {filepath}")
@@ -294,6 +295,18 @@ def cmd_train(filepath: str, limit: int = 0, evolve: bool = False,
                 out.append(line)
                 if cap and len(out) >= cap: break
         return out
+
+    if ultra:
+        # ── OMP single-call corpus scan — maximum counting throughput ───
+        import fast_train as _ft
+        print(f"[IECNN] OMP ultra-fast vocab scan: {filepath}")
+        _ft.fast_vocab_train_omp(
+            corpus_path=filepath,
+            brain_path=PERSISTENCE,
+            n_threads=0,
+            verbose=True,
+        )
+        return
 
     if fast:
         # ── Ultra-fast parallel training path ──────────────────────────
@@ -566,6 +579,7 @@ if __name__ == "__main__":
         causal         = "--causal"         in args
         fast           = "--fast"           in args
         shared_memory  = "--shared-memory"  in args
+        ultra          = "--ultra"          in args
         workers        = None
         if "--limit" in args:
             i = args.index("--limit")
@@ -586,6 +600,6 @@ if __name__ == "__main__":
                 except ValueError: workers = None
         cmd_train(filepath, limit=limit, evolve=evolve, causal=causal,
                   prune_every=prune_every, fast=fast, workers=workers,
-                  shared_memory=shared_memory)
+                  shared_memory=shared_memory, ultra=ultra)
     else:
         print(__doc__)

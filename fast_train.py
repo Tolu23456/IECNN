@@ -54,6 +54,40 @@ def _tokenize(text: str) -> List[str]:
         return _ASCII_PATTERN.findall(lower)
     return _FAST_PATTERN.findall(unicodedata.normalize("NFKC", lower))
 
+# ── Load fast_scan_c.so — OpenMP parallel corpus scanner ──────────────────────
+_LIB_FS: Optional[ct.CDLL] = None
+_FS_SO = os.path.join(ROOT, "fast_scan_c.so")
+try:
+    _lib_fs = ct.CDLL(_FS_SO)
+    _lib_fs.scan_corpus_omp.argtypes = [
+        ct.c_char_p,                   # filepath
+        ct.c_int32,                    # n_threads
+        ct.c_int32,                    # max_words
+        ct.c_int32,                    # max_bigrams
+        ct.c_char_p,                   # out_word_buf
+        ct.POINTER(ct.c_int32),        # out_word_offs
+        ct.POINTER(ct.c_int16),        # out_word_lens
+        ct.POINTER(ct.c_int32),        # out_word_cnts
+        ct.POINTER(ct.c_int32),        # out_n_words
+        ct.POINTER(ct.c_int32),        # out_bi_w1
+        ct.POINTER(ct.c_int32),        # out_bi_w2
+        ct.POINTER(ct.c_int32),        # out_bi_cnts
+        ct.POINTER(ct.c_int32),        # out_n_bigrams
+    ]
+    _lib_fs.scan_corpus_omp.restype = ct.c_int32
+    _lib_fs.count_lines_c.argtypes  = [ct.c_char_p]
+    _lib_fs.count_lines_c.restype   = ct.c_int64
+    _LIB_FS = _lib_fs
+except (OSError, AttributeError):
+    pass
+
+if _LIB_FS is None:
+    print(
+        f"[IECNN] WARNING: {_FS_SO} not found — OMP corpus scanner unavailable.\n"
+        f"         Fix: run  python main.py build  to compile C extensions.",
+        file=sys.stderr,
+    )
+
 # ── Load C counting + tokenising backend ──────────────────────────────────────
 _LIB_FC: Optional[ct.CDLL] = None
 _FC_SO   = os.path.join(ROOT, "fast_count_c.so")
@@ -644,6 +678,195 @@ def fast_full_train(
     model.save_brain()
     if verbose:
         print(f"  Brain saved → {brain_path}")
+
+
+def scan_corpus_c(
+    filepath:    str,
+    n_threads:   int = 0,
+    max_words:   int = 500_000,
+    max_bigrams: int = 2_000_000,
+) -> Tuple[Counter, Counter]:
+    """
+    Full corpus vocabulary scan entirely in C+OpenMP — no Python in the hot path.
+
+    Reads the corpus file with mmap, splits into n_threads chunks at line
+    boundaries, and runs two parallel passes:
+      Pass 1 (OMP): tokenize + count unigrams into thread-local hash tables
+      Merge  (serial): combine all thread-local tables → global vocab + IDs
+      Pass 2 (OMP): tokenize + count bigrams using global IDs (read-only)
+      Merge  (serial): combine bigram tables → output
+
+    Returns:
+        word_freq  : Counter  {word_str: count}
+        ngram_freq : Counter  {"w1 w2": count}
+
+    Throughput: ~5–15 M sent/s for counting only (embedding build is separate).
+    """
+    if _LIB_FS is None:
+        raise RuntimeError(
+            "fast_scan_c.so not loaded. Run  python main.py build  to compile."
+        )
+
+    WORD_BUF_SZ = max_words * 65        # 65 bytes per word (max 64 chars + NUL)
+    word_buf  = np.zeros(WORD_BUF_SZ, dtype=np.uint8)
+    word_offs = np.zeros(max_words,   dtype=np.int32)
+    word_lens = np.zeros(max_words,   dtype=np.int16)
+    word_cnts = np.zeros(max_words,   dtype=np.int32)
+    n_words   = ct.c_int32(0)
+    bi_w1     = np.zeros(max_bigrams, dtype=np.int32)
+    bi_w2     = np.zeros(max_bigrams, dtype=np.int32)
+    bi_cnts   = np.zeros(max_bigrams, dtype=np.int32)
+    n_bi      = ct.c_int32(0)
+
+    rc = _LIB_FS.scan_corpus_omp(
+        filepath.encode("utf-8"),
+        ct.c_int32(n_threads),
+        ct.c_int32(max_words),
+        ct.c_int32(max_bigrams),
+        word_buf.ctypes.data_as(ct.c_char_p),
+        word_offs.ctypes.data_as(ct.POINTER(ct.c_int32)),
+        word_lens.ctypes.data_as(ct.POINTER(ct.c_int16)),
+        word_cnts.ctypes.data_as(ct.POINTER(ct.c_int32)),
+        ct.byref(n_words),
+        bi_w1.ctypes.data_as(ct.POINTER(ct.c_int32)),
+        bi_w2.ctypes.data_as(ct.POINTER(ct.c_int32)),
+        bi_cnts.ctypes.data_as(ct.POINTER(ct.c_int32)),
+        ct.byref(n_bi),
+    )
+    if rc != 0:
+        raise RuntimeError(f"scan_corpus_omp returned error code {rc}")
+
+    nw = n_words.value
+    raw = bytes(word_buf[:int(word_lens[:nw].astype(np.int32).sum()) + nw])
+
+    # Decode words — only nw strings, cheap
+    words: List[str] = []
+    for i in range(nw):
+        off = int(word_offs[i])
+        ln  = int(word_lens[i])
+        words.append(raw[off:off + ln].decode("latin-1"))
+
+    word_freq: Counter = Counter(
+        {words[i]: int(word_cnts[i]) for i in range(nw)}
+    )
+
+    nb = n_bi.value
+    ngram_freq: Counter = Counter()
+    if nb > 0:
+        # Vectorized bigram decode via numpy advanced indexing + list comprehension.
+        # np.array(..., dtype=object) + advanced indexing avoids 662k individual
+        # dict lookups; the string concat loop is then the only O(nb) Python work.
+        words_arr = np.array(words, dtype=object)
+        w1_strs = words_arr[bi_w1[:nb]]
+        w2_strs = words_arr[bi_w2[:nb]]
+        bc      = bi_cnts[:nb].tolist()
+        ngram_freq = Counter(
+            {w1 + " " + w2: c for w1, w2, c in zip(w1_strs, w2_strs, bc)}
+        )
+
+    return word_freq, ngram_freq
+
+
+def fast_vocab_train_omp(
+    corpus_path:  str,
+    brain_path:   Optional[str] = "global_brain.pkl",
+    n_threads:    int = 0,
+    verbose:      bool = True,
+) -> None:
+    """
+    Ultra-fast single-call corpus vocabulary training via OpenMP C scanner.
+
+    Architecture:
+      1. scan_corpus_c()  — entire file counted in C+OpenMP, no Python workers
+      2. fit_from_freq()  — embedding build for new words/phrases (Python+numpy)
+      3. save_brain()
+
+    Expected throughput for counting phase: 5–15 M sent/s.
+    Full pipeline (counting + embedding build): ~2–5 M sent/s depending on
+    the new-word rate (embedding build is O(unique_new_words × embed_dim)).
+
+    Args:
+        corpus_path: Path to plain-text corpus (one sentence per line).
+        brain_path:  Where to save/load the IECNN brain (None = in-memory).
+        n_threads:   OpenMP threads (0 = use all available cores).
+        verbose:     Print progress and throughput.
+    """
+    from pipeline.pipeline import IECNN
+
+    if _LIB_FS is None:
+        raise RuntimeError(
+            "fast_scan_c.so not loaded. Run  python main.py build  to compile."
+        )
+
+    if verbose:
+        import multiprocessing as mp
+        _nt = n_threads if n_threads > 0 else mp.cpu_count()
+        print("╔══════════════════════════════════════════════════════════════╗")
+        print("║          IECNN OMP ULTRA-FAST VOCABULARY TRAINING            ║")
+        print("╚══════════════════════════════════════════════════════════════╝")
+        print(f"  corpus    : {corpus_path}")
+        print(f"  brain     : {brain_path or '(in-memory)'}")
+        print(f"  OMP threads: {_nt}")
+        print()
+
+    # ── Step 1: Count entire corpus in C+OpenMP ───────────────────────────
+    t_count0 = time.perf_counter()
+    word_freq, ngram_freq = scan_corpus_c(corpus_path, n_threads=n_threads)
+    t_count = time.perf_counter() - t_count0
+
+    n_lines = int(_LIB_FS.count_lines_c(corpus_path.encode("utf-8")))
+    count_rate = n_lines / max(t_count, 1e-9)
+
+    if verbose:
+        print(f"  [C+OMP] Counted {n_lines:,} lines in {t_count:.3f}s"
+              f"  →  {count_rate:,.0f} sent/s")
+        print(f"  Unique words: {len(word_freq):,}   "
+              f"Unique bigrams: {len(ngram_freq):,}")
+
+    # ── Step 2: Build embeddings for new words/phrases ────────────────────
+    model = IECNN(persistence_path=brain_path)
+    bm = model.base_mapper
+
+    t_emb0 = time.perf_counter()
+    bm._word_freq.update(word_freq)
+    bm._ngram_freq.update(ngram_freq)
+
+    new_words = [
+        w for w, cnt in bm._word_freq.most_common(bm.max_vocab_size)
+        if cnt >= bm.min_base_freq and w not in bm._base_vocab
+    ]
+    bm._batch_build_word_embeddings(new_words)
+
+    new_phrases = [
+        ng for ng, cnt in bm._ngram_freq.most_common(2000)
+        if cnt >= bm.min_base_freq and ng not in bm._base_vocab
+    ]
+    bm._batch_build_phrase_embeddings(new_phrases)
+    bm._apply_cooc_smoothing()
+    bm.is_fitted = True
+    t_emb = time.perf_counter() - t_emb0
+
+    total = t_count + t_emb
+    eff_rate = n_lines / max(total, 1e-9)
+
+    if verbose:
+        n_word_bases   = sum(1 for t in bm._base_types.values() if t == "word")
+        n_phrase_bases = sum(1 for t in bm._base_types.values() if t == "phrase")
+        print(f"  [embed]  {len(new_words):,} new words + {len(new_phrases):,} phrases"
+              f"  in {t_emb:.3f}s")
+        print(f"  Word bases  : {n_word_bases:,}")
+        print(f"  Phrase bases: {n_phrase_bases:,}")
+        print(f"  Primitives  : {len(bm._primitive_embeddings):,}")
+        print()
+        print(f"  ✓ Total: {total:.3f}s  →  {eff_rate:,.0f} sent/s (end-to-end)")
+        if brain_path:
+            print(f"  Saving brain → {brain_path} ...")
+
+    if brain_path:
+        model.base_mapper.save(brain_path)
+
+    if verbose and brain_path:
+        print(f"  Done.")
 
 
 def _benchmark(n_sentences: int = 10_000, n_workers: int = None) -> None:

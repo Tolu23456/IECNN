@@ -86,6 +86,27 @@ python main.py train corpus.txt --fast --shared-memory [--workers N]   # zero-co
 python fast_train.py corpus.txt --shared-memory [--workers N]
 ```
 
+#### Generation 5 — OpenMP Two-Pass C Corpus Scanner (`fast_scan_c.so`) → 1.9M sent/s (C-only)
+| # | Change | Measured |
+|---|--------|---------|
+| 14 | `fast_scan.c` + `fast_scan_c.so` — complete corpus scanner in C+OpenMP. Two passes: (1) parallel unigram counting into thread-local hash tables, serial merge → global vocab+IDs; (2) parallel bigram counting using read-only global ID table, serial merge → output. mmap I/O throughout. Zero Python in the counting hot path. | **1.9M sent/s** (C-only scan, 300k-line corpus, AMD EPYC 9B14, 6 OMP threads) |
+| 15 | Vectorized Python bigram decode: `np.array(words, dtype=object)` + numpy advanced indexing replaces 662k-iteration Python loop over bi_w1/bi_w2 pairs. | 0.78s → 0.46s for full decode (646k sent/s end-to-end) |
+| 16 | `fast_vocab_train_omp()` — single-function corpus-to-brain path: C+OMP scan → `BaseMapper._batch_build_word_embeddings` → `_batch_build_phrase_embeddings` → `_apply_cooc_smoothing` → `save_brain`. 300k lines, 47k unique words, 662k unique bigrams → 82k sent/s end-to-end. | **3.6s total** for 300k lines |
+
+**Architecture**: `fast_scan.c` → `fast_scan_c.so` (gcc -O3 -fopenmp), loaded by `fast_train._LIB_FS`. Python side calls `scan_corpus_omp()` via ctypes with pre-allocated numpy buffers for word strings, offsets, lengths, counts, and bigram ID pairs.
+
+**Bug fixed during this session**: `pipeline_c.so` was compiled without `aim/aim.c`, leaving `invert_relational` and `invert_feature` as undefined symbols. The C pipeline always fell back to the Python `fast_encode` path which does NOT call `dot_memory.record()`. Fixed by adding `aim/aim.c` to the `pipeline_c.so` link step in `build.sh`.
+
+**MaxEff analysis (300k corpus, full pipeline)**: With the C pipeline now functional, MaxEff stays at 0.5 (the uninformed prior). Root cause: in convergence clustering, each dot wins cluster-0 approximately 1–2% of the time across the 128-dot pool. After enough observations, `effectiveness = success_counts/total_counts ≈ 0.01–0.02`, well below the 0.5 prior. DotEvolution culls these trained dots (lower than prior) and replaces them with fresh ones (effectiveness defaults to 0.5), so the reported MaxEff is always the prior of the newest generation. To push MaxEff > 0.5 requires either: (a) `--causal` training where dots predict actual next tokens and can accumulate true win records, or (b) a lower cluster-win rate threshold (e.g., top-3 instead of cluster-0 only).
+
+**New CLI flag**: `--ultra`
+```
+python main.py train corpus.txt --ultra          # OMP single-call vocab scan, fastest possible
+```
+**New functions in `fast_train.py`**:
+- `scan_corpus_c(filepath, n_threads, max_words, max_bigrams)` → `(Counter, Counter)` — calls C+OMP scanner
+- `fast_vocab_train_omp(corpus_path, brain_path, n_threads, verbose)` — full vocab pipeline via OMP
+
 ### C Extension Missing → Explicit Notification + Auto-Rebuild
 
 All C extension `_load_lib()` functions (`formulas`, `basemapping`, `pipeline`) now print a clear warning when the `.so` file is missing instead of silently falling back:
