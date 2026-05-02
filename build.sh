@@ -24,6 +24,9 @@ $GCC $FLAGS -I. -o neural_dot/neural_dot_c.so neural_dot/neural_dot.c formulas/f
 echo "[build] Compiling decoder.c → decoding/decoder_c.so"
 $GCC $FLAGS -o decoding/decoder_c.so decoding/decoder.c
 
+echo "[build] Compiling fast_count.c → fast_count_c.so"
+$GCC $FLAGS -o fast_count_c.so fast_count.c
+
 echo "[build] All C extensions built successfully."
 
 echo "[build] Compiling pipeline.c → pipeline/pipeline_c.so"

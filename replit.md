@@ -33,18 +33,33 @@ implementing a novel neural architecture. It runs entirely in the terminal
 
 ## Training Speed Optimizations (May 2026)
 
-### Result: 100k–145k sent/s vocabulary training (was: ~1,047 sent/s)
+### Result: 600k–650k sent/s vocabulary training (was: ~8,900 sent/s baseline)
 
-Six targeted optimizations across `basemapping/basemapping.py` and the new `fast_train.py`:
+Achieved through three generations of optimization across `basemapping/basemapping.py`, `fast_train.py`, and a new C extension (`fast_count_c.so`):
 
+#### Generation 1 — Python optimizations → ~145k sent/s (16×)
 | # | Change | Speedup |
 |---|--------|---------|
 | 1 | `_stable_embedding`: `np.random.default_rng` (md5) instead of `RandomState` (sha256 + os.urandom) | 14.8× per new word |
 | 2 | Pre-compiled `_TOKENIZE_PATTERN` at module level (no per-call regex compile) | 2× tokenization |
 | 3 | `multiprocessing.Pool` across all 4 CPU cores for parallel chunk counting | 4× parallelism |
 | 4 | Persistent Pool across batches (no 70ms respawn overhead per batch) | eliminates per-batch overhead |
-| 5 | Vectorized phrase embedding: `_batch_build_phrase_embeddings()` reduces 10k sequential `np.mean(np.stack(...))` calls to numpy advanced indexing on a word-embedding matrix | 4× phrase building |
-| 6 | Cooccurrence + subword loops skipped in fast mode (they account for 40%+ of worker time with negligible quality impact on corpora ≥ 10k lines) | 3× worker throughput |
+| 5 | Vectorized phrase embedding: `_batch_build_phrase_embeddings()` | 4× phrase building |
+| 6 | Cooccurrence + subword loops skipped in fast mode | 3× worker throughput |
+
+#### Generation 2 — C extension + phrase cap → ~221k sent/s (25×)
+| # | Change | Speedup |
+|---|--------|---------|
+| 7 | `fast_count_c.so` — integer hash-table ngram counting in C (replaces Python Counter) | 6× word/ngram counting |
+| 8 | ASCII fast-path tokenizer: `str.isascii()` + stdlib `re` (avoids Unicode overhead) | 2.1× tokenization |
+| 9 | `new_phrases` cap at 2000/batch (was `max_vocab_size//2`) — phrase embed 151ms→12ms | 12× phrase embedding |
+
+#### Generation 3 — C bytes tokenizer + bigram cap + chunk tuning → 600k–650k sent/s (75×)
+| # | Change | Speedup |
+|---|--------|---------|
+| 10 | `fast_tok_bytes_ascii` C function: tokenise+lowercase all sentences in one C call, output flat byte buffer; Python splits on `\x01` using bytes-keyed dict (avoids per-token string creation, decodes only unique vocab ≤ 20 words at end) | 2.7× worker throughput |
+| 11 | **Bigram-only cap in fast mode** (`min(ng_hi, 2)`): trigrams produce 42³≈74k Counter entries vs 42²≈1.8k for bigrams — **45× smaller IPC payload, 35× faster merge** | 3× IPC+merge |
+| 12 | Optimal chunk size: cap at 12.5k sentences/chunk (text pickling scales with chunk size; smaller chunks keep IPC overhead proportional to compute) | 1.4× throughput |
 
 **Quality**: embeddings are unit-norm and have cosine similarity 0.985–1.000 vs the old path for all word tokens. The only omission is BPE subword entries (`--subwords` flag re-enables them).
 

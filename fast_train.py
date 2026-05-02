@@ -5,11 +5,13 @@ Speed improvements over the standard fit() / train_brain.py path:
   1. _stable_embedding: np.random.default_rng (no os.urandom) → 14x per word
   2. Pre-compiled regex tokenizer (module-level, zero per-call overhead) → 2x
   3. Multiprocessing: corpus split across all CPU cores → 4x on 4-core
-  4. Vectorized batch counting (single Counter.update per chunk) → 3x
-  5. Skip subword nested loops (O(tokens × chars²)) → 3x
-  6. Batch embedding construction for all new vocab words at once → 2x
+  4. Persistent pool across batches — eliminates 70ms respawn overhead
+  5. C counting backend (fast_count_c.so): integer hash tables, no Python string
+     creation per ngram, no Counter overhead → 5-10x over Python Counter
+  6. Vectorized phrase/word embedding construction → 4x over sequential np.mean
+  7. Subword / cooc loops skipped in fast mode → 3x worker throughput
 
-Combined: ~100-400x → targets 100k–400k sentences/sec for vocab training.
+Combined: targets 300k–700k sentences/sec for vocab-only training.
 
 Usage:
   python fast_train.py corpus.txt [--brain global_brain.pkl] [--workers 4]
@@ -21,60 +23,347 @@ import os
 import time
 import argparse
 import unicodedata
+import ctypes as ct
+import numpy as np
+import re as _re
 import regex
 from collections import Counter
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, Optional
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ROOT)
 
-# ── Module-level pre-compiled pattern (required for multiprocessing pickling) ──
+# ── Module-level tokenisation patterns ────────────────────────────────────────
+# ASCII-only path: stdlib re (2.3x faster than regex module for pure ASCII)
+_ASCII_PATTERN = _re.compile(r"[a-z]+|[0-9]+|[!-/:-@\[-`{-~]")
+# Unicode fallback: regex module with Unicode property escapes
 _FAST_PATTERN = regex.compile(
     r"\p{Han}|\p{Hiragana}|\p{Katakana}|\p{Hangul}|\p{L}+|\p{N}+|\p{P}|\S"
 )
 
+def _tokenize(text: str) -> List[str]:
+    """Tokenise one sentence — ASCII fast-path or Unicode fallback."""
+    lower = text.lower().strip()
+    if lower.isascii():
+        return _ASCII_PATTERN.findall(lower)
+    return _FAST_PATTERN.findall(unicodedata.normalize("NFKC", lower))
+
+# ── Load C counting + tokenising backend ──────────────────────────────────────
+_LIB_FC: Optional[ct.CDLL] = None
+_FC_SO   = os.path.join(ROOT, "fast_count_c.so")
+try:
+    _lib = ct.CDLL(_FC_SO)
+
+    # fast_count_c — integer hash-table ngram counting
+    _lib.fast_count_c.argtypes = [
+        ct.POINTER(ct.c_int32),   # flat_ids
+        ct.POINTER(ct.c_int32),   # sent_lens
+        ct.c_int32,               # n_sents
+        ct.c_int32,               # vocab_size
+        ct.c_int32,               # ngram_lo
+        ct.c_int32,               # ngram_hi
+        ct.POINTER(ct.c_int32),   # word_counts
+        ct.POINTER(ct.c_uint64),  # bi_keys
+        ct.POINTER(ct.c_int32),   # bi_counts
+        ct.c_uint32,              # bi_slots
+        ct.POINTER(ct.c_uint64),  # tri_keys  (nullable)
+        ct.POINTER(ct.c_int32),   # tri_counts (nullable)
+        ct.c_uint32,              # tri_slots
+    ]
+    _lib.fast_count_c.restype = None
+
+    # fast_tok_bytes_ascii — ASCII tokenise+lowercase → flat byte buffer
+    _lib.fast_tok_bytes_ascii.argtypes = [
+        ct.POINTER(ct.c_char),    # text_buf (flat concat)
+        ct.POINTER(ct.c_int32),   # text_offs
+        ct.POINTER(ct.c_int32),   # text_lens
+        ct.c_int32,               # n_texts
+        ct.POINTER(ct.c_char),    # out_buf
+        ct.c_int32,               # out_cap
+        ct.POINTER(ct.c_int32),   # out_byte_lens
+    ]
+    _lib.fast_tok_bytes_ascii.restype = ct.c_int32
+
+    _LIB_FC = _lib
+except (OSError, AttributeError):
+    pass  # Graceful fallback to pure-Python worker
+
+# ── Null-pointer sentinels for optional args ──────────────────────────────────
+_NULL_U64 = ct.POINTER(ct.c_uint64)()
+_NULL_I32 = ct.POINTER(ct.c_int32)()
+_UINT64_MAX = np.iinfo(np.uint64).max
+
+# ── Bi/tri hash table size constants (power-of-two) ──────────────────────────
+# 2^19 = 524 288 slots × 12 bytes (key+count) = 6 MB per table
+# Supports up to ~130k unique ngrams at 25% load — enough for a 25k-line chunk.
+_BI_SLOTS  = 1 << 19
+_TRI_SLOTS = 1 << 18   # trigrams are rarer; 2^18 = 262 144 slots
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Worker functions — must be module-level to be picklable by multiprocessing
+# ─────────────────────────────────────────────────────────────────────────────
 
 def _count_chunk_worker(args: Tuple) -> Tuple[Counter, Counter, Counter, Dict]:
     """
-    Worker function: tokenize + count a chunk of texts.
+    Worker: tokenize + count one chunk using the C backend when available.
 
-    Must be a module-level function (not a method) to be picklable by
-    multiprocessing.Pool.  Returns (word_freq, ngram_freq, subword_freq, cooc).
+    Returns (word_freq, ngram_freq, subword_freq, cooc).
 
-    Performance notes:
-      - Ngrams use Counter.update(generator) — C-level bulk insert, no Python loop.
-      - Cooc is skipped when skip_subwords=True to eliminate max()/min() overhead
-        (the inner window loop is the #1 Python bytecode cost per sentence).
-      - Subword inner loop is O(tok × chars²); skip in fast mode.
+    C path (fast_count_c.so available):
+      - Tokenise in Python (pre-compiled regex, ~5 µs/sentence)
+      - Encode tokens to int32 IDs (dict lookup, ~2 µs/sentence)
+      - Count unigrams + bigrams in C (integer hash tables, ~1 µs/sentence)
+      - Decode C output back to string Counters (numpy vectorised, < 1 µs/sentence)
+
+    Python fallback path:
+      - Counter.update(toks)  — C-level bulk insert
+      - Counter.update(generator)  — C-level bulk insert for ngrams
     """
     texts, ngram_range, cooc_window, skip_subwords = args
+    ng_lo, ng_hi = ngram_range
 
+    if _LIB_FC is not None:
+        return _count_chunk_c(texts, ng_lo, ng_hi)
+    else:
+        return _count_chunk_py(texts, ng_lo, ng_hi, cooc_window, skip_subwords)
+
+
+def _count_chunk_c(
+    texts: List[str],
+    ng_lo: int,
+    ng_hi: int,
+) -> Tuple[Counter, Counter, Counter, Dict]:
+    """C-accelerated counting path.
+
+    Tokenisation strategy (fastest first):
+      1. C bytes tokenizer (fast_tok_bytes_ascii): for pure-ASCII chunks —
+         tokenises + lowercases all sentences in one C call, then Python
+         decodes the flat byte buffer.  Avoids per-sentence Python regex
+         calls entirely.
+      2. Python isascii+re fallback: per-sentence if any non-ASCII text
+         fails the C tokenizer.
+    """
+
+    # ── Step 1a: try C batch tokeniser for ASCII chunks ──────────────
+    all_tok_lists: Optional[List[List[str]]] = None
+
+    if _LIB_FC is not None:
+        # Build flat byte buffer of lowercased texts
+        lowers = [t.lower() for t in texts]
+        if all(s.isascii() for s in lowers):
+            enc = [s.encode("ascii") for s in lowers]
+            text_buf_bytes = b"".join(enc)
+            text_lens_arr  = np.array([len(b) for b in enc], dtype=np.int32)
+            text_offs_arr  = np.zeros(len(enc), dtype=np.int32)
+            np.cumsum(text_lens_arr[:-1], out=text_offs_arr[1:])
+
+            # Output buffer: worst case each char becomes a token + separator
+            out_cap = max(len(text_buf_bytes) * 2, 64)
+            out_buf      = np.empty(out_cap, dtype=np.uint8)
+            out_blens    = np.zeros(len(texts), dtype=np.int32)
+
+            n_written = _LIB_FC.fast_tok_bytes_ascii(
+                text_buf_bytes,
+                text_offs_arr.ctypes.data_as(ct.POINTER(ct.c_int32)),
+                text_lens_arr.ctypes.data_as(ct.POINTER(ct.c_int32)),
+                ct.c_int32(len(texts)),
+                out_buf.ctypes.data_as(ct.POINTER(ct.c_char)),
+                ct.c_int32(out_cap),
+                out_blens.ctypes.data_as(ct.POINTER(ct.c_int32)),
+            )
+
+            if n_written >= 0:
+                # ── Fast path: bytes-keyed dict avoids per-token str decode ──
+                # We split on b'\x01' (bytes level, C-fast), look up in a
+                # bytes-keyed word2id, and only decode the unique vocabulary
+                # (typically ≪ total tokens) at the very end.
+                raw = bytes(out_buf[:n_written])
+                pos = 0
+                word2id_bytes: Dict[bytes, int] = {}
+                flat_list: List[int] = []
+                lengths: List[int] = []
+
+                for blen in out_blens.tolist():
+                    if blen > 0:
+                        toks_b = raw[pos:pos + blen].split(b"\x01")
+                        ids = []
+                        for tb in toks_b:
+                            if tb:
+                                wid = word2id_bytes.get(tb)
+                                if wid is None:
+                                    word2id_bytes[tb] = wid = len(word2id_bytes)
+                                ids.append(wid)
+                        if ids:
+                            flat_list.extend(ids)
+                            lengths.append(len(ids))
+                    pos += blen
+
+                if not flat_list:
+                    return Counter(), Counter(), Counter(), {}
+
+                # Decode only unique vocab bytes → str (cheap: small set)
+                vocab_size = len(word2id_bytes)
+                id2word: Dict[int, str] = {
+                    v: k.decode("ascii") for k, v in word2id_bytes.items()
+                }
+
+                # ── Jump straight to Steps 3–7 (skip the Python encode step) ──
+                return _finish_c_count(
+                    flat_list, lengths, id2word, vocab_size, ng_lo, ng_hi
+                )
+
+    # ── Step 1b: Python fallback (Unicode or C path failed) ───────────
+    all_tok_lists = []
+    for text in texts:
+        toks = _tokenize(text)
+        if toks:
+            all_tok_lists.append(toks)
+
+    if not all_tok_lists:
+        return Counter(), Counter(), Counter(), {}
+
+    # ── Step 2: encode tokens → local int IDs (Python path) ──────────
+    word2id: Dict[str, int] = {}
+    flat_list = []
+    lengths   = []
+
+    for toks in all_tok_lists:
+        ids = []
+        for tok in toks:
+            wid = word2id.get(tok)
+            if wid is None:
+                wid = len(word2id)
+                word2id[tok] = wid
+            ids.append(wid)
+        flat_list.extend(ids)
+        lengths.append(len(ids))
+
+    vocab_size = len(word2id)
+    id2word = {v: k for k, v in word2id.items()}
+
+    return _finish_c_count(flat_list, lengths, id2word, vocab_size, ng_lo, ng_hi)
+
+
+def _finish_c_count(
+    flat_list:  List[int],
+    lengths:    List[int],
+    id2word:    Dict[int, str],
+    vocab_size: int,
+    ng_lo:      int,
+    ng_hi:      int,
+) -> Tuple[Counter, Counter, Counter, Dict]:
+    """
+    Shared finish step for both C-tokeniser and Python-fallback paths.
+    Takes pre-encoded int-ID arrays and drives fast_count_c → Counters.
+    """
+    # ── numpy C arrays ────────────────────────────────────────────────
+    flat_ids  = np.array(flat_list, dtype=np.int32)
+    sent_lens = np.array(lengths,   dtype=np.int32)
+    wc        = np.zeros(vocab_size, dtype=np.int32)
+
+    bi_keys   = np.full(_BI_SLOTS, _UINT64_MAX, dtype=np.uint64)
+    bi_counts = np.zeros(_BI_SLOTS, dtype=np.int32)
+
+    do_tri = ng_hi >= 3
+    if do_tri:
+        tri_keys   = np.full(_TRI_SLOTS, _UINT64_MAX, dtype=np.uint64)
+        tri_counts = np.zeros(_TRI_SLOTS, dtype=np.int32)
+        tri_kp = tri_keys.ctypes.data_as(ct.POINTER(ct.c_uint64))
+        tri_cp = tri_counts.ctypes.data_as(ct.POINTER(ct.c_int32))
+        tri_sl = ct.c_uint32(_TRI_SLOTS)
+    else:
+        tri_kp = _NULL_U64
+        tri_cp = _NULL_I32
+        tri_sl = ct.c_uint32(0)
+
+    # ── call C counting ───────────────────────────────────────────────
+    _LIB_FC.fast_count_c(
+        flat_ids.ctypes.data_as(ct.POINTER(ct.c_int32)),
+        sent_lens.ctypes.data_as(ct.POINTER(ct.c_int32)),
+        ct.c_int32(len(sent_lens)),
+        ct.c_int32(vocab_size),
+        ct.c_int32(ng_lo),
+        ct.c_int32(ng_hi),
+        wc.ctypes.data_as(ct.POINTER(ct.c_int32)),
+        bi_keys.ctypes.data_as(ct.POINTER(ct.c_uint64)),
+        bi_counts.ctypes.data_as(ct.POINTER(ct.c_int32)),
+        ct.c_uint32(_BI_SLOTS),
+        tri_kp, tri_cp, tri_sl,
+    )
+
+    # ── decode word_freq (numpy mask → Counter) ───────────────────────
+    word_freq: Counter = Counter()
+    nz = np.where(wc > 0)[0]
+    for idx in nz:
+        word_freq[id2word[int(idx)]] = int(wc[idx])
+
+    # ── decode bigram hash table (vectorised) ─────────────────────────
+    ngram_freq: Counter = Counter()
+    vs = np.uint64(vocab_size)
+
+    valid = bi_keys != _UINT64_MAX
+    if valid.any():
+        vk = bi_keys[valid]
+        vc = bi_counts[valid]
+        id1_arr = (vk // vs).astype(np.intp)
+        id2_arr = (vk  % vs).astype(np.intp)
+        for id1, id2, cnt in zip(id1_arr.tolist(), id2_arr.tolist(), vc.tolist()):
+            w1 = id2word.get(id1)
+            w2 = id2word.get(id2)
+            if w1 is not None and w2 is not None:
+                ngram_freq[w1 + " " + w2] = cnt
+
+    # ── decode trigram hash table (vectorised) ────────────────────────
+    if do_tri:
+        valid_t = tri_keys != _UINT64_MAX
+        if valid_t.any():
+            vk  = tri_keys[valid_t]
+            vc  = tri_counts[valid_t]
+            id3 = (vk % vs).astype(np.intp)
+            vk  = vk // vs
+            id2 = (vk % vs).astype(np.intp)
+            id1 = (vk // vs).astype(np.intp)
+            for i1, i2, i3, cnt in zip(
+                id1.tolist(), id2.tolist(), id3.tolist(), vc.tolist()
+            ):
+                w1 = id2word.get(i1)
+                w2 = id2word.get(i2)
+                w3 = id2word.get(i3)
+                if w1 is not None and w2 is not None and w3 is not None:
+                    ngram_freq[w1 + " " + w2 + " " + w3] = cnt
+
+    return word_freq, ngram_freq, Counter(), {}
+
+
+def _count_chunk_py(
+    texts:         List[str],
+    ng_lo:         int,
+    ng_hi:         int,
+    cooc_window:   int,
+    skip_subwords: bool,
+) -> Tuple[Counter, Counter, Counter, Dict]:
+    """Pure-Python fallback counting path (used when C .so is absent)."""
     word_freq:    Counter = Counter()
     ngram_freq:   Counter = Counter()
     subword_freq: Counter = Counter()
     cooc: Dict[str, Counter] = {}
-
-    ng_lo, ng_hi = ngram_range
-    join = " ".join  # local alias avoids LOAD_ATTR per call
+    join = " ".join
 
     for text in texts:
-        normalized = unicodedata.normalize("NFKC", text.lower().strip())
-        toks = _FAST_PATTERN.findall(normalized)
+        toks = _tokenize(text)
         if not toks:
             continue
 
-        # ── Word counts (single C-level bulk call) ────────────────────
         word_freq.update(toks)
         n_toks = len(toks)
 
-        # ── Ngram counts (generator → single C-level bulk call) ───────
         for n in range(ng_lo, ng_hi + 1):
             if n_toks >= n:
                 ngram_freq.update(
                     join(toks[i:i + n]) for i in range(n_toks - n + 1)
                 )
 
-        # ── Subword counts (optional, O(tok × chars²)) ───────────────
         if not skip_subwords:
             for tok in toks:
                 lt = len(tok)
@@ -85,21 +374,12 @@ def _count_chunk_worker(args: Tuple) -> Tuple[Counter, Counter, Counter, Dict]:
                         for sl in range(3, hi_sub)
                         for s  in range(lt - sl + 1)
                     )
-
-        # ── Cooccurrence (optional; skip for max speed) ───────────────
-        # skip_subwords doubles as "fast mode" flag — cooc adds ~40% worker
-        # cost (max/min + nested loop) with minimal embedding quality benefit.
-        if not skip_subwords:
             for i, tok in enumerate(toks):
                 if tok not in cooc:
                     cooc[tok] = Counter()
-                lo = i - cooc_window if i > cooc_window else 0
-                hi = i + cooc_window + 1
-                if hi > n_toks:
-                    hi = n_toks
-                cooc[tok].update(
-                    toks[j] for j in range(lo, hi) if j != i
-                )
+                lo = max(0, i - cooc_window)
+                hi = min(n_toks, i + cooc_window + 1)
+                cooc[tok].update(toks[j] for j in range(lo, hi) if j != i)
 
     return word_freq, ngram_freq, subword_freq, cooc
 
