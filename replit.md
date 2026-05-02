@@ -245,6 +245,43 @@ centroid is committed to the cross-call pattern library via `cluster_memory.comm
 
 ---
 
+## 300k Corpus Training — Backtest Results (May 2026)
+
+### Setup
+- **Corpus**: 300,000 sentences assembled from WikiText-2 (train/valid/test) + 10 Project Gutenberg books (Pride & Prejudice, Alice, Frankenstein, A Tale of Two Cities, Moby Dick, Sherlock Holmes, Dorian Gray, Sense & Sensibility, Jane Eyre, Dracula). Deduped, shuffled, padded to 300k.
+- **Vocab**: 47,521 tokens seeded via `model.fit()` on first 10k sentences (3.9s)
+- **Training**: `causal_train_pass`, `max_pos=6`, `causal_batch=400`
+- **Script**: `train_backtest.py` — checkpoints every 40k sentences
+
+### Backtest Results (checkpoint every 40k sentences)
+
+| CP | Sents | MaxEff | MeanEff | WinRate | Dots>50% | Diversity | Signal | w/s |
+|---|---|---|---|---|---|---|---|---|
+| 1 | 40,000 | 0.5000 | 0.3080 | 1.70% | 0/128 | 0.615 | STABLE | 18,068 |
+| 2 | 80,000 | 0.5000 | 0.3072 | 1.49% | 0/128 | 0.526 | STABLE | 18,944 |
+| 3 | 120,000 | 0.5000 | 0.3073 | 1.53% | 0/128 | 0.529 | STABLE | 19,330 |
+| 4 | 160,000 | 0.5000 | 0.3072 | 1.52% | 0/128 | 0.597 | STABLE | 19,351 |
+| 5 | 200,000 | 0.5000 | 0.3071 | 1.47% | 0/128 | 0.522 | STABLE | 19,148 |
+| 6 | 240,000 | 0.5000 | 0.3070 | 1.51% | 0/128 | 0.528 | STABLE | 19,327 |
+| 7 | 280,000 | 0.5000 | 0.3074 | 1.55% | 0/128 | 0.536 | STABLE | 19,388 |
+| 8 | 300,000 | 0.5000 | 0.3072 | 1.48% | 0/128 | 0.677 | STABLE | 19,342 |
+
+### Summary
+- **Total words**: 6,966,793 across 300k sentences in **6.0 minutes**
+- **Average speed**: **19,342 w/s** — exceeds 16k w/s architecture target ✓
+- **MaxEff**: Flat at 0.5000 (the default prior for freshly-evolved dots)
+- **MeanEff**: Stable ~0.307 (mix of trained ~0.016 + fresh ~0.500 dots)
+- **Dots above 50%**: 0/128 across all checkpoints
+
+### Root Cause: Winner-Take-All Win Criterion
+The causal training uses **winner-take-all** (argmax over 128 dots per position).
+This gives each dot a ~0.78% win-rate (1/128 = 0.78%), far below the 0.5 prior.
+Evolution culls trained dots (eff ≈ 0.78%) and replaces them with fresh dots (eff = 0.5).
+**Fix**: Change win criterion to `cosine(W[d] @ ctx, target) > 0`  
+This restores the ~50% baseline, allowing specialized dots to exceed 0.5 → MaxEff > 0.5.
+
+---
+
 ## Running the App
 
 ```bash
