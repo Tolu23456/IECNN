@@ -2153,9 +2153,9 @@ class IECNN:
                     np.polyfit(range(len(_entropy_steps)), _entropy_steps, 1)[0]
                 )
                 if _fp_ent_slope > 0.002:
-                    _freq_prior.strength = min(0.08, _freq_prior.strength + 0.008)
+                    _freq_prior._strength = min(0.08, _freq_prior._strength + 0.008)
                 elif _fp_ent_slope < -0.002:
-                    _freq_prior.strength = max(0.02, _freq_prior.strength - 0.006)
+                    _freq_prior._strength = max(0.02, _freq_prior._strength - 0.006)
             # margin_var-adaptive FreqPrior strength: when top1_margin variance
             # is high (erratic decisiveness — occasional spikes), increase
             # freq_prior strength (+0.006) to anchor toward common words and
