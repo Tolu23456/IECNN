@@ -4105,7 +4105,8 @@ class IECNN:
             # finite scores? 1.0 = top of distribution, 0.0 = worst.
             if _m_valid.sum() >= 2:
                 _m_fin = scores[_m_valid]
-                _m_win = float(scores[next_idx]) if scores[next_idx] > -1e9 else float(_m_fin.max())
+                _m_best_idx = int(np.argmax(scores))
+                _m_win = float(scores[_m_best_idx]) if scores[_m_best_idx] > -1e9 else float(_m_fin.max())
                 _m_pct = float(np.mean(_m_fin <= _m_win))
                 _percentile_steps.append(round(_m_pct, 4))
                 _score_var_steps.append(round(float(np.var(_m_fin)), 5))
