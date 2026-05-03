@@ -1944,7 +1944,7 @@ class IECNN:
             # (context drifting), shrink LocalSem window to 150 to avoid
             # anchoring to stale semantics; when velocity is falling (stable
             # context), open up to 220 to allow richer exploration.
-            if len(_velocity_steps) >= 4 and _steps_remaining > 2 if "_steps_remaining" in dir() else True:
+            if len(_velocity_steps) >= 2 and _steps_remaining > 2 if "_steps_remaining" in dir() else True:
                 _lsem_vel_slope = float(
                     np.polyfit(range(len(_velocity_steps)), _velocity_steps, 1)[0]
                 )
