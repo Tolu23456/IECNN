@@ -1689,7 +1689,8 @@ class IECNN:
                     _low_gap_streak = 0
                 if _low_gap_streak >= _LOW_GAP_WIN:
                     # Re-warm anchor to current context to escape stale pull
-                    anchor.anchor = _normalise(ctx_eff[:len(anchor.anchor)].astype(np.float32))
+                    _anch_vec = ctx_eff[:len(anchor.anchor)].astype(np.float32)
+                    anchor.anchor = _anch_vec / (np.linalg.norm(_anch_vec) + 1e-10)
                     _low_gap_streak  = 0
                     _anchor_restarted = True   # allow only one restart per generation
 
