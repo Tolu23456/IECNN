@@ -2051,7 +2051,8 @@ class IECNN:
             # (phrase variety already improving) ease off the boost to avoid
             # over-constraining; when strongly negative (variety falling) add
             # extra nudge upward.
-            if len(_sfb_steps) >= 4:
+            _sfb_steps = globals().get("_sfb_steps", None)
+            if _sfb_steps is not None and len(_sfb_steps) >= 4:
                 _sfb_slope_now = float(
                     np.polyfit(range(len(_sfb_steps)), _sfb_steps, 1)[0]
                 )
