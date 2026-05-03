@@ -1765,6 +1765,11 @@ class IECNN:
             DRAFT_D    = int(np.clip(24 + 24 * _H_norm, 24, 48))
             DRAFT_KEEP = min(350, len(words))
 
+            _hb_win    = max(4, min(HARD_BLOCK, 4 + _step // 4))
+            blocked    = set(output_tokens[-_hb_win:])
+            block_mask = (np.array([w in blocked for w in words], dtype=bool)
+                          if blocked else None)
+
             if len(words) > DRAFT_KEEP:
                 # Select top-DRAFT_D dots by raw alignment with ctx_eff
                 _dot_align   = raw_preds @ ctx_eff                           # (D,)
@@ -1785,20 +1790,11 @@ class IECNN:
                                  if block_mask is not None else _spec_mask)
             else:
                 _block_merged = block_mask   # vocab small enough — skip draft
-
             # ── 3. Grammar weights ─────────────────────────────────────────
             last_tok = output_tokens[-1] if output_tokens else ""
             prev_tok = output_tokens[-2] if len(output_tokens) >= 2 else ""
             gram_w   = _grammar_guide.weights(last_tok, prev_tok)          # (V,)
             gram_w   = gram_w + _grammar_guide.anti_rep_mask(output_tokens[-4:])
-
-            # ── 4. Adaptive hard-block mask ───────────────────────────────
-            # Window grows with step: 4 early (open exploration) → 8 late
-            # (tight loop prevention).  Formula: 4 + step // 4, capped at 8.
-            _hb_win    = max(4, min(HARD_BLOCK, 4 + _step // 4))
-            blocked    = set(output_tokens[-_hb_win:])
-            block_mask = (np.array([w in blocked for w in words], dtype=bool)
-                          if blocked else None)
 
             # ── 5. Voting paths → raw score distribution ──────────────────
             if self.peep is not None and self.peep.calibrated:
