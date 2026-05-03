@@ -4215,7 +4215,7 @@ class IECNN:
             _ctx_vel_mag_ema = ((1.0 - _VEL_MAG_ALPHA) * _ctx_vel_mag_ema
                                 + _VEL_MAG_ALPHA * _vel_mag)
             _velocity_steps.append(round(_ctx_vel_mag_ema, 5))  # log for velplot
-            _sfb_strength_steps.append(round(float(_sfb.strength), 5))  # SFB log
+            _sfb_strength_steps.append(round(float(_sfb._strength), 5))  # SFB log
 
             # Per-step conf_ema log (for confrise CLI)
             _conf_ema_steps.append(round(_conf_ema, 5))
