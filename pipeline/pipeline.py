@@ -2372,6 +2372,7 @@ class IECNN:
             # B1 toward 0.88 so momentum decays faster (pressure clears sooner
             # and diverse tokens can resurface); weak flow → lower B1 to 0.68
             # keeping penalty pressure on repeating tokens longer.
+            _flow_steps = globals().get("_flow_steps", None)
             if _flow_steps:
                 _rm_fl_frac = _flow_steps[-4:].count("B") / max(len(_flow_steps[-4:]), 1)
                 _rm_b1 = (0.88 if _rm_fl_frac >= 0.70 else
