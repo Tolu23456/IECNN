@@ -1944,7 +1944,7 @@ class IECNN:
             # (context drifting), shrink LocalSem window to 150 to avoid
             # anchoring to stale semantics; when velocity is falling (stable
             # context), open up to 220 to allow richer exploration.
-            if len(_velocity_steps) >= 2 and _steps_remaining > 2 if "_steps_remaining" in dir() else True:
+            if len(_velocity_steps) >= 2 and (("_steps_remaining" not in dir()) or _steps_remaining > 2):
                 _lsem_vel_slope = float(
                     np.polyfit(range(len(_velocity_steps)), _velocity_steps, 1)[0]
                 )
@@ -12006,9 +12006,9 @@ class IECNN:
                 else (lambda _qtvt_n=len(_velocity_steps),
                            _qtvt_s1=max(1, int(_qtvt_n * 0.333)),
                            _qtvt_s2=max(2, int(_qtvt_n * 0.667)),
-                           _qtvt_m1=sum(_velocity_steps[:max(1, int(_qtvt_n * 0.333))]) / max(_qtvt_s1, 1),
-                           _qtvt_m2=sum(_velocity_steps[max(1, int(_qtvt_n * 0.333)):max(2, int(_qtvt_n * 0.667))]) / max(_qtvt_s2 - _qtvt_s1, 1),
-                           _qtvt_m3=sum(_velocity_steps[max(2, int(_qtvt_n * 0.667)):]) / max(_qtvt_n - _qtvt_s2, 1):
+                           _qtvt_m1=sum(_velocity_steps[:_qtvt_s1]) / max(_qtvt_s1, 1),
+                           _qtvt_m2=sum(_velocity_steps[_qtvt_s1:_qtvt_s2]) / max(_qtvt_s2 - _qtvt_s1, 1),
+                           _qtvt_m3=sum(_velocity_steps[_qtvt_s2:]) / max(_qtvt_n - _qtvt_s2, 1):
                     round((_qtvt_m3 - _qtvt_m1) - abs(_qtvt_m2 - ((_qtvt_m1 + _qtvt_m3) / 2.0)), 4)
                 )()
             ))(),
@@ -12018,9 +12018,9 @@ class IECNN:
                 else (lambda _qtct_n=len(_coh3_steps),
                            _qtct_s1=max(1, int(_qtct_n * 0.333)),
                            _qtct_s2=max(2, int(_qtct_n * 0.667)),
-                           _qtct_m1=sum(_coh3_steps[:max(1, int(_qtct_n * 0.333))]) / max(_qtct_s1, 1),
-                           _qtct_m2=sum(_coh3_steps[max(1, int(_qtct_n * 0.333)):max(2, int(_qtct_n * 0.667))]) / max(_qtct_s2 - _qtct_s1, 1),
-                           _qtct_m3=sum(_coh3_steps[max(2, int(_qtct_n * 0.667)):]) / max(_qtct_n - _qtct_s2, 1):
+                           _qtct_m1=sum(_coh3_steps[:_qtct_s1]) / max(_qtct_s1, 1),
+                           _qtct_m2=sum(_coh3_steps[_qtct_s1:_qtct_s2]) / max(_qtct_s2 - _qtct_s1, 1),
+                           _qtct_m3=sum(_coh3_steps[_qtct_s2:]) / max(_qtct_n - _qtct_s2, 1):
                     round((_qtct_m3 - _qtct_m1) - abs(_qtct_m2 - ((_qtct_m1 + _qtct_m3) / 2.0)), 6)
                 )()
             ))(),
