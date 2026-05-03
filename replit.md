@@ -1045,6 +1045,7 @@ Result dict includes: `text`, `tokens`, `confidences`, `stop_reason`,
 | `quad_health_score` result key | composite: ideal_frac × ideal_conf × (1−drift_frac) × gap_boost | Single 0–∞ quality health number for the generation |
 | `quadhealthscore` CLI command | composite health score bar + decomposition | One-number generation quality summary |
 | `quadthirds` CLI command | ideal frac in early/mid/late thirds bars + arc label | Quality flow arc over the generation in thirds |
+| `quadthirdtrends` CLI command | velocity/coh3 third-wise trend score + shape score | Tracks whether generation quality improves across thirds |
 | `quad_weighted_ideal_coh3` result key | fraction of total coh3 mass on ideal steps | How much coherence weight the model puts on quality-flow tokens |
 | `quad_weighted_drifting_coh3` result key | fraction of total coh3 mass on drifting steps | How much coherence weight falls on runaway-drift tokens |
 | `quad_coh3_mass_ratio` result key | ideal coh3 mass / drifting coh3 mass (>1 = ideal heavier) | Coh3-weighted quality vs. drift balance |
