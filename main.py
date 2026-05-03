@@ -3182,6 +3182,26 @@ def _interactive_loop(model):
                   f"coh3={_qhs_c3:.4f} conf={_qhs_cf:.4f}")
             continue
 
+        if low.startswith("quadthirds"):
+            _qth_res = getattr(model, "_last_gen_result", None)
+            if _qth_res is None:
+                print("  No generation yet. Run a prompt first."); continue
+            _qth_t1i = _qth_res.get("quad_third1_ideal_frac", 0.0)
+            _qth_t2i = _qth_res.get("quad_third2_ideal_frac", 0.0)
+            _qth_t3i = _qth_res.get("quad_third3_ideal_frac", 0.0)
+            _qth_tt  = _qth_res.get("quad_third_trend_ideal", 0.0)
+            _qth_t1c = _qth_res.get("quad_third1_coh3_mean", 0.0)
+            _qth_t2c = _qth_res.get("quad_third2_coh3_mean", 0.0)
+            _qth_t3c = _qth_res.get("quad_third3_coh3_mean", 0.0)
+            _qth_t1v = _qth_res.get("quad_third1_vel_mean", 0.0)
+            _qth_t2v = _qth_res.get("quad_third2_vel_mean", 0.0)
+            _qth_t3v = _qth_res.get("quad_third3_vel_mean", 0.0)
+            print(f"\n  Thirds analysis")
+            print(f"  ideal:  T1={_qth_t1i:.4f}  T2={_qth_t2i:.4f}  T3={_qth_t3i:.4f}  trend={_qth_tt:+.4f}")
+            print(f"  coh3:   T1={_qth_t1c:.6f}  T2={_qth_t2c:.6f}  T3={_qth_t3c:.6f}")
+            print(f"  vel:    T1={_qth_t1v:.6f}  T2={_qth_t2v:.6f}  T3={_qth_t3v:.6f}")
+            continue
+
         if low.startswith("quadratiostats"):
             _qrs_res = getattr(model, "_last_gen_result", None)
             if _qrs_res is None:

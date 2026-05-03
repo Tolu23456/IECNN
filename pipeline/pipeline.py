@@ -11925,6 +11925,86 @@ class IECNN:
                 )()
             ))(),
             # mean(coh3_convergence, vel_convergence, conf_convergence) — all three improving = high score
+            "quad_third1_ideal_frac": (lambda: (
+                0.0 if min(len(_coh3_steps), len(_velocity_steps)) < 3
+                else (lambda _qt1i_e=max(1, int(min(len(_coh3_steps), len(_velocity_steps)) * 0.333)),
+                           _qt1i_c3m=sum(_coh3_steps[:min(len(_coh3_steps), len(_velocity_steps))]) /
+                                     max(min(len(_coh3_steps), len(_velocity_steps)), 1),
+                           _qt1i_vm=sum(_velocity_steps[:min(len(_coh3_steps), len(_velocity_steps))]) /
+                                    max(min(len(_coh3_steps), len(_velocity_steps)), 1):
+                    round(sum(1 for i in range(_qt1i_e)
+                              if _coh3_steps[i] > _qt1i_c3m and _velocity_steps[i] < _qt1i_vm) /
+                          max(_qt1i_e, 1), 4)
+                )()
+            ))(),
+            # ideal frac in first 33% of steps
+            "quad_third2_ideal_frac": (lambda: (
+                0.0 if min(len(_coh3_steps), len(_velocity_steps)) < 3
+                else (lambda _qt2i_n=min(len(_coh3_steps), len(_velocity_steps)),
+                           _qt2i_s=max(1, int(min(len(_coh3_steps), len(_velocity_steps)) * 0.333)),
+                           _qt2i_e=max(2, int(min(len(_coh3_steps), len(_velocity_steps)) * 0.667)),
+                           _qt2i_c3m=sum(_coh3_steps[:min(len(_coh3_steps), len(_velocity_steps))]) /
+                                     max(min(len(_coh3_steps), len(_velocity_steps)), 1),
+                           _qt2i_vm=sum(_velocity_steps[:min(len(_coh3_steps), len(_velocity_steps))]) /
+                                    max(min(len(_coh3_steps), len(_velocity_steps)), 1):
+                    round(sum(1 for i in range(_qt2i_s, _qt2i_e)
+                              if _coh3_steps[i] > _qt2i_c3m and _velocity_steps[i] < _qt2i_vm) /
+                          max(_qt2i_e - _qt2i_s, 1), 4)
+                )()
+            ))(),
+            # ideal frac in middle 33% of steps
+            "quad_third3_ideal_frac": (lambda: (
+                0.0 if min(len(_coh3_steps), len(_velocity_steps)) < 3
+                else (lambda _qt3i_n=min(len(_coh3_steps), len(_velocity_steps)),
+                           _qt3i_s=max(2, int(min(len(_coh3_steps), len(_velocity_steps)) * 0.667)),
+                           _qt3i_c3m=sum(_coh3_steps[:min(len(_coh3_steps), len(_velocity_steps))]) /
+                                     max(min(len(_coh3_steps), len(_velocity_steps)), 1),
+                           _qt3i_vm=sum(_velocity_steps[:min(len(_coh3_steps), len(_velocity_steps))]) /
+                                    max(min(len(_coh3_steps), len(_velocity_steps)), 1):
+                    round(sum(1 for i in range(_qt3i_s, _qt3i_n)
+                              if _coh3_steps[i] > _qt3i_c3m and _velocity_steps[i] < _qt3i_vm) /
+                          max(_qt3i_n - _qt3i_s, 1), 4)
+                )()
+            ))(),
+            # ideal frac in last 33% of steps
+            "quad_third_trend_ideal": (lambda: (
+                0.0 if min(len(_coh3_steps), len(_velocity_steps)) < 3
+                else (lambda _qttri_n=min(len(_coh3_steps), len(_velocity_steps)),
+                           _qttri_s1=max(1, int(min(len(_coh3_steps), len(_velocity_steps)) * 0.333)),
+                           _qttri_s2=max(2, int(min(len(_coh3_steps), len(_velocity_steps)) * 0.667)),
+                           _qttri_c3m=sum(_coh3_steps[:min(len(_coh3_steps), len(_velocity_steps))]) /
+                                      max(min(len(_coh3_steps), len(_velocity_steps)), 1),
+                           _qttri_vm=sum(_velocity_steps[:min(len(_coh3_steps), len(_velocity_steps))]) /
+                                     max(min(len(_coh3_steps), len(_velocity_steps)), 1):
+                    round(
+                        sum(1 for i in range(_qttri_s2, _qttri_n)
+                            if _coh3_steps[i] > _qttri_c3m and _velocity_steps[i] < _qttri_vm) /
+                        max(_qttri_n - _qttri_s2, 1)
+                        - sum(1 for i in range(_qttri_s1)
+                              if _coh3_steps[i] > _qttri_c3m and _velocity_steps[i] < _qttri_vm) /
+                        max(_qttri_s1, 1),
+                        4)
+                )()
+            ))(),
+            # last33% ideal frac − first33% ideal frac; positive=ideal becomes denser over time
+            "quad_third_shape_score": (lambda: (
+                0.0 if min(len(_coh3_steps), len(_velocity_steps), len(output_confs)) < 3
+                else (lambda _qtsh_n=min(len(_coh3_steps), len(_velocity_steps), len(output_confs)),
+                           _qtsh_s1=max(1, int(_qtsh_n * 0.333)),
+                           _qtsh_s2=max(2, int(_qtsh_n * 0.667)),
+                           _qtsh_c3m=sum(_coh3_steps[:_qtsh_n]) / max(_qtsh_n, 1),
+                           _qtsh_vm=sum(_velocity_steps[:_qtsh_n]) / max(_qtsh_n, 1):
+                    round(
+                        (sum(_coh3_steps[_qtsh_s2:_qtsh_n]) / max(_qtsh_n - _qtsh_s2, 1)
+                         - sum(_coh3_steps[:_qtsh_s1]) / _qtsh_s1)
+                        + (sum(output_confs[_qtsh_s2:_qtsh_n]) / max(_qtsh_n - _qtsh_s2, 1)
+                           - sum(output_confs[:_qtsh_s1]) / _qtsh_s1)
+                        - (sum(_velocity_steps[_qtsh_s2:_qtsh_n]) / max(_qtsh_n - _qtsh_s2, 1)
+                           - sum(_velocity_steps[:_qtsh_s1]) / _qtsh_s1),
+                        4)
+                )()
+            ))(),
+            # combined third-based shape score: coh3/conf growth minus velocity growth
             "quad_vel_contrast": (lambda: (
                 0.0 if min(len(_coh3_steps), len(_velocity_steps)) < 2
                 else (lambda _qvc_n=min(len(_coh3_steps), len(_velocity_steps)),
