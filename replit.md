@@ -572,6 +572,877 @@ Result dict includes: `text`, `tokens`, `confidences`, `stop_reason`,
 | `genheatmap` CLI command | score histogram heat map showing bucket fill fractions | Distribution shape visualizer for last generation |
 | `confmatrix` CLI command | 2-D confidence×position heat map (4 bins × 3 positions) | Shows where in the sequence confidence is high vs low |
 | Per-step TopK log | result["topk_steps"]: _topk.k at every step | Powers topkplot; shows how entropy drives candidate beam width |
+| N-gram novelty bonus | +0.010 to tokens not in last-8 output; O(8) lookup | Soft positive counterpart to ngram2 hard block |
+| `_conf_ema_steps` result key | per-step smoothed confidence EMA log | Powers confrise detector |
+| Adaptive SFB decay from coh_trend | if running coh3 slope < -0.02 → _sfb._decay ≤ 0.91 | Loosens anchor when coherence is linearly declining |
+| `sgplot [N]` CLI command | sparkline + bar chart of per-step score-gap EMA | Visualizes model decisiveness at each step |
+| `confrise [N]` CLI command | steps where conf_ema Δ > mean+1σ (sharpest rises) | Opposite of conf_declining — find recovery moments |
+| `multiprofile` CLI command | 3 preset prompts → full metric table + generated texts | Quick multi-prompt quality snapshot |
+| `entropy_ratio` result key | max(entropy_steps) / avg_entropy; spikiness measure | >2 = one step was much noisier than the rest |
+| Adaptive anchor boost from prompt_type | question→1.30×, imperative→1.15×, statement→1.00×, continuation→0.85× | Tightened question anchor (was 1.20) |
+| `_vprec_ema_steps` result key | per-step vocab-precision EMA log | Powers vocabjump CLI |
+| `EntRatio` in stats line | entropy spikiness shown on every generation | Quick diagnostic for unstable distributions |
+| `spikeplot [N]` CLI command | marks entropy steps ≥ 1.5× mean as '!' spikes | Pinpoints which tokens had chaotic distributions |
+| `confplateau [win]` CLI command | detects windows of ≥win flat conf_ema steps | Finds where model stalled / plateaued |
+| `vocabjump [thr]` CLI command | steps where vprec_ema dropped > thr in one step | Pinpoints vocab-quality stumbles |
+| `vel_ratio` result key | max(velocity) / mean(velocity); velocity spikiness | >2 = one step shifted context much faster than average |
+| Adaptive lookahead K from score gap | gap<0.04→K=5, gap>0.15→K=2, else K=3 | More path exploration when uncertain, less when confident |
+| `VelRatio` in stats line | shown on every generation summary | Velocity spikiness at a glance |
+| `velspike` CLI command | steps where velocity > mean+1σ with ×mean factor | Pinpoints rapid semantic shifts |
+| `confbands` CLI command | per-token L/M/H band strip with colour coding | Visual confidence band breakdown for last gen |
+| `repchain` CLI command | 3+ same-token in 6-step window detection | Finds local repetition loops not caught by ngram block |
+| `bestseg`/`worstseg` result keys | {start, val} of highest/lowest 3-step coh3 window | Pinpoints peak and trough of generation coherence |
+| `flow_score` result key | fraction of steps where both conf_ema+coh3 improved | 1.0 = perfect momentum; 0.0 = always declining |
+| `flow_steps` result key | per-step B/C/H/N: Both/Conf/Coh3/Neither improving | Powers flowbar CLI |
+| `Flow`/`Best@`/`Worst@` in stats line | shown on every generation | Quick coherence segment quality at a glance |
+| `segplot` CLI command | rolling-3 coh3 window sparkline with ★/☆ best/worst | Visualizes where generation coherence peaked and troughed |
+| `flowbar` CLI command | per-step ▲▲/▲=/=▲/▼▼ indicator strip with FlowScore | Visual momentum breakdown for entire generation |
+| Flow-adaptive nucleus p | low flow_frac→+0.02 wider; high flow_frac→-0.02 tighter | Nucleus responds to recent momentum quality |
+| `peak_conf_val`/`min_conf_val`/`min_conf_step` result keys | peak + valley confidence with step index | Powers confpeak CLI |
+| `confpeak` CLI command | peak+valley confidence with ±2 token context window | Pinpoints best and worst confidence moments |
+| `trendcompare A \| B` CLI command | run two prompts, compare 9 metrics side by side | Quick A/B quality comparison with winner column |
+| `qualmap` CLI command | per-step conf×coh3 composite quality heat map | Single combined quality signal for each generated token |
+| Flow-adaptive Mirostat target | strong flow(≥0.75B)→−0.03; weak(≤0.25B)→+0.03 target | Mirostat tightness tracks recent momentum |
+| `topkdelta` result key | std-dev of topk_steps; measures beam-width fluctuation | High = model was uncertain about how wide to search |
+| `conf_smooth` result key | 3-point centred MA of conf_ema_steps | Smoothed confidence trajectory, less noise |
+| `TopKΔ` in stats line | shown on every generation | Beam width stability at a glance |
+| `smoothplot [N]` CLI command | raw conf_ema vs 3-pt smoothed sparkline overlay | Compare raw vs smoothed confidence trajectory |
+| `diagsummary` CLI command | all 24 key metrics in one compact block | Complete generation diagnostic at a glance |
+| Acceleration-adaptive typical p | conf_acc>0.005→−0.02 tighter; <−0.005→+0.02 looser | Typical filter responds to confidence momentum |
+| `entropy_acc` result key | per-step entropy 2nd derivative list | Rate of change of entropy change |
+| `conf_acc` result key | per-step confidence 2nd derivative list | Powers accelplot CLI |
+| `accelplot [N]` CLI command | ▲/─/▼ sparkline of confidence acceleration + top events | Pinpoints fastest rising and falling confidence moments |
+| `cohrank` CLI command | tokens ranked by their coh3-window coherence value | Shows which tokens contributed most to coherence |
+| `confslope_steps` result key | per-step 1st derivative of conf_ema (instantaneous slope) | Powers slopechart CLI |
+| `coh_acc` result key | per-step coherence 2nd derivative list | Powers cohaccel CLI |
+| `slopechart [N]` CLI command | ▲/─/▼ sparkline of per-step confidence slope | Rising/flat/falling breakdown of confidence direction |
+| `cohaccel` CLI command | ▲/─/▼ sparkline of coherence acceleration + top events | Pinpoints fastest coh3 changes |
+| `scorevar` result key | mean within-step score variance across generation | High = spread of candidates varied a lot step to step |
+| `perc_trend` result key | linear slope of per-step score percentile | Rising = model making higher-quality picks over time |
+| `sfb_trend` result key | linear slope of SFB strength over generation | Rising = anchor field strengthening as gen proceeds |
+| `perfindex` result key | composite quality index ∈ [0,1] (conf×coh×fluency×flow) | Single headline quality number |
+| `SVar`/`PercTrend`/`SFBTrend`/`PerfIdx` in stats line | shown on every generation | Score variance and trend metrics at a glance |
+| `scorevarplot [N]` CLI command | per-step score-variance sparkline with table | Visualizes where candidate spread was highest |
+| `conf_range` result key | max−min confidence across generation | High = model swung between high and low confidence |
+| `coh_range` result key | max−min coh3 across generation | High = coherence was very uneven |
+| `tokenlen_steps` result key | per-step token character length list | Powers toklenplot CLI |
+| `rangeplot` CLI command | side-by-side conf and coh3 range bars | Visual spread comparison |
+| `buckethist` CLI command | 10-bucket 0.0-1.0 confidence histogram with % | Finer-grained confidence distribution than 8-bucket hist |
+| `toklenplot` CLI command | per-step token length sparkline with length distribution | Shows token length patterns across the generation |
+| Adaptive expDecay factor from perc_trend | rising picks→factor=1.04; falling→1.08 | Decay rate responds to token quality trajectory |
+| `wintok`/`wintok_count` result keys | most-repeated token and its count | Dominant token detection |
+| `phasestats` result key | {early,mid,late} phase avg conf + avg coh3 + n_toks | Powers phasemap CLI |
+| `vocabtop10` CLI command | top-10 tokens by frequency with % and bar | Frequency profile of the generation |
+| `phasemap` CLI command | early/mid/late phase conf+coh bars with token snippets | Generation structure in three phases |
+| Flow-adaptive lookahead weight | flow≥0.70→_LH_WEIGHT=0.04; ≤0.25→0.09; else 0.06 | Lookahead leans harder when model is struggling |
+| `uniq_ratio` result key | unique token types / total tokens | 1.0 = all different; <0.5 = significant repetition |
+| `conf_ema_delta` result key | last − first conf_ema step (net improvement) | Positive = model gained confidence over the generation |
+| `uniq_steps` result key | per-step running unique-token ratio | Powers uniqplot CLI |
+| `UniqR`/`ConfΔ` in stats line | shown on every generation | Lexical diversity and net confidence change at a glance |
+| `uniqplot` CLI command | running unique-token ratio sparkline | Visualizes how fast vocabulary is being exhausted |
+| `cohseries` CLI command | full per-step coh3 table with sparkline | Detailed coherence series for every step |
+| Conf-range adaptive ScoreSpreadClip | conf_range>0.35→clip=2.0; <0.10→clip=1.3; else 1.6 | Clip adapts to how volatile confidence has been |
+| `conf_ema_mid` result key | conf_ema value at midpoint step | Split-point for early vs late quality comparison |
+| `entdelta` result key | last − first entropy step (negative = focused over time) | Shows if distribution tightened during generation |
+| `ConfMid`/`EntΔ` in stats line | shown on every generation | Midpoint confidence and entropy change at a glance |
+| `midconf` CLI command | early/mid/late conf_ema with ▲/─/▼ direction arrows | Trajectory of confidence through the generation |
+| conf_ema_delta adaptive temperature | delta>0.05→cool −0.03; <−0.05→warm +0.05 | Temperature responds to net confidence trajectory |
+| `coh_vel_correlation` result key | Pearson r between coh3_steps and velocity_steps | Positive = coherence and velocity co-move |
+| `conf_drop_steps` result key | list of steps with confidence drops ≥0.05 | Structured drop events with token + magnitude |
+| `correlplot` CLI command | side-by-side coh3+velocity sparklines with Pearson r | Visual correlation between coherence and speed |
+| `confdrop` CLI command | steps where confidence dropped ≥0.05 with ▼ bars | Pinpoints confidence collapse events |
+| Flow-adaptive RepMom decay | flow≥0.70→B1=0.88 (fast clear); ≤0.25→B1=0.68 (hold pressure) | RepMom decays faster when generation is flowing well |
+| `conf_rise_steps` result key | list of steps with confidence rises ≥0.05 | Complement of conf_drop_steps for surge detection |
+| `topk_mode` result key | most common TopK k value across all steps | Single representative k for the whole generation |
+| `TopKMode` in stats line | shown on every generation | Most-used sampling width at a glance |
+| `confrises` CLI command | steps where confidence jumped ≥0.05 with ▲ bars | Pinpoints confidence surge events |
+| `topkmode` CLI command | histogram of TopK k values with % and bars | Distribution of sampling width across steps |
+| coh_acc-adaptive NGram3 | positive accel → pass-through (model self-corrects); decel→standard hard block | Trigram blocking relaxes when coherence is already rising |
+| `score_gap_trend` result key | per-step 4-step rolling mean of top1−top2 score gap | Trend in how decisive the model is about its top choice |
+| `sfb_acc` result key | linear slope of SFB values (positive = variety improving) | Single-number SFB trajectory |
+| `SFBAcc` in stats line | shown on every generation | Phrase-variety slope at a glance |
+| `scoregaptrend` CLI command | rolling score-gap sparkline with avg/min/max | Visualizes decisiveness trend across the generation |
+| `sfbaccel` CLI command | SFB per-step sparkline with slope and direction label | Shows whether phrase variety is rising or falling |
+| sfb_acc-adaptive SFB strength | slope>0.002→ease off −0.015; <−0.002→boost +0.015 | SFB self-regulates based on whether variety is trending up |
+| `margin_trend` result key | linear slope of top1-top2 margins (+ = more decisive) | Single-number decisiveness trajectory |
+| `MarginTrend` in stats line | shown on every generation | Margin slope at a glance |
+| `conf_bucket_hist` result key | {0.0-0.2, …, 0.8-1.0} step counts | Shape of confidence distribution across the generation |
+| `margintrend` CLI command | per-step margin sparkline with slope/direction label | Visualizes whether model picks are getting sharper |
+| `confbuckets` CLI command | 5-bucket confidence histogram with % bars | Distribution shape at a glance |
+| margin_trend-adaptive Surprise strength | slope>0.0002→−0.005; <−0.0002→+0.005 | Surprise backs off when model is already decisive |
+| `coh_drop_steps` result key | list of steps where coh3 fell ≥0.05 | Coherence collapse events with token + magnitude |
+| `entropy_trend` result key | linear slope of entropy_steps over generation | Negative = distribution tightening (more focused) |
+| `EntTrend` in stats line | shown on every generation | Entropy direction at a glance |
+| `cohdrop` CLI command | steps where coh3 dropped ≥0.05 with ▼ bars | Pinpoints coherence crash events |
+| `entropytrend` CLI command | entropy sparkline with slope and direction label | Shows whether generation is focusing or dispersing |
+| conf_ema_delta-adaptive ProxPen strength | delta>0.05→ease −0.01; <−0.05→tighten +0.01 | Near-synonym suppression adapts to conf trajectory |
+| `coh_rise_steps` result key | list of steps where coh3 jumped ≥0.05 | Coherence surge events with token + magnitude |
+| `vel_trend` result key | linear slope of velocity_steps (+ = drifting faster) | Single-number velocity trajectory |
+| `VelTrend` in stats line | shown on every generation | Velocity direction at a glance |
+| `cohrises` CLI command | steps where coh3 jumped ≥0.05 with ▲ bars | Pinpoints coherence surge events |
+| `veltrend` CLI command | velocity sparkline with slope and direction label | Shows whether context is drifting more or less |
+| vel_trend-adaptive NGram2 | slope>0.00008→skip on odd steps (allow pivot); else normal | Bigram blocking relaxes during fast context drift |
+| `topk_entropy_corr` result key | Pearson r between topk_steps and entropy_steps | Positive = wider k → more entropy (expected coupling) |
+| `coh_conf_corr` result key | Pearson r between coh3 and confidence per step | Positive = coherent picks are also high-confidence |
+| `TKECorr`/`CohCConf` in stats line | shown on every generation | Two cross-signal correlations at a glance |
+| `topkentropyplot` CLI command | TopK + entropy sparklines with Pearson r | Visualizes coupling between sampling width and randomness |
+| `cohconfcorr` CLI command | coh3 + confidence sparklines with Pearson r | Shows whether coherence and confidence co-move |
+| entropy_trend-adaptive FreqPrior | slope>0.002→strengthen +0.008; <−0.002→ease −0.006 | Frequency prior responds to rising/falling entropy |
+| `vel_conf_corr` result key | Pearson r between velocity and confidence | Negative = faster drift → lower confidence (typical) |
+| `score_var_trend` result key | linear slope of score_var_steps | + = scores spreading; − = tightening |
+| `VCCorr`/`SVTrend` in stats line | shown on every generation | Velocity-confidence coupling and score variance slope |
+| `velconfcorr` CLI command | velocity + confidence sparklines with Pearson r | Shows whether context drift suppresses model confidence |
+| `scorevartrend` CLI command | score variance per-step sparkline with slope | Visualizes whether score rankings are stable or volatile |
+| score_var_trend-adaptive coherence gate | svt>0.0001→threshold=0.55; <−0.0001→0.45 | Extension gate requires stronger coh3 when scores are volatile |
+| `_rhythm_rate_steps` internal list | per-step running rhythm rate accumulated each step | Powers rhythmtrend CLI and rhythm_trend slope computation |
+| `rhythm_trend` result key | linear slope of rhythm_rate_steps | + = generation becoming smoother over time |
+| `rhythm_rate_steps` result key | per-step running rhythm rate (1=smooth, 0=fully alternating) | Full time-series of rhythm smoothness |
+| `RhythmTrend` in stats line | shown on every generation | Rhythm trajectory at a glance |
+| `rhythmtrend` CLI command | running rhythm rate sparkline with slope + direction label | Shows whether confidence oscillation is damping or growing |
+| `confemascatter` CLI command | conf_ema slope ▲/─/▼ scatter with rise/drop/flat counts | Visual derivative of conf_ema trajectory |
+| vel_trend-adaptive LocalSem top_k | slope>0.00008→−10 (focus); <−0.00008→+10 (open up) | LocalSem window shrinks when context is drifting fast |
+| `conf_var_steps` result key | per-step running variance of confidence so far | Tracks spread of confidence values as they accumulate |
+| `coh_entropy_corr` result key | Pearson r between coh3_steps and entropy_steps | Negative = coherent tokens have lower entropy (expected) |
+| `CohEntCorr` in stats line | shown on every generation | Coherence-entropy coupling at a glance |
+| `confvarplot` CLI command | running confidence variance sparkline | Shows how confidence spread evolves through generation |
+| `cohentropycorr` CLI command | coh3 + entropy sparklines with Pearson r | Visualizes coherence-entropy inverse relationship |
+| rhythm_trend-adaptive NGramNoveltyBonus | slope<−0.00005→+0.016; >+0.00005→+0.007; else +0.010 | Boosts novelty when confidence oscillates; reduces it when smooth |
+| `margin_spike_steps` result key | step indices where margin > mean+1.5σ | Identifies sudden decisive-clarity moments during generation |
+| `coh_var_steps` result key | per-step running variance of coh3 values | Tracks whether coherence is fluctuating or stabilizing |
+| `marginspikeplot` CLI command | annotated step/token/margin table for spike steps | Shows exactly when and where the model became most decisive |
+| `cohvarplot` CLI command | running coh3 variance sparkline | Visualizes coherence stability across the generation |
+| coh_var-adaptive Surprise strength | coh3_var_now>0.018→+0.004; <0.006→−0.003 | Boosts variety injection when coherence fluctuates; eases off when stable |
+| `conf_entropy_corr` result key | Pearson r between confidence and entropy_steps | Negative = high confidence → lower entropy (confident = focused) |
+| `coh_slope_steps` result key | per-step 1st derivative of coh3 trajectory | Instantaneous coherence slope at each step |
+| `ConfEntCorr` in stats line | shown on every generation | Confidence-entropy coupling at a glance |
+| `confentropycorr` CLI command | confidence + entropy sparklines with Pearson r | Shows whether confident tokens are also lower-entropy |
+| `cohslopeplot` CLI command | coh3 slope scatter ▲/─/▼ per step | Visual derivative of coh3 trajectory (mirrors confemascatter) |
+| coh_slope-adaptive ProxPen | slope<-0.005→−0.008 (ease); >+0.005→+0.006 (tighten) | Allows fresh tokens when coherence falls; exploits groove when rising |
+| `vprec_slope_steps` result key | per-step 1st derivative of vprec_ema | Instantaneous vocab precision change at each step |
+| `coh_conf_steps` result key | per-step coh3 × confidence quality product | Combined coherence+confidence quality signal per token |
+| `vprecslope` CLI command | vprec_ema slope scatter ▲/─/▼ per step | Shows whether model is converging/broadening its vocabulary |
+| `cohconfplot` CLI command | coh3 × confidence product sparkline | Visualizes combined quality (coherence × confidence) per step |
+| quality_steps-adaptive Depth2Lookahead weight | q_ema>0.25→+0.01; <0.10→+0.02 | Increases lookahead lean when quality is poor; exploits when high |
+| `quality_steps` result key | per-step EMA-smoothed coh3×conf (0.7 decay) | Smooth quality trajectory signal for each generation step |
+| `conf_coh_slope_corr` result key | Pearson r between conf_ema slope and coh3 slope | + = confidence and coherence move together (healthy generation) |
+| `qualityplot` CLI command | smoothed coh3×conf quality EMA sparkline | High-level quality trajectory view across the generation |
+| `confcohslopecorr` CLI command | conf_ema slope + coh3 slope scatter with Pearson r | Shows whether confidence and coherence rise/fall in sync |
+| conf_vprec_corr-adaptive TopK | r>0.40→−3 (tighten); <−0.40→+4 (open) | Exploits precision-confidence alignment; broadens when decoupled |
+| `conf_vprec_corr` result key | Pearson r between confidence and vprec_ema | + = confident tokens are also high-precision vocabulary |
+| `qual_spike_steps` result key | step indices where coh3×conf > mean+1.5σ | Peak quality moments — coherent AND confident simultaneously |
+| `confvpreccorr` CLI command | confidence + vprec_ema sparklines with Pearson r | Reveals whether model confidence aligns with vocabulary precision |
+| `qualspikeplot` CLI command | annotated step/token/quality table for spike steps | Shows exactly when and where peak quality occurred |
+| entropy_var-adaptive burst pulse | ev>0.015→×1.40 (harder); <0.004→×0.75 (softer) | Hits bursts harder when entropy is chaotic; gentler on stable runs |
+| `entropy_var_steps` result key | per-step running variance of entropy values | Tracks how chaotic/stable the token distribution has been |
+| `sg_spike_steps` result key | step indices where ScoreGapEMA > mean+1.5σ | Sudden decisive-gap spikes — model becomes unusually certain |
+| `entropyvarplot` CLI command | running entropy variance sparkline | Shows whether token distribution is becoming more or less chaotic |
+| `sgspikeplot` CLI command | annotated ScoreGapEMA spike steps with tokens | Identifies moments of sudden decisive scoring clarity |
+| conf_topk_corr-adaptive Mirostat | r<−0.40→−0.02 (tighten); >+0.40→+0.02 (ease) | Rewards healthy wide-beam-low-confidence pattern |
+| `coh6_var_steps` result key | per-step running variance of coh6 values | Tracks long-range coherence stability across the generation |
+| `conf_topk_corr` result key | Pearson r between confidence and TopK k | Negative = wide beam → lower confidence (healthy behaviour) |
+| `coh6varplot` CLI command | running coh6 variance sparkline | Shows whether 6-gram long-range coherence is stable or drifting |
+| `conftopkcorr` CLI command | confidence + TopK sparklines with Pearson r | Reveals whether TopK width and confidence are coupled as expected |
+| qual_trend-adaptive ScoreSpreadClip | qt>0.0001→min clip 1.4; <−0.0001→max clip 2.2 | Tightens score range when quality improving; opens up to recover |
+| `qual_trend` result key | linear slope of coh3×conf quality product | + = coherence and confidence both rising through generation |
+| `vprec_conf_slope_corr` result key | Pearson r between vprec slope and conf_ema slope | + = vocab precision and confidence rise/fall together |
+| `qualtrend` CLI command | quality_steps sparkline with slope + improving/stable/degrading label | High-level generation quality trajectory at a glance |
+| `vprecconfslopecorr` CLI command | vprec slope + conf_ema slope scatter with Pearson r | Shows whether vocabulary precision drives or follows confidence |
+| sg_conf_corr-adaptive Nucleus | r<−0.45→+0.03 (widen); >+0.45→−0.02 (tighten) | Widens beam when decisive-low-confidence pattern detected |
+| `qual_var_steps` result key | per-step running variance of quality signal | High = quality is inconsistent across generation |
+| `sg_conf_corr` result key | Pearson r between confidence and ScoreGapEMA | + = larger score gap = higher confidence (healthy) |
+| `qualvarplot` CLI command | running quality variance sparkline | Shows whether generation quality is consistent or erratic |
+| `sgconfcorr` CLI command | ScoreGapEMA + confidence sparklines with Pearson r | Reveals whether scoring decisiveness and confidence are coupled |
+| margin_var-adaptive FreqPrior strength | var>0.008→+0.006; <0.001→−0.005 | Anchors to common words when margin variance spikes |
+| `margin_var_steps` result key | per-step running variance of top1 score margins | High = erratic decisiveness pattern |
+| `coh3_sg_corr` result key | Pearson r between coh3 and ScoreGapEMA | + = more coherent = wider score gap (healthy) |
+| `marginvarplot` CLI command | running top1 margin variance sparkline | Shows whether model decisiveness is consistent or erratic |
+| `coh3sgcorr` CLI command | coh3 + ScoreGapEMA sparklines with Pearson r | Shows whether coherence and scoring decisiveness are coupled |
+| coh3_vprec_corr-adaptive DotAgreementBonus cap | r>0.40→0.068; <−0.40→0.054 | Boosts consensus reward when coherence+precision rise together |
+| `vel_var_steps` result key | per-step running variance of velocity EMA | High = topic movement is erratic/inconsistent |
+| `coh3_vprec_corr` result key | Pearson r between coh3 and vprec_ema | + = coherence and vocab precision rise together (quality run) |
+| `velvarplot` CLI command | running velocity variance sparkline | Shows whether topic-drift rate is steady or erratic |
+| `coh3vpreccorr` CLI command | coh3 + vprec_ema sparklines with Pearson r | Reveals whether coherence and vocab precision are coupled |
+| conf_vel_corr-adaptive PromptDrift | r<−0.40→−0.012; >+0.40→+0.010 | Eases drift penalty during healthy exploration; tightens on overconfident drift |
+| `conf_vel_corr` result key | Pearson r between confidence and velocity EMA | Negative = fast topic movement + lower conf = healthy exploration |
+| `topk_var_steps` result key | per-step running variance of adaptive TopK k | High = beam width is swinging widely |
+| `confvelcorr` CLI command | confidence + velocity sparklines with Pearson r | Identifies overconfident topic drift vs healthy exploration |
+| `topkvarplot` CLI command | running adaptive TopK variance sparkline | Shows whether beam width is stable or erratic through generation |
+| topk_vel_corr-adaptive NGram3 | r>0.40 → soft pre-penalty −12.0 (allow novel trigrams) | Eases trigram blocking during active exploration mode |
+| `coh6_conf_corr` result key | Pearson r between 6-gram coherence and confidence | + = long-range coherence and token confidence aligned |
+| `topk_vel_corr` result key | Pearson r between TopK k and velocity EMA | + = wide beam during fast topic movement (active exploration) |
+| `coh6confcorr` CLI command | coh6 + confidence sparklines with Pearson r | Shows whether long-range coherence tracks token confidence |
+| `topkvelcorr` CLI command | TopK + velocity sparklines with Pearson r | Reveals beam width / topic movement coupling |
+| margin_conf_corr-adaptive ScoreCentroidLift | r>0.40→−0.003; <−0.40→+0.004 | Eases floor lift when decisive+confident; boosts it on decisive+unconfident |
+| `margin_conf_corr` result key | Pearson r between top1 margins and confidence | + = decisive = confident (healthy scoring pattern) |
+| `entropy_vel_corr` result key | Pearson r between entropy and velocity EMA | + = high entropy correlates with fast topic movement |
+| `marginconfcorr` CLI command | top1 margin + confidence sparklines with Pearson r | Shows whether scoring decisiveness and confidence are aligned |
+| `entropyvelcorr` CLI command | entropy + velocity sparklines with Pearson r | Reveals whether token entropy drives topic movement |
+| entropy_topk_corr-adaptive TypicalFilter | r>0.45→−0.05; <−0.45→+0.05 | Tightens typical when random+wide; widens under tension |
+| `coh3_margin_slope_corr` result key | Pearson r between coh3 slope and margin slope | + = coherence and score decisiveness evolve in sync |
+| `entropy_topk_corr` result key | Pearson r between entropy and TopK k | + = high entropy opens wider beam (expected healthy pattern) |
+| `coh3marginslopecorr` CLI command | coh3 slope + margin slope scatter with Pearson r | Shows whether coherence and decisiveness drift in sync |
+| `entropytopkcorr` CLI command | entropy + TopK sparklines with Pearson r | Detects tension when entropy is high but beam is narrow |
+| vprec_entropy_corr-adaptive LocalSem top_k | r<−0.40→−8; >+0.40→+8 | Tightens local context when precise=focused; widens on precision+entropy conflict |
+| `vprec_entropy_corr` result key | Pearson r between vprec_ema and entropy | Negative = vocab-precise = low-entropy = focused (healthy) |
+| `coh3_entropy_slope_corr` result key | Pearson r between coh3 slope and entropy slope | Negative = coherence rises as entropy falls (ideal pattern) |
+| `vprecedntropycorr` CLI command | vprec_ema + entropy sparklines with Pearson r | Shows whether vocab precision and distribution sharpness are aligned |
+| `coh3entropyslopecorr` CLI command | coh3 slope + entropy slope scatter with Pearson r | Shows whether coherence and entropy evolve in opposite directions |
+| coh3_vel_conf_joint-adaptive RepMom B1 | frac>0.50→B1+0.04; <0.20→B1−0.03 | Eases repetition pressure when all ideal conditions active |
+| `conf_margin_vel_score` result key | composite health score 0-4 (healthy correlation count) | At-a-glance signal: how many generation health patterns are active |
+| `coh3_vel_conf_joint` result key | fraction of steps with coh3>avg ∧ vel<avg ∧ conf>avg | Peak quality step fraction: all three ideal signals simultaneously |
+| `healthscore` CLI command | composite health score 0-4 with per-component breakdown | Summarizes 4 key correlation health patterns in one view |
+| `jointidealmeter` CLI command | step-by-step ✓/─ map of all-ideal steps | Shows which steps had coherence, stability, and confidence all above average |
+| coh3_slope_trend-adaptive Depth2Lookahead | acc>0.001→+0.015; <−0.001→−0.010 | Boosts lookahead weight when coherence is gaining momentum |
+| `coh3_slope_trend` result key | 2nd derivative of coh3 (coherence momentum) | + = coherence gaining momentum; − = slowing |
+| `conf_slope_trend` result key | 2nd derivative of conf_ema (confidence momentum) | + = confidence accelerating; − = decelerating |
+| `coh3slopetrend` CLI command | coh3 1st + 2nd derivative sparklines | Shows coherence speed and momentum direction |
+| `confslopetrend` CLI command | conf_ema 1st + 2nd derivative sparklines | Shows confidence speed and acceleration |
+| vel_slope_trend-adaptive Surprise | acc>0.00002→−0.003; <−0.00002→+0.003 | Eases novelty injection during active drift; boosts on settling |
+| `vel_slope_trend` result key | 2nd derivative of velocity EMA | + = topic drift accelerating; − = settling |
+| `margin_slope_trend` result key | 2nd derivative of top1 margins | + = decisiveness accelerating; − = easing |
+| `velslopetrend` CLI command | velocity 1st + 2nd derivative sparklines | Shows whether topic drift is accelerating or settling |
+| `marginslopetrend` CLI command | margin 1st + 2nd derivative sparklines | Shows whether scoring decisiveness is building or fading |
+| entropy_slope_trend-adaptive TypicalFilter τ | acc>0.0008→τ+0.04; <−0.0008→τ−0.03 | Widens typical window when entropy spreading; tightens on focusing |
+| `entropy_slope_trend` result key | 2nd derivative of entropy (distribution momentum) | + = distribution spreading faster; − = focusing |
+| `topk_slope_trend` result key | 2nd derivative of top-k (beam momentum) | + = beam widening faster; − = narrowing |
+| `entropyslopetrend` CLI command | entropy 1st + 2nd derivative sparklines | Shows whether distribution is spreading or focusing over time |
+| `topkslopetrend` CLI command | topk 1st + 2nd derivative sparklines | Shows whether sampling beam is widening or narrowing |
+| sg_slope_trend-adaptive ScoreSpreadClip | acc>0.0008→clip−0.15; <−0.0008→clip+0.12 | Tightens spread clip when competition sharpening; widens on softening |
+| `sg_slope_trend` result key | 2nd derivative of score-gap EMA | + = competition sharpening faster; − = softening |
+| `vprec_slope_trend` result key | 2nd derivative of vprec_ema | + = vocab precision tightening faster; − = loosening |
+| `sgslopetrend` CLI command | score-gap 1st + 2nd derivative sparklines | Shows score-gap momentum: sharpening or softening |
+| `vprecslopetrend` CLI command | vprec_ema 1st + 2nd derivative sparklines | Shows vocab precision momentum: tightening or loosening |
+| margin_vel_joint-adaptive NGram3 | joint>0.50→soft pre-penalty −10.0 | Eases ngram3 blocking when model is decisively stable |
+| `coh6_slope_trend` result key | 2nd derivative of coh6 | + = long-window coherence gaining momentum |
+| `margin_vel_joint` result key | fraction of steps with margin>avg ∧ vel<avg | Decisive+stable step fraction |
+| `coh6slopetrend` CLI command | coh6 1st + 2nd derivative sparklines | Shows 6-window coherence momentum |
+| `marginveljoint` CLI command | decisive+stable joint step meter (✓/─ per step) | Shows which steps were simultaneously decisive and stable |
+| coh3_margin_joint-adaptive PromptDrift | joint>0.50→strength−0.004; <0.20→+0.004 | Eases prompt anchoring when coherent+decisive; tightens when weak |
+| `conf_vel_joint` result key | fraction of steps with conf>avg ∧ vel<avg | Confident+stable step fraction |
+| `coh3_margin_joint` result key | fraction of steps with coh3>avg ∧ margin>avg | Coherent+decisive step fraction |
+| `confveljoint` CLI command | confident+stable joint step meter (✓/─ per step) | Shows which steps were simultaneously confident and stable |
+| `coh3marginjoint` CLI command | coherent+decisive joint step meter (✓/─ per step) | Shows which steps were simultaneously coherent and decisive |
+| entropy_vel_joint-adaptive score floor | joint>0.50→15th pct; <0.20→25th pct | Eases sampling floor when focused+stable; tightens on drift |
+| `entropy_vel_joint` result key | fraction of steps with entropy<avg ∧ vel<avg | Focused+stable step fraction |
+| `vprec_coh3_joint` result key | fraction of steps with vprec>avg ∧ coh3>avg | Precise+coherent step fraction |
+| `entropyveljoint` CLI command | focused+stable joint step meter (✓/─ per step) | Shows which steps were simultaneously low-entropy and stable |
+| `vpreccoh3joint` CLI command | precise+coherent joint step meter (✓/─ per step) | Shows which steps had both high vocab precision and high coherence |
+| ideal_run_len-adaptive Mirostat | streak≥4→target−0.03; ≤1→target+0.03 | Tightens Mirostat target on a streak of ideal steps; opens up when stalled |
+| `quadrant_map` result key | step counts per coh3×vel quadrant (ideal/exploring/flat/drifting) | 2D classification of every step |
+| `ideal_run_len` result key | longest consecutive run of all-ideal steps | Streak length: coh3+vel+conf all on right side of avg |
+| `quadrantmap` CLI command | coh3×vel quadrant distribution with dominant quadrant | Shows how steps distribute across the four quality quadrants |
+| `idealrunlen` CLI command | longest ideal streak + step-by-step map | Highlights the best quality streak in the generation |
+| streak-adaptive FreqPrior | ideal streak≥3→−0.003; drifting streak≥3→+0.003 | Eases vocab anchoring on ideal runs; tightens on drifting runs |
+| `phase_quality_score` result key | avg_conf × avg_coh3 per early/mid/late third | Shows which phase of generation had the highest combined quality |
+| `streak_map` result key | list of (quadrant, length) pairs for the full generation | Full quadrant run-length encoding of the generation |
+| `phasequalityscore` CLI command | early/mid/late phase quality bar chart | Shows which third of the generation was best quality |
+| `streakmap` CLI command | sequence of quadrant streaks with symbols | Visual run-length view of generation quadrant flow |
+| phase_transition-adaptive PromptDrift | ≥2 drift→ideal recoveries→−0.004; ≥2 ideal→drift falls→+0.004 | Eases/tightens drift penalty based on self-correction track record |
+| `phase_transition_map` result key | list of (step_idx, from_q, to_q) per quadrant change | Full transition log for every quadrant boundary crossing |
+| `conf_entropy_ratio` result key | mean_conf / mean_entropy | >1.4=overconfident, 0.8–1.4=balanced, <0.8=entropy-led |
+| `confentropyratio` CLI command | ratio bar + label + mean_conf/mean_entropy breakdown | Confidence vs entropy dominance indicator |
+| `phasetransitionmap` CLI command | step-by-step quadrant transition table with recovery/fall counts | Shows every quality shift in the generation |
+| conf_velocity_score-adaptive RepMom B1 | score≥0.60→B1+0.02; ≤0.30→B1−0.02 | Eases repetition pressure when generation is confident+stable |
+| `conf_velocity_score` result key | mean_conf × (1 − mean_vel) | Composite: high = confident + velocity-stable |
+| `quad_entropy` result key | per-quadrant mean entropy across all steps | Shows which quadrant had the most focused / least random steps |
+| `confvelocityscore` CLI command | composite quality bar + label (excellent/good/fair/weak) | Single quality number combining confidence and stability |
+| `quadentropy` CLI command | per-quadrant mean entropy focus table | Which quadrant had the tightest entropy distribution |
+| transition_rate-adaptive Depth2Lookahead | rate≥0.50→+0.008; ≤0.20→−0.006 | Boosts lookahead weight on volatile generation; eases on stable |
+| `quad_conf_mean` result key | per-quadrant mean confidence | Which quadrant had the highest certainty |
+| `transition_rate` result key | fraction of step-to-step transitions that change quadrant | 0=perfectly stable, 1=every step changes quadrant |
+| `quadconfmean` CLI command | per-quadrant mean confidence table with bar chart | Most certain quadrant + comparative view |
+| `transitionrate` CLI command | instability rate bar + label (volatile/moderate/stable) | Quick summary of generation stability |
+| ideal_frac-adaptive TypicalFilter τ | frac≥0.50→τ−0.04; frac≤0.20→τ+0.03 | Eases typical sampling when generation is mostly ideal; tightens when sparse |
+| `ideal_frac` result key | fraction of steps in the ideal quadrant (coh3↑ vel↓) | How often the model was in its best state |
+| `quad_velocity_mean` result key | per-quadrant mean semantic velocity | Which quadrant had the most/least drift per step |
+| `idealfrac` CLI command | ideal-quadrant fraction bar + label (dominant/strong/moderate/sparse) | How dominant the ideal quadrant was in this generation |
+| `quadvelocitymean` CLI command | per-quadrant mean velocity table with bar chart | Velocity breakdown per generation quality quadrant |
+| coh3_vel_divergence-adaptive Surprise | div<0.05→strength−0.001; div>0.15→+0.002 | Eases novelty injection when coh3 and vel are aligned; boosts when misaligned |
+| `coh3_vel_divergence` result key | abs(mean_coh3 − (1 − mean_vel)) | 0=perfectly aligned, >0.15=misaligned signals |
+| `quad_coh3_mean` result key | per-quadrant mean coh3 coherence | Which quadrant had the highest local coherence |
+| `coh3veldivergence` CLI command | divergence bar + label (aligned/slight/moderate/misaligned) | Checks whether cohesion and velocity signals agree |
+| `quadcoh3mean` CLI command | per-quadrant mean coh3 table with bar chart | Coherence breakdown per generation quality quadrant |
+| conf_coh3_gap-adaptive ScoreSpreadClip | gap>0.10→clip−0.10; gap<−0.10→clip+0.08 | Narrows beam when overconfident vs coherence; widens when under-confident |
+| `conf_coh3_gap` result key | mean_conf − mean_coh3 | >+0.10=overconfident, ±0.10=balanced, <−0.10=under-confident |
+| `quad_transition_from` result key | dict of {quadrant: departure_count} | Which quadrant was left most often |
+| `confcoh3gap` CLI command | gap bar + label with mean_conf/mean_coh3 breakdown | Signals whether confidence leads or lags coherence |
+| `quadtransitionfrom` CLI command | departure count per quadrant (most abandoned) | Shows which quadrant is least stable to stay in |
+| ideal_entry_rate-adaptive NGram3 pre-penalty | rate≥0.40→floor−1.0; rate≤0.10→floor+2.0 | Eases ngram block when model self-corrects to ideal; tightens when rare |
+| `quad_transition_to` result key | dict of {quadrant: entry_count} | Which quadrant was entered most often after a transition |
+| `ideal_entry_rate` result key | ideal entries / total transitions | How reliably does the model recover to the ideal quadrant |
+| `quadtransitionto` CLI command | entry count per quadrant (most returned-to) | Shows which quadrant the model gravitates toward after changes |
+| `idealentryrate` CLI command | ideal entry rate bar + label (excellent/good/fair/rare) | How often transitions land back in ideal quality |
+| quad_balance_score-adaptive LocalSemanticFilter | balance≥0.30→top_k+10; ≤−0.30→top_k−12 | Widens semantic vocabulary on quality runs; tightens on drift-biased gens |
+| `drifting_frac` result key | fraction of steps in the drifting quadrant (coh3↓ vel↑) | How often the model was in its worst quality state |
+| `quad_balance_score` result key | (ideal_count − drifting_count) / n | +0.20=quality-biased, ±0.20=neutral, −0.20=drift-biased |
+| `driftingfrac` CLI command | drifting-quadrant fraction bar + label (dominant/high/moderate/low) | How much of the generation was in the worst quality state |
+| `quadbalancescore` CLI command | quality bias bar with ideal_frac/drifting_frac breakdown | Single quality bias number: whether the gen was mostly ideal or mostly drifting |
+| exploring_frac-adaptive DotVariancePenalty | ef≥0.35→strength+0.02; ≤0.10→strength−0.01 | Amplifies dot-disagreement penalty during creative-divergence runs |
+| `exploring_frac` result key | fraction of steps in exploring quadrant (coh3↑ vel↑) | How often the model was in creative-divergence state |
+| `flat_frac` result key | fraction of steps in flat quadrant (coh3↓ vel↓) | How often the model was stagnant |
+| `exploringfrac` CLI command | exploring-quadrant fraction bar + label | Creative divergence fraction |
+| `flatfrac` CLI command | flat-quadrant fraction bar + label | Stagnation fraction |
+| `quadsummary` CLI command | all-in-one quadrant dashboard — all 4 fracs + balance + transition rate + ideal run len + ideal entry rate | Single command for full quadrant state picture |
+| quad_dominance_margin-adaptive RepulsionMomentum B1 | margin≥0.30→B1+0.015; ≤0.08→B1−0.015 | Extends penalty memory when model self-consistent; shortens when unstable |
+| `quad_volatility_score` result key | normalised quadrant flip rate per step (0=constant 1=flip every step) | How erratically the model switches between quality states |
+| `quad_dominance_margin` result key | dominant_frac − second_frac (0=tied 1=total dominance) | How decisively one quadrant leads |
+| `quadvolatilityscore` CLI command | normalised flip rate bar + label (stable/moderate/volatile/very volatile) | Quadrant instability indicator |
+| `quaddominancemargin` CLI command | decisiveness bar + dominant quadrant label | Whether the gen clearly stayed in one state or was contested |
+| quad_recovery_rate-adaptive SurpriseBonus | rate≥0.60→strength+0.003; ≤0.20→strength−0.002 | Rewards self-correction by boosting creative surprise on recovery |
+| `ideal_run_density` result key | ideal_frac × longest_ideal_run (quality richness) | Combines frequency and streak length into one richness score |
+| `quad_recovery_rate` result key | drifting→ideal/exploring recovery fraction | How reliably the model bounces back after drifting |
+| `idealrundensity` CLI command | richness bar + ideal_frac × run_len breakdown | Single quality richness number |
+| `quadrecoveryrate` CLI command | recovery rate bar + drifting_frac context | Self-correction health after drift episodes |
+| quad_persistence_score-adaptive TypicalFilter τ | score≥6.0→p−0.02; ≤2.5→p+0.02 | Eases typical-set constraint when states are sticky; tightens when volatile |
+| `quad_persistence_score` result key | total_steps / transitions — avg steps per quadrant visit | How sticky each quadrant state is (higher=more self-consistent) |
+| `ideal_stability_score` result key | ideal_frac − drifting_frac net quality index | Net quality: +0.30=very stable, ±0.10=neutral, −0.30=very unstable |
+| `quadpersistencescore` CLI command | stickiness bar + avg steps per visit + transition_rate | How long the model lingers in each quality state |
+| `idealstabilityscore` CLI command | net quality index bar + ideal/drifting frac breakdown | Single number for overall generation quality health |
+| quad_oscillation_score-adaptive VocabFrequencyPrior | osc≥0.55→strength−0.004; ≤0.15→strength+0.003 | Eases frequency prior when model ping-pongs; tightens when exploring freely |
+| `quad_oscillation_score` result key | fraction of A→B→A ping-pong transitions | How much the model bounces between exactly two quality states |
+| `quad_ideal_entry_velocity` result key | mean velocity at moment of entering ideal quadrant | Lower = smoother transition into the ideal state |
+| `quadoscillationscore` CLI command | ping-pong fraction bar + transition_rate context | Detects whether the model is stuck flip-flopping |
+| `quadidealentryvelocity` CLI command | entry velocity bar vs. mean velocity baseline | Whether the model enters ideal smoothly or abruptly |
+| quad_coh3_entry_mean-adaptive ContextAnchor | entry_coh3≥mean+0.05→strength−0.02; ≤mean−0.05→strength+0.02 | Eases anchor when ideal entries are coherence-backed; tightens for fragile entries |
+| `quad_coh3_entry_mean` result key | mean coh3 at ideal-quadrant entry moments | Whether the model reaches ideal from a strong or weak coherence base |
+| `quad_drifting_exit_coh3` result key | mean coh3 at drifting-quadrant exit moments | Quality of recovery — higher coh3 at exit = cleaner escape from drift |
+| `quadcoh3entrymean` CLI command | entry coh3 bar + overall vs ideal in-state comparison | Coherence strength at ideal-quadrant entries |
+| `quaddriftingexitcoh3` CLI command | exit coh3 bar + drifting in-state vs overall comparison | Recovery quality when leaving the drifting state |
+| quad_drifting_entry_velocity-adaptive ScoreSpreadClip | entry_vel≥mean+0.04→clip−0.12; ≤mean−0.04→clip+0.08 | Tightens score spread when model falls hard into drift |
+| `quad_drifting_entry_velocity` result key | mean velocity at moment of entering drifting quadrant | Higher = harder/faster fall into the drifting state |
+| `quad_ideal_duration_variance` result key | std-dev of ideal-run lengths (0=consistent; high=erratic) | Whether the model sustains ideal states evenly or in bursts |
+| `quaddriftingentryvelocity` CLI command | drifting-entry velocity bar vs. mean baseline | Hard-fall vs soft-fall into drift |
+| `quadidealdurationvariance` CLI command | ideal run length variance bar + ideal_frac/run_len context | Consistency of ideal-quality streaks |
+| quad_flat_duration_variance-adaptive Mirostat | std≥2.5→target−0.02; ≤0.5→target+0.015 | Tightens Mirostat when stagnation is bursty; eases when flat runs are short/uniform |
+| `quad_flat_duration_variance` result key | std-dev of flat-run lengths (0=uniform; high=erratic) | Whether the model stagnates in steady or bursty episodes |
+| `quad_recovery_velocity` result key | mean velocity at moment of exiting drifting quadrant | Lower = smoother exit from drift; higher = abrupt jump out |
+| `quadflatdurationvariance` CLI command | flat run length variance bar + flat_frac context | How erratically the model stagnates |
+| `quadrecoveryvelocity` CLI command | drifting-exit velocity bar vs. mean + recovery_rate context | Smoothness of drift-recovery transitions |
+| quad_drifting_duration_variance-adaptive DynamicTemperature | std≥2.0→base+0.02; ≤0.5→base−0.01 | Widens temp envelope when drift bursts are erratic; narrows when controlled |
+| `quad_drifting_duration_variance` result key | std-dev of drifting-run lengths (0=uniform; high=erratic) | Whether the model's drift episodes are steady or unpredictably bursty |
+| `quad_exploring_duration_variance` result key | std-dev of exploring-run lengths (0=uniform; high=erratic) | Whether creative divergence comes in steady or bursty episodes |
+| `quaddriftingdurationvariance` CLI command | drifting run variance bar + drifting_frac context | Erratic vs. uniform drift patterns |
+| `quadexploringdurationvariance` CLI command | exploring run variance bar + exploring_frac context | Erratic vs. uniform creative divergence patterns |
+| quad_exploring_exit_coh3-adaptive _TREND_BOOST | exit_coh≥mean+0.06→boost−0.02; ≤mean−0.06→boost+0.02 | Reduces confidence recovery boost when exploring exits are already coherent |
+| `quad_ideal_entry_coh3_variance` result key | std-dev of coh3 values at ideal-quadrant entry (0=stable gate) | Whether the entry threshold into ideal state is predictable or noisy |
+| `quad_exploring_exit_coh3` result key | mean coh3 at moment of exiting exploring quadrant | Higher = model leaves creative divergence gracefully |
+| `quadidealentrycoh3variance` CLI command | ideal-entry coh3 variance bar + entry mean + ideal_frac context | Stability of the ideal-state entry threshold |
+| `quadexploringexitcoh3` CLI command | exploring-exit coh3 bar vs. entry mean baseline | Graceful vs. abrupt exits from creative divergence |
+| quad_flat_exit_velocity-adaptive _TREND_SLOPE | exit_vel≥mean+0.04→slope+0.01; ≤mean−0.04→slope−0.01 | Tightens confidence-trend trigger when model exits stagnation sluggishly |
+| `quad_flat_exit_velocity` result key | mean velocity at moment of exiting flat quadrant | Higher = sharp snap-out of stagnation; lower = sticky flat state |
+| `quad_ideal_to_exploring_rate` result key | fraction of ideal-quadrant exits that land in exploring | How often high-quality flow transitions into creative divergence |
+| `quadflatexitvelocity` CLI command | flat-exit velocity bar vs. mean baseline | Snap-out sharpness from stagnation |
+| `quadidealtoexploringrate` CLI command | ideal→exploring transition rate bar + ideal/exploring_frac | How frequently quality flow tips into divergence |
+| quad_drifting_to_flat_rate-adaptive _CF_THR | rate≥0.50→CF_THR+0.01; ≤0.15→CF_THR−0.01 | Tightens conf-floor trigger when drift reliably collapses to stagnation |
+| `quad_drifting_to_flat_rate` result key | fraction of drifting exits that land in flat (0=never; 1=always) | How often drift collapses into stagnation instead of recovering |
+| `quad_exploring_to_ideal_rate` result key | fraction of exploring exits that land in ideal (0=never; 1=always) | How productively creative divergence resolves into quality flow |
+| `quaddriftingtoflatrate` CLI command | drifting→flat transition rate bar + drifting/flat_frac context | Risk of drift collapsing to stagnation |
+| `quadexploringtoidealrate` CLI command | exploring→ideal transition rate bar + exploring/ideal_frac context | Productivity of creative divergence |
+| quad_flat_to_exploring_rate-adaptive _CF_WIN | rate≥0.45→CF_WIN+1; ≤0.15→CF_WIN−1 | Widens conf-floor window when stagnation recovers quickly; narrows when sticky |
+| `quad_flat_to_drifting_rate` result key | fraction of flat exits that escalate to drifting (0=never; 1=always) | How often stagnation tips into worse drift rather than recovering |
+| `quad_flat_to_exploring_rate` result key | fraction of flat exits that jump to exploring (0=never; 1=always) | How often stagnation breaks out into creative divergence |
+| `quadflattodriftingrate` CLI command | flat→drifting escalation rate bar + flat/drifting_frac context | Risk of stagnation escalating to drift |
+| `quadflattoexploringrate` CLI command | flat→exploring recovery rate bar + flat/exploring_frac context | Creative escape rate from stagnation |
+| quad_flat_to_ideal_rate-adaptive _LOW_GAP_THR | rate≥0.35→thr+0.005; ≤0.10→thr−0.005 | Raises score-gap exploration trigger when model has strong direct-recovery signal |
+| `quad_flat_to_ideal_rate` result key | fraction of flat exits that jump directly to ideal (0=never; 1=always) | How powerfully the model springs from stagnation to quality flow |
+| `quad_drifting_to_exploring_rate` result key | fraction of drifting exits that land in exploring (0=never; 1=always) | How productively drift converts to creative divergence |
+| `quadflattoidealrate` CLI command | flat→ideal direct rate bar + flat/ideal_frac context | Strength of direct stagnation-to-quality recovery |
+| `quaddriftingtoexploringrate` CLI command | drifting→exploring rate bar + drifting/exploring_frac context | Creative escape rate from drift |
+| quad_drifting_to_ideal_rate-adaptive _CONF_EMA_ALPHA | rate≥0.30→alpha−0.03; ≤0.08→alpha+0.03 | Slows EMA when drift self-corrects quickly; speeds it when model is stuck |
+| `quad_drifting_to_ideal_rate` result key | fraction of drifting exits that jump directly to ideal (0=never; 1=always) | How powerfully the model self-corrects from drift to quality flow |
+| `quad_exploring_to_flat_rate` result key | fraction of exploring exits that collapse into flat (0=never; 1=always) | How often creative divergence fizzles into stagnation |
+| `quaddriftingtoidealrate` CLI command | drifting→ideal direct rate bar + drifting/ideal_frac context | Strength of direct drift-to-quality recovery |
+| `quadexploringtoflatrate` CLI command | exploring→flat collapse rate bar + exploring/flat_frac context | Risk of creative divergence fizzling to stagnation |
+| quad_exploring_to_drifting_rate-adaptive _VPREC_EMA_ALPHA | rate≥0.40→alpha+0.04; ≤0.12→alpha−0.03 | Speeds VPREC tracking when divergence often tips into drift |
+| `quad_exploring_to_drifting_rate` result key | fraction of exploring exits that tip into drifting (0=never; 1=always) | How often creative divergence deteriorates into uncontrolled drift |
+| `quad_ideal_to_flat_rate` result key | fraction of ideal exits that collapse into flat (0=never; 1=always) | How often quality flow falls directly into stagnation |
+| `quadexploringtodriftingrate` CLI command | exploring→drifting collapse rate bar + exploring/drifting_frac context | Risk of divergence tipping into uncontrolled drift |
+| `quadidealtoflatrate` CLI command | ideal→flat collapse rate bar + ideal/flat_frac context | Risk of quality flow falling to stagnation |
+| quad_transition_entropy-adaptive _BURST_TEMP | entropy≥1.8→_BURST_TEMP+0.02; ≤0.8→_BURST_TEMP−0.02 | Sharpens burst response when transitions are chaotic; softens it when predictable |
+| `quad_ideal_to_drifting_rate` result key | fraction of ideal exits that tip into drifting (0=never; 1=always) | How often the model falls from quality flow into uncontrolled drift |
+| `quad_transition_entropy` result key | Shannon entropy over observed quadrant-transition types (bits; max≈3.58) | How predictable/chaotic the model's state-transition behaviour is |
+| `quadidealtodriftingrate` CLI command | ideal→drifting collapse rate bar + ideal/drifting_frac context | Risk of quality flow tipping into drift |
+| `quadtransitionentropy` CLI command | transition entropy bits bar + label + quad summary context | Overall predictability of the model's quadrant navigation |
+| quad_self_transition_rate-adaptive _SEM_CENT_STR | rate≥0.55→str+0.02; ≤0.25→str−0.015 | Strengthens centroid pull when model is stuck; eases it when already mobile |
+| `quad_self_transition_rate` result key | fraction of steps where quadrant label is unchanged (0=fluid; 1=frozen) | How often the model stays in the same quadrant — mobility vs. stuckness |
+| `quad_transition_matrix_skew` result key | max row-prob minus min row-prob in 4×4 transition matrix | How biased per-source transitions are (0=uniform; 1=all-or-nothing) |
+| `quadselftransitionrate` CLI command | self-loop rate bar + transition_entropy context | Quadrant mobility/stuckness at a glance |
+| `quadtransitionmatrixskew` CLI command | transition matrix skew bar + entropy context | How strongly source quadrant biases the destination |
+| quad_flat_run_confidence_mean-adaptive _REP_MOM_S | flat_conf≥0.55→+0.02; ≤0.25→−0.01 | Raises repulsion penalty when model is confidently stagnating |
+| quad_transition_matrix_skew-adaptive _LOW_MARGIN_THR | skew≥0.65→thr+0.005; ≤0.20→thr−0.003 | Raises score-gap bar when model is locked into one transition pathway |
+| `quad_ideal_run_confidence_mean` result key | mean confidence during ideal-quadrant steps (0–1) | How robustly the model sustains quality flow |
+| `quad_ideal_run_confidence_mean`-adaptive _CTX_MOM_S | ideal_conf≥0.60→+0.015; ≤0.30→−0.01 | Boosts context momentum when ideal flow is stable; eases when fragile |
+| `quad_drifting_run_confidence_mean` result key | mean confidence during drifting-quadrant steps | How confident the model is while drifting |
+| `quad_exploring_run_confidence_mean` result key | mean confidence during exploring-quadrant steps | How confident the model is while exploring |
+| `quad_flat_run_confidence_mean` result key | mean confidence during flat-quadrant steps | How confident the model is while stagnating |
+| `quad_confidence_gap` result key | ideal_conf_mean − drifting_conf_mean (positive=ideal more certain) | Separation between quality states in confidence space |
+| `quadidealrunconfidencemean` CLI command | ideal-run confidence bar + ideal_frac + run_density context | Quality flow confidence health check |
+| `quaddriftingrunconfidencemean` CLI command | drifting-run confidence bar + drifting_frac + ideal_conf context | Drift confidence diagnostic |
+| `quadexploringrunconfidencemean` CLI command | exploring-run confidence bar + exploring_frac + ideal_conf context | Exploring confidence volatility check |
+| `quadflatrunconfidencemean` CLI command | flat-run confidence bar + flat_frac + ideal_conf context | Stagnation trap detector (high flat-conf=bad) |
+| `quadconfidencegap` CLI command | signed gap bar (█=positive ░=inverted) + ideal/drifting conf context | Confidence-space separation between ideal and drifting states |
+| quad_confidence_spread-adaptive _MARGIN_EMA_A | spread≥0.12→+0.04; ≤0.04→−0.03 | Speeds margin EMA when quadrants are clearly separated in conf space |
+| quad_coh3_spread-adaptive _SG_EMA_ALPHA | spread≥0.10→+0.04; ≤0.03→−0.03 | Speeds score-gap EMA when coh3 strongly distinguishes quadrants |
+| quad_velocity_spread-adaptive _CTX_OSC_DAMP | spread≥0.08→+0.04; ≤0.02→−0.03 | Strengthens oscillation damping when quadrant velocities are widely spread |
+| quad_coh3_ideal_vs_flat_ratio-adaptive _RW_CONF_ALPHA | ratio≥1.30→+0.04; ≤1.05→−0.03 | Speeds reward-conf EMA when ideal is clearly more coherent than flat |
+| quad_velocity_ideal_vs_drifting_ratio-adaptive _CTX_OSC_THR | ratio≤0.55→+0.015; ≥0.85→−0.015 | Tightens oscillation threshold when ideal is much slower than drifting |
+| `quad_confidence_spread` result key | σ of the 4 per-quadrant confidence means | How well confidence separates the 4 quadrant states |
+| `quad_coh3_spread` result key | σ of the 4 per-quadrant coh3 means | How well coh3 distinguishes quadrant states |
+| `quad_velocity_spread` result key | σ of the 4 per-quadrant velocity means | How well velocity separates quadrant states |
+| `quad_coh3_ideal_vs_flat_ratio` result key | ideal_coh3_mean / flat_coh3_mean (>1.0 = ideal more coherent) | Coh3 quality contrast between best and worst states |
+| `quad_velocity_ideal_vs_drifting_ratio` result key | ideal_vel_mean / drifting_vel_mean (≤1 = ideal slower = good) | Velocity contrast between controlled ideal and runaway drifting |
+| `quadconfidencespread` CLI command | conf spread bar + ideal/drifting conf context | Confidence-space quadrant separation at a glance |
+| `quadcoh3spread` CLI command | coh3 spread bar + conf_spread context | Coh3-space quadrant separation |
+| `quadvelocityspread` CLI command | velocity spread bar + coh3_spread context | Velocity-space quadrant separation |
+| `quadcoh3idealvsflatratio` CLI command | ideal/flat coh3 ratio bar + coh3_spread context | Quality contrast in coherence between best and worst states |
+| `quadvelocityidealvsdriftingratio` CLI command | ideal/drifting velocity ratio bar + vel_spread context | Speed contrast between controlled flow and runaway drift |
+| quad_ideal_max_streak-adaptive _SEM_CENT_THR | streak≥8→thr+0.04; ≤2→thr−0.04 | Eases centroid pull when ideal flow is sustained; tightens it when brief |
+| quad_drifting_max_streak-adaptive _SC_ALPHA | streak≥6→+0.04; ≤1→−0.03 | Speeds score-centroid EMA when drift is prolonged |
+| quad_exploring_max_streak-adaptive _VEL_MAG_ALPHA | streak≥7→+0.04; ≤2→−0.03 | Speeds velocity-magnitude EMA when exploring runs are long |
+| quad_flat_max_streak-adaptive _LOW_GAP_WIN | streak≥6→win+1; ≤1→win−1 | Widens low-gap detection window when flat runs are sustained |
+| `quad_ideal_max_streak` result key | longest consecutive run of ideal-quadrant steps (int) | Peak quality flow duration |
+| `quad_drifting_max_streak` result key | longest consecutive run of drifting-quadrant steps (int) | Worst drift episode length |
+| `quad_exploring_max_streak` result key | longest consecutive run of exploring-quadrant steps (int) | Peak creative divergence duration |
+| `quad_flat_max_streak` result key | longest consecutive run of flat-quadrant steps (int) | Worst stagnation episode length |
+| `quad_dominant_streak_label` result key | which quadrant has the longest max streak (string) | Which state the model spends its longest runs in |
+| `quadmaxstreaks` CLI command | all 4 max-streak bars + dominant label | Full quadrant streak summary |
+| `quadidealstreak` CLI command | ideal max-streak bar + dominant/total context | Peak quality flow duration |
+| `quaddriftingstreak` CLI command | drifting max-streak bar + dominant/total context | Worst drift episode detector |
+| `quadexploringstreak` CLI command | exploring max-streak bar + dominant/total context | Peak creative divergence duration |
+| `quadflatstreak` CLI command | flat max-streak bar + dominant/total context | Worst stagnation episode detector |
+| quad_ideal_mean_streak-adaptive _SEM_CENT_ALPHA | mean≥5→alpha−0.01; ≤2→alpha+0.01 | Slows centroid blend when ideal runs are long; speeds it when brief |
+| `quad_ideal_run_count` result key | number of distinct ideal-quadrant episodes (int) | How many separate quality flow episodes occurred |
+| `quad_drifting_run_count` result key | number of distinct drifting-quadrant episodes (int) | How many separate drift episodes occurred |
+| `quad_ideal_mean_streak` result key | mean length of ideal-quadrant runs (float) | Average duration of quality flow episodes |
+| `quad_drifting_mean_streak` result key | mean length of drifting-quadrant runs (float) | Average duration of drift episodes |
+| `quad_streak_variability` result key | σ of all quadrant run lengths (float; low=uniform; high=irregular) | Pacing consistency across all state transitions |
+| `quadruncounts` CLI command | ideal + drifting episode count bars | Episode frequency at a glance |
+| `quadidealruncount` CLI command | ideal episode count bar + mean/max streak context | How fragmented quality flow is |
+| `quaddriftingruncount` CLI command | drifting episode count bar + mean/max streak context | How fragmented drift episodes are |
+| `quadidealmeanstreak` CLI command | ideal mean-streak bar + max/count context | Average duration of quality flow |
+| `quaddriftingmeanstreak` CLI command | drifting mean-streak bar + max/count context | Average duration of drift episodes |
+| `quadstreakvariability` CLI command | streak σ bar + ideal/drifting mean context | Pacing consistency — how uniform quadrant run lengths are |
+| `quad_early_ideal_frac` result key | fraction of ideal steps in first half of generation (0–1) | How much quality flow the model had at the start |
+| `quad_late_ideal_frac` result key | fraction of ideal steps in second half of generation (0–1) | How much quality flow the model had at the end |
+| `quad_ideal_frac_trend` result key | late_ideal_frac − early_ideal_frac (positive=improving; negative=degrading) | Whether quality flow strengthens or weakens over the generation |
+| `quad_early_drifting_frac` result key | fraction of drifting steps in first half of generation (0–1) | How much early-generation drift occurred |
+| `quad_late_drifting_frac` result key | fraction of drifting steps in second half of generation (0–1) | How much late-generation drift occurred |
+| `quadearlylateideal` CLI command | early/late ideal frac bars + trend label | Quality flow arc at a glance |
+| `quadidealfractrend` CLI command | signed trend bar (█=improving ░=degrading) + early/late fracs | Quality trend over the generation |
+| `quadearlylatedrifting` CLI command | early/late drifting frac bars + Δ label | Drift arc: worsening/stable/recovering |
+| `quad_weighted_ideal_score` result key | fraction of total conf mass on ideal steps (0–1) | How much "confidence weight" the model puts on its quality-flow tokens |
+| `quad_weighted_drifting_score` result key | fraction of total conf mass on drifting steps (0–1) | How much confidence weight falls on runaway-drift tokens |
+| `quad_confidence_mass_ratio` result key | ideal conf mass / drifting conf mass (>1 = ideal heavier) | Confidence-weighted quality vs. drift balance |
+| `quad_ideal_first_step` result key | first step index at which ideal quadrant is reached (−1=never) | How quickly the model enters quality flow |
+| `quad_drifting_first_step` result key | first step index at which drifting quadrant is reached (−1=never) | How quickly the model falls into drift |
+| `quadweightedscores` CLI command | conf-mass ideal/drifting bars + ratio label | Confidence-weighted quadrant balance at a glance |
+| `quadconfidencemassratio` CLI command | ratio bar + ideal/drifting conf mass context | Confidence dominance: ideal vs. drifting |
+| `quadfirststeps` CLI command | first ideal + first drifting step index + % position | Entry-point timing for quality flow and drift |
+| `quad_early_third_ideal_frac` result key | fraction of ideal steps in first third of generation | Quality flow density early on |
+| `quad_mid_third_ideal_frac` result key | fraction of ideal steps in middle third of generation | Quality flow density in the middle |
+| `quad_late_third_ideal_frac` result key | fraction of ideal steps in last third of generation | Quality flow density late on |
+| `quad_early_third_drifting_frac` result key | fraction of drifting steps in first third of generation | Early drift density |
+| `quad_health_score` result key | composite: ideal_frac × ideal_conf × (1−drift_frac) × gap_boost | Single 0–∞ quality health number for the generation |
+| `quadhealthscore` CLI command | composite health score bar + decomposition | One-number generation quality summary |
+| `quadthirds` CLI command | ideal frac in early/mid/late thirds bars + arc label | Quality flow arc over the generation in thirds |
+| `quad_weighted_ideal_coh3` result key | fraction of total coh3 mass on ideal steps | How much coherence weight the model puts on quality-flow tokens |
+| `quad_weighted_drifting_coh3` result key | fraction of total coh3 mass on drifting steps | How much coherence weight falls on runaway-drift tokens |
+| `quad_coh3_mass_ratio` result key | ideal coh3 mass / drifting coh3 mass (>1 = ideal heavier) | Coh3-weighted quality vs. drift balance |
+| `quad_ideal_coh3_momentum` result key | mean coh3 of last 3 ideal steps minus first 3 ideal steps | Whether coherence rises or falls within ideal runs |
+| `quadreport` CLI command | full one-screen report: health/fracs/trend/streaks/conf/first-steps | Comprehensive quadrant diagnostic at a glance |
+| `quadcoh3massratio` CLI command | coh3 mass ratio bar + ideal/drifting coh3 mass + momentum | Coherence-weighted quality vs. drift dominance |
+| `quadidealcoh3momentum` CLI command | signed momentum bar + coh3_mass_ratio context | Whether coherence trends up or down inside ideal runs |
+| `quad_weighted_ideal_velocity` result key | fraction of total |velocity| mass on ideal steps (lower=good) | How much motion energy is in quality-flow tokens |
+| `quad_weighted_drifting_velocity` result key | fraction of total |velocity| mass on drifting steps (higher=bad) | How much motion energy falls on runaway-drift tokens |
+| `quad_velocity_mass_ratio` result key | ideal |vel| mass / drifting |vel| mass (<1 = ideal is slower = good) | Velocity-weighted quality vs. drift balance |
+| `quad_ideal_velocity_momentum` result key | mean vel of last 3 ideal steps minus first 3 (negative=slowing=good) | Whether ideal steps get faster or slower over time |
+| `quadtransitionmap` CLI command | ASCII 4×4 matrix with row-probabilities + entropy | Full transition probability table |
+| `quadvelocitymassratio` CLI command | velocity mass ratio bar + ideal/drifting vel mass + momentum | Motion-energy quality vs. drift balance |
+| `quadidealvelocitymomentum` CLI command | signed momentum bar (░=slowing=good) + mass_ratio context | Speed trend inside ideal runs |
+| `quad_drifting_coh3_momentum` result key | last3 minus first3 coh3 of drifting steps (positive=worsening) | Whether coherence falls further or recovers within drift runs |
+| `quad_drifting_velocity_momentum` result key | last3 minus first3 vel of drifting steps (positive=accelerating=bad) | Whether drift is accelerating or decelerating |
+| `quad_exploring_coh3_momentum` result key | last3 minus first3 coh3 of exploring steps (positive=rising) | Whether coherence improves or falls within exploration runs |
+| `quad_inter_ideal_gap` result key | mean steps between end of one ideal run and start of next | How quickly quality flow resumes after a break |
+| `quad_inter_drifting_gap` result key | mean steps between end of one drifting run and start of next | How frequently drift relapses |
+| `quadinterrungaps` CLI command | ideal + drifting gap bars + run counts | Episode frequency and re-entry timing |
+| `quaddriftingmomentum` CLI command | coh3 + velocity momentum bars for drifting runs | Whether drift is worsening or self-correcting |
+| `quadexploringcoh3momentum` CLI command | signed coh3 trend bar for exploring runs | Coherence arc inside exploration episodes |
+| `quad_flat_coh3_momentum` result key | last3 minus first3 coh3 of flat steps (positive=recovering) | Whether stagnation is deepening or self-correcting in coherence |
+| `quad_flat_velocity_momentum` result key | last3 minus first3 vel of flat steps (positive=pre-escape signal) | Whether velocity creeps up as flat period ends |
+| `quad_ideal_to_drift_rate` result key | fraction of ideal exits going to drifting (lower=better) | How often quality flow decays directly into drift |
+| `quad_drift_to_ideal_rate` result key | fraction of drifting exits going to ideal (higher=better) | Direct drift-to-ideal recovery rate |
+| `quad_exploring_to_ideal_rate` result key | fraction of exploring exits going to ideal (higher=better) | How often exploration converts to quality flow |
+| `quadtransitionrates` CLI command | ideal→drift / drift→ideal / exploring→ideal rate bars | Key decay and recovery transition rates |
+| `quadflatmomentum` CLI command | coh3 + velocity momentum bars for flat runs | Whether flat stagnation is deepening or self-correcting |
+| `quad_flat_to_ideal_rate` result key | fraction of flat exits going to ideal (stagnation escape rate) | How often stagnation resolves directly into quality flow |
+| `quad_ideal_to_exploring_rate` result key | fraction of ideal exits going to exploring (partial destabilisation) | How often ideal flow tips into exploration vs. drift |
+| `quad_ideal_persistence` result key | ideal→ideal self-loop fraction (high=flow is self-sustaining) | How sticky the ideal quadrant is |
+| `quad_net_recovery_rate` result key | drift→ideal rate minus ideal→drift rate (positive=net recovery) | Whether the model recovers from drift more than it decays into it |
+| `quadidealpersistence` CLI command | ideal→ideal self-loop bar + run count/max streak context | How sticky quality flow is |
+| `quadnetrecovery` CLI command | signed net recovery bar + drift↔ideal rate context | Net balance between decay and recovery |
+| `quadescaperates` CLI command | flat/expl/drift→ideal + ideal→expl rate bars | All paths that escape to or from ideal |
+| `quad_exploring_persistence` result key | exploring→exploring self-loop fraction | How sticky the exploring quadrant is |
+| `quad_drifting_persistence` result key | drifting→drifting self-loop fraction | How self-sustaining runaway drift is |
+| `quad_flat_persistence` result key | flat→flat self-loop fraction | How sticky stagnation is |
+| `quad_symmetry_score` result key | normalised entropy of quadrant distribution [0,1] (1=balanced) | How evenly the generation visits all four quadrants |
+| `quad_fingerprint` result key | "I>E>D>F" string sorted by fraction descending | Compact single-string generation quality signature |
+| `quadpersistence` CLI command | all 4 self-loop bars + fingerprint + symmetry | Full quadrant stickiness at a glance |
+| `quadsymmetry` CLI command | normalised entropy bar + fingerprint + label | Quadrant balance diagnostic |
+| `quadfingerprint` CLI command | fingerprint string + I/E/D/F fracs + health + symmetry | Complete generation quality signature |
+| `quad_ideal_minus_drifting_frac` result key | ideal_frac − drifting_frac (positive=ideal dominates) | Single signed number for quality vs. drift balance |
+| `quad_exploring_minus_flat_frac` result key | exploring_frac − flat_frac (positive=creative > stagnant) | Single signed number for exploration vs. stagnation balance |
+| `quad_positive_frac` result key | ideal_frac + exploring_frac (high-coh3 fraction) | Fraction of steps with above-median coherence |
+| `quad_negative_frac` result key | drifting_frac + flat_frac (low-coh3 fraction) | Fraction of steps with below-median coherence |
+| `quad_quality_arc` result key | arc label: cold_start/warm_start/sustained/collapse/recovery/oscillating/improving/degrading | Single-word characterisation of quality flow shape over time |
+| `quadqualityarc` CLI command | arc label + early/late ideal fracs + trend + health + fingerprint | One-word generation quality arc summary |
+| `quaddeltas` CLI command | ideal−drift + expl−flat signed bars + hi/lo coh3 frac | Four-quadrant balance at a glance |
+| `quad_hi_vel_frac` result key | fraction of steps with above-median velocity (drifting+exploring) | How much of the generation is fast-moving |
+| `quad_lo_vel_frac` result key | fraction of steps with below-median velocity (ideal+flat) | How much of the generation is slow/controlled |
+| `quad_flow_efficiency` result key | ideal_frac / hi_coh3_frac — what fraction of high-coherence steps are controlled | Whether high coherence means flow or just exploration |
+| `quad_drift_severity` result key | drifting_frac / hi_vel_frac — what fraction of fast steps are low-coherence | Whether speed means creativity or runaway drift |
+| `quad_recovery_efficiency` result key | drift→ideal_rate × ideal_persistence (product; higher=better) | Combined: recovers from drift AND sustains ideal flow |
+| `quadflowefficiency` CLI command | ideal/hi-coh3 bar + ideal/exploring fracs | Flow purity — controlled vs. fast coherence |
+| `quaddriftseverity` CLI command | drift/hi-vel bar + hi_vel/drifting fracs | How damaging fast motion is |
+| `quadrecoveryefficiency` CLI command | product bar + drift→ideal + persistence context | Overall recovery and sustain capability |
+| `quadvelocityfracs` CLI command | hi-vel + lo-vel fraction bars | Speed split at a glance |
+| `quad_ideal_conf_cv` result key | coefficient of variation (σ/μ) of confidence on ideal steps | How consistent the model's confidence is during quality flow |
+| `quad_ideal_coh3_cv` result key | coefficient of variation (σ/μ) of coh3 on ideal steps | How stable coherence is within quality flow |
+| `quad_drifting_coh3_cv` result key | coefficient of variation (σ/μ) of coh3 on drifting steps | Whether drift is erratic or uniformly low-quality |
+| `quad_ideal_conf_stability` result key | 1/(1+ideal_conf_cv) mapped to (0,1]; high=very consistent | Normalised confidence stability during ideal steps |
+| `quad_overall_efficiency` result key | health_score / hi_vel_frac — quality per unit of fast motion | Single composite: how much ideal quality is produced per speed cost |
+| `quadoverallefficiency` CLI command | composite bar + health/hi_vel/recovery context | One-number generation efficiency |
+| `quadconfcv` CLI command | ideal conf CV + stability bar + coh3 CV bars | Confidence and coherence consistency in ideal + drifting |
+| `quad_ideal_conf_mean` result key | mean confidence on ideal steps | Average model confidence during quality flow |
+| `quad_exploring_conf_mean` result key | mean confidence on exploring steps | Average confidence during creative exploration |
+| `quad_drifting_conf_mean` result key | mean confidence on drifting steps | Average confidence during drift (lower=model is uncertain while drifting) |
+| `quad_flat_conf_mean` result key | mean confidence on flat steps | Average confidence during stagnation |
+| `quad_conf_gap` result key | ideal_conf_mean − drifting_conf_mean (positive=ideal is more confident) | How much more confident the model is during quality flow vs. drift |
+| `quadconfmeans` CLI command | all 4 per-quadrant mean confidence bars + gap | Confidence profile across all four quadrants |
+| `quad_ideal_vel_mean` result key | mean velocity on ideal steps | How slow/fast ideal steps are on average |
+| `quad_exploring_vel_mean` result key | mean velocity on exploring steps | Speed of creative exploration steps |
+| `quad_drifting_vel_mean` result key | mean velocity on drifting steps | Average drift speed |
+| `quad_flat_vel_mean` result key | mean velocity on flat steps | Average stagnation speed |
+| `quad_vel_gap` result key | drifting_vel_mean − ideal_vel_mean (positive=drift faster) | Velocity separation between quadrants; large gap = quadrants are well-separated |
+| `quadvelmeans` CLI command | all 4 per-quadrant mean velocity bars + vel gap | Velocity profile across all four quadrants |
+| `quad_ideal_run_mean_len` result key | mean consecutive ideal steps per ideal run | Average ideal streak length |
+| `quad_drifting_run_mean_len` result key | mean consecutive drifting steps per drifting run | Average drift streak length |
+| `quad_exploring_run_mean_len` result key | mean consecutive exploring steps per exploring run | Average exploration streak length |
+| `quad_flat_run_mean_len` result key | mean consecutive flat steps per flat run | Average stagnation streak length |
+| `quad_run_len_ratio` result key | ideal_run_mean_len / drifting_run_mean_len (>1 = ideal streaks longer than drift = good) | Whether quality flow or drift dominates run duration |
+| `quadrunlens` CLI command | all 4 mean run length bars + ideal/drift ratio | Run duration profile across all four quadrants |
+| `quad_ideal_coh3_mean` result key | mean coh3 on ideal steps | Average coherence during quality flow |
+| `quad_drifting_coh3_mean` result key | mean coh3 on drifting steps | Average coherence during drift |
+| `quad_coh3_gap` result key | ideal_coh3_mean − drifting_coh3_mean (positive=ideal more coherent) | Coherence separation between quality flow and drift |
+| `quadcoh3means` CLI command | all 4 per-quadrant mean coh3 bars + gap | Coherence profile across all four quadrants |
+| `quad_exploring_coh3_mean` result key | mean coh3 on exploring steps | Average coherence during creative exploration |
+| `quad_flat_coh3_mean` result key | mean coh3 on flat steps | Average coherence during stagnation |
+| `quad_ideal_coh3_std` result key | std dev of coh3 on ideal steps (low=stable quality flow) | How variable coherence is during ideal steps |
+| `quad_drifting_coh3_std` result key | std dev of coh3 on drifting steps (high=erratic drift) | Whether drift is uniformly or variably low-quality |
+| `quad_coh3_contrast` result key | (ideal−flat)/(ideal+flat) normalised contrast [−1,+1] | Normalised coherence gap between best and worst quadrant |
+| `quadcoh3stds` CLI command | ideal + drifting coh3 std/CV bars + normalised contrast | Coherence variability and contrast diagnostics |
+| `quad_ideal_conf_std` result key | std dev of confidence on ideal steps | Confidence spread during quality flow |
+| `quad_drifting_conf_std` result key | std dev of confidence on drifting steps | Confidence spread during drift |
+| `quad_conf_contrast` result key | (ideal_conf_mean − flat_conf_mean)/(ideal+flat) normalised [−1,+1] | Normalised confidence contrast between quality flow and stagnation |
+| `quad_ideal_vel_std` result key | std dev of velocity on ideal steps (low=consistently slow=focused) | Velocity consistency during ideal steps |
+| `quad_drifting_vel_std` result key | std dev of velocity on drifting steps (high=erratic drift speed) | Whether drift speed is steady or chaotic |
+| `quad_vel_contrast` result key | (drifting_vel_mean − ideal_vel_mean)/(drift+ideal) normalised [0,1] | Normalised velocity contrast between ideal and drifting quadrants |
+| `quadvelstds` CLI command | ideal + drifting vel mean/σ/CV + contrast + gap | Velocity spread and contrast diagnostics |
+| `quadconfstds` CLI command | ideal + drifting conf mean/σ/CV + contrast + gap | Confidence spread and contrast diagnostics |
+| `quad_ideal_conf_range` result key | max − min confidence on ideal steps (low=very consistent) | Confidence spread during quality flow |
+| `quad_drifting_conf_range` result key | max − min confidence on drifting steps | Confidence spread during drift |
+| `quad_ideal_vel_range` result key | max − min velocity on ideal steps (low=steady and focused) | Velocity spread during ideal steps |
+| `quad_drifting_vel_range` result key | max − min velocity on drifting steps | Velocity spread during drift |
+| `quad_separation_score` result key | composite (coh3_gap×0.5 + vel_gap×0.3 + conf_gap×0.2) normalised [0,1] | How well-separated ideal and drifting quadrants are across all three axes |
+| `quadseparation` CLI command | separation score bar + coh3/vel/conf gap + vel contrast | Overall quadrant distinctness diagnostic |
+| `quadranges` CLI command | ideal + drifting conf/vel range bars + ideal CV/σ context | Confidence and velocity spread per quadrant |
+| `quad_first_drifting_step` result key | index of first drifting step (−1 if none) | When drift first appeared in the generation |
+| `quad_last_ideal_step` result key | index of last ideal step (large=ideal persisted to end) | Whether quality flow continued through the end |
+| `quad_last_drifting_step` result key | index of last drifting step (large=drift continued to end) | Whether drift persisted into the tail of the generation |
+| `quad_ideal_coverage_frac` result key | ideal_steps/(last_ideal−first_ideal+1) density [0,1] | How densely ideal flow filled its own span |
+| `quad_final_state` result key | label of last step (ideal/exploring/drifting/flat) | What quadrant state the generation finished in |
+| `quadfinalstate` CLI command | final state label + first/last ideal/drift indices + coverage | End-of-generation state and ideal/drift span diagnostics |
+| `quad_transition_entropy` result key | Shannon entropy of observed quadrant transitions (bits, max≈4) | How predictable or uniform the quadrant state machine is |
+| `quad_dom_transition` result key | string label of most frequent single-step transition e.g. "ideal→ideal" | Which transition dominates the generation |
+| `quad_ideal_tail_frac` result key | fraction of last-25% steps that are ideal (high=quality persisted) | Whether quality flow continued through the tail |
+| `quad_drift_tail_frac` result key | fraction of last-25% steps that are drifting (high=drift owned the ending) | Whether drift dominated the tail |
+| `quad_ideal_improvement` result key | (tail_ideal_frac − head_ideal_frac) positive=quality improved over time | Whether ideal fraction grew or shrank over the generation |
+| `quadtailfracs` CLI command | ideal/drift tail fracs vs global + improvement score | Late-generation quality and drift trend |
+| `quadtransitionentropy` CLI command | transition entropy bar + dominant transition + final state | Predictability of the quadrant state machine |
+| `quad_ideal_mid_frac` result key | fraction of middle-50% steps that are ideal | Whether quality flow dominated the core of the generation |
+| `quad_drift_mid_frac` result key | fraction of middle-50% steps that are drifting | Whether drift dominated the core |
+| `quad_ideal_peak_coh3` result key | max coh3 on ideal steps (best coherence moment) | Peak coherence during quality flow |
+| `quad_ideal_peak_conf` result key | max confidence on ideal steps (peak confidence) | Highest confidence reached during ideal steps |
+| `quad_drifting_worst_coh3` result key | min coh3 on drifting steps (floor of coherence during drift) | How bad coherence got at worst drift |
+| `quadpeaks` CLI command | ideal peak coh3/conf + drifting floor coh3 vs means | Best and worst per-quadrant signal values |
+| `quadmidfracs` CLI command | ideal/drift mid-50% fracs + tail comparison + improvement | Mid-generation quality and drift profile |
+| `quad_ideal_head_frac` result key | fraction of first-25% steps that are ideal (high=started strong) | Whether quality flow dominated the opening |
+| `quad_drift_head_frac` result key | fraction of first-25% steps that are drifting (high=bad opening) | Whether drift dominated the start |
+| `quad_quality_score` result key | composite [0,1]: 50%×ideal_frac + 25%×(1−drift_frac) + 25%×improvement_norm | Single-number generation quality summary |
+| `quad_ideal_conf_floor` result key | min confidence on ideal steps (low=conf dipped even during quality flow) | How reliable confidence was during ideal steps |
+| `quad_drifting_peak_conf` result key | max confidence on drifting steps (high=surprising confident drift moments) | Whether drift ever produced high-confidence output |
+| `quadqualityscore` CLI command | composite quality score bar + component breakdown | Single-number generation quality diagnostic |
+| `quadheadfracs` CLI command | head/mid/tail ideal+drift frac table + trend label | Full temporal profile across all three generation segments |
+| `quad_above_median_coh3_frac` result key | fraction of steps with coh3 above the run mean (~0.50 if symmetric) | Whether coh3 distribution is skewed high or low |
+| `quad_below_median_vel_frac` result key | fraction of steps with velocity below the run mean (~0.50 if symmetric) | Whether velocity distribution is skewed focused or chaotic |
+| `quad_coherent_to_incoherent_ratio` result key | above-coh3-mean / below-coh3-mean steps ratio (>1=more coherent) | Overall coherence balance of the generation |
+| `quad_focused_to_chaotic_ratio` result key | below-vel-mean / above-vel-mean steps ratio (>1=more focused) | Overall velocity focus balance of the generation |
+| `quad_health_vector` result key | compact "IEDF" vector e.g. "I..f" — upper=dominant ≥35%, lower=present ≥10%, .=absent | Single-string snapshot of which quadrants are active |
+| `quadbalance` CLI command | coherent/focused ratios + health vector + fingerprint | Generation balance and quadrant dominance diagnostic |
+| `quad_max_ideal_streak` result key | max consecutive ideal steps in a single run | Length of the longest quality flow burst |
+| `quad_max_drifting_streak` result key | max consecutive drifting steps in a single run | Length of the longest drift burst |
+| `quad_max_ideal_streak_start` result key | step index where the longest ideal streak started (−1 if none) | Where the best quality flow burst occurred |
+| `quad_ideal_streak_ratio` result key | max_ideal_streak / total_ideal_steps — high=concentrated in one burst | Whether ideal flow is one big stretch or many small ones |
+| `quad_drift_streak_ratio` result key | max_drifting_streak / total_drifting_steps — high=drift was one big block | Whether drift is one big block or spread throughout |
+| `quadstreaks` CLI command | max ideal/drift streak bars + start index + concentration ratios | Streak structure and concentration diagnostics |
+| `quad_oscillation_count` result key | number of ideal↔other label flips (high=volatile; low=stable) | How many times generation switched in/out of quality flow |
+| `quad_longest_non_ideal_run` result key | max consecutive non-ideal steps (max gap without quality flow) | Longest stretch without any ideal steps |
+| `quad_rle_first5` result key | first 5 RLE segments as string e.g. "i3d2e1" — opening of generation | Compact view of how generation started structurally |
+| `quad_ideal_isolation_score` result key | ideal_run_count / total_steps — high=fragmented ideal flow | Whether ideal steps are scattered or consolidated |
+| `quad_late_ideal_start` result key | 1 if first ideal step is in second half of generation (0=early start) | Whether quality flow arrived late or early |
+| `quadrle` CLI command | opening RLE string + oscillations + gap + isolation + late flag | Sequence structure and fragmentation diagnostic |
+| `quadoscillation` CLI command | oscillation count + longest gap + isolation + run count + late flag | Volatility and stability of quality flow |
+| `quad_exploring_run_count` result key | number of times generation entered the exploring quadrant | Frequency of creative exploration bursts |
+| `quad_flat_run_count` result key | number of times generation entered the flat quadrant | Frequency of stagnation entries |
+| `quad_max_exploring_streak` result key | max consecutive exploring steps | Longest creative exploration burst |
+| `quad_max_flat_streak` result key | max consecutive flat steps | Longest stagnation burst |
+| `quad_zigzag_score` result key | ideal↔other flips / (total_steps−1) [0,1] — high=volatile | Per-step oscillation rate; high=generation is unstable |
+| `quadzigzag` CLI command | zigzag score bar + oscillations + all 4 run counts | Generation-level volatility diagnostic |
+| `quadexplorestreaks` CLI command | exploring+flat max streak + run count + mean length + frac | Exploring and stagnation streak diagnostics |
+| `quad_coh3_skew` result key | Pearson skewness of coh3 distribution (positive=right-skewed=sparse hi-coh3) | Whether high coherence is rare or common |
+| `quad_vel_skew` result key | Pearson skewness of velocity distribution (positive=right-skewed=sparse hi-vel) | Whether high velocity is rare or common |
+| `quad_ideal_centroid` result key | weighted mean step index of ideal steps (where ideal flow is centred) | Temporal location of quality flow in the generation |
+| `quad_drifting_centroid` result key | weighted mean step index of drifting steps | Temporal location of drift in the generation |
+| `quad_centroid_gap` result key | ideal_centroid − drifting_centroid (positive=ideal later; negative=ideal earlier) | Whether quality flow comes before or after drift |
+| `quadcentroids` CLI command | ideal+drift temporal centroids + gap label + late-start flag | Temporal placement of quality flow vs drift |
+| `quadskew` CLI command | coh3 + velocity skewness diagnostics | Signal distribution shape (left/right-skewed) |
+| `quad_coh3_kurtosis` result key | excess kurtosis of coh3 distribution (>0=heavy tails; <0=flat) | Whether high coherence is outlier-prone or uniformly spread |
+| `quad_vel_kurtosis` result key | excess kurtosis of velocity distribution | Whether extreme velocities are rare spikes or common |
+| `quad_conf_skew` result key | Pearson skewness of confidence distribution | Shape of confidence spread across the generation |
+| `quad_conf_kurtosis` result key | excess kurtosis of confidence distribution | Whether confidence has outlier spikes or uniform spread |
+| `quad_signal_quality_index` result key | composite [0,1]: 35%×ideal + 20%×(1−drift) + 25%×coh3_norm + 20%×conf | Raw signal quality independent of temporal position |
+| `quadsignalquality` CLI command | signal quality index bar + component breakdown + quality/separation | Composite signal quality diagnostic |
+| `quadkurtosis` CLI command | coh3+vel+conf excess kurtosis + skewness table | Signal distribution shape (outlier-prone vs uniform) |
+| `quad_ideal_coh3_var` result key | variance of coh3 values on ideal steps (low=consistent quality) | How noisy coh3 is during quality flow |
+| `quad_drifting_coh3_var` result key | variance of coh3 values on drifting steps | How noisy coh3 is during drift |
+| `quad_ideal_conf_var` result key | variance of confidence values on ideal steps | How stable confidence is during quality flow |
+| `quad_drifting_conf_var` result key | variance of confidence values on drifting steps | How stable confidence is during drift |
+| `quad_ideal_vs_drift_coh3_var_ratio` result key | ideal_coh3_var / drifting_coh3_var (<1=ideal tighter) | Whether ideal flow is more consistent or noisier than drift |
+| `quadvariance` CLI command | ideal+drift coh3/conf variance + ratio label | Per-quadrant signal variance diagnostic |
+| `quad_coh3_conf_correlation` result key | Pearson r between coh3 and confidence across all steps | Whether coherence and confidence move together |
+| `quad_coh3_vel_correlation` result key | Pearson r between coh3 and velocity (expect negative for quality) | Whether high coherence is paired with low velocity |
+| `quad_conf_vel_correlation` result key | Pearson r between confidence and velocity | Whether high confidence is paired with low velocity |
+| `quad_ideal_coh3_conf_correlation` result key | coh3↔conf Pearson r restricted to ideal steps only | Signal coupling during quality flow specifically |
+| `quad_signal_coupling_score` result key | abs(c3_cf_r)×0.5 + (1−abs(c3_vel_r))×0.5 [0,1] | Whether coh3+conf are aligned while vel is decoupled |
+| `quadcorrelations` CLI command | coh3/conf/vel Pearson correlations + ideal-only + coupling score | Cross-signal correlation diagnostic |
+| `quad_coh3_autocorr_lag1` result key | lag-1 autocorrelation of coh3 series (high=smooth/persistent) | Whether coherence evolves smoothly or choppily |
+| `quad_vel_autocorr_lag1` result key | lag-1 autocorrelation of velocity series | Whether velocity evolves smoothly or anti-persists |
+| `quad_conf_autocorr_lag1` result key | lag-1 autocorrelation of confidence series | Whether confidence is smooth or oscillating |
+| `quad_ideal_persistence_score` result key | P(ideal at t+1 \| ideal at t) — probability ideal state continues | How sticky quality flow is once it starts |
+| `quad_drift_persistence_score` result key | P(drift at t+1 \| drift at t) — probability drift state continues | How sticky drift is once it starts |
+| `quadpersistence` CLI command | P(stay in ideal/drift) bars + lag-1 autocorr table | State persistence and signal memory diagnostic |
+| `quadautocorr` CLI command | lag-1 autocorr for coh3/vel/conf + smoothness labels | Signal temporal memory diagnostic |
+| `quad_ideal_to_exploring_rate` result key | P(exploring at t+1 \| ideal at t) — direct quality→explore transition | How often quality flow tips into creative exploration |
+| `quad_ideal_to_drifting_rate` result key | P(drifting at t+1 \| ideal at t) — direct quality→chaos transition | How often ideal flow collapses directly to drift |
+| `quad_exploring_to_ideal_rate` result key | P(ideal at t+1 \| exploring at t) — exploration converting to quality | Whether creative exploration leads to quality flow |
+| `quad_drifting_to_flat_rate` result key | P(flat at t+1 \| drifting at t) — drift decelerating to stagnation | Whether drift tends to burn out into flat |
+| `quad_markov_stability_score` result key | 0.6×ideal_persist + 0.4×(1−drift_persist) [0,1] — high=ideal sticky, drift fleeting | Overall Markov stability of the quadrant process |
+| `quadtransitions` CLI command | full Markov transition table + stability score | State-to-state conditional probabilities diagnostic |
+| `quad_label_entropy` result key | normalized Shannon H(i,e,d,f) ∈[0,1]; 1=all four equally used | Whether generation explores all quadrant states equally |
+| `quad_coh3_entropy` result key | normalized entropy of coh3 values binned into 8 buckets | How spread out the coherence values are |
+| `quad_vel_entropy` result key | normalized entropy of velocity values binned into 8 buckets | How spread out the velocity values are |
+| `quad_conf_entropy` result key | normalized entropy of confidence values binned into 8 buckets | How spread out the confidence values are |
+| `quad_entropy_index` result key | 0.4×label_entropy + 0.3×coh3_entropy + 0.3×(1−vel_entropy) [0,1] | Composite entropy favouring diverse states but focused velocity |
+| `quadentropy` CLI command | label/coh3/vel/conf entropy bars + entropy index | Generation entropy and diversity diagnostic |
+| `quad_coh3_trend_slope` result key | linear regression slope of coh3 over step index (positive=rising) | Whether coherence is trending up or down across the generation |
+| `quad_vel_trend_slope` result key | linear regression slope of velocity over step index (negative=slowing=good) | Whether velocity is trending toward focus or chaos |
+| `quad_conf_trend_slope` result key | linear regression slope of confidence over step index | Whether confidence is building or eroding across the generation |
+| `quad_coh3_trend_r2` result key | R² of coh3 linear fit — how well coh3 follows a linear trend | Strength of coh3 trend (high=consistent direction) |
+| `quad_trend_alignment_score` result key | 0.5×clamp(coh3_slope×100,[0,1]) + 0.5×clamp(−vel_slope×100,[0,1]) | Whether generation is converging toward quality (coh3↑ vel↓) |
+| `quadtrends` CLI command | coh3/vel/conf linear slope + R² + trend alignment label | Generation trajectory and convergence diagnostic |
+| `quad_first_half_ideal_frac` result key | ideal_frac in first half of generation steps | Whether quality flow is front-loaded |
+| `quad_second_half_ideal_frac` result key | ideal_frac in second half of generation steps | Whether quality flow is back-loaded |
+| `quad_first_half_coh3_mean` result key | mean coh3 in first half of generation | Average coherence during generation opening |
+| `quad_second_half_coh3_mean` result key | mean coh3 in second half of generation | Average coherence during generation closing |
+| `quad_half_improvement_score` result key | 0.6×(2nd_ideal−1st_ideal) + 0.4×norm_coh3_delta; positive=improving | Whether the generation gets better in the second half |
+| `quadhalves` CLI command | first/second half ideal_frac + coh3_mean + improvement score | Generation improvement/decline between halves |
+| `quad_q1_ideal_frac` result key | ideal_frac in first quarter of generation steps | Whether quality flow is concentrated in the opening |
+| `quad_q4_ideal_frac` result key | ideal_frac in last quarter of generation steps | Whether quality flow is concentrated in the close |
+| `quad_q1_coh3_mean` result key | mean coh3 in first quarter | Average coherence at generation opening |
+| `quad_q4_coh3_mean` result key | mean coh3 in last quarter | Average coherence at generation close |
+| `quad_quarter_arc_score` result key | 0.6×(Q4_ideal−Q1_ideal) + 0.4×norm_coh3_delta; positive=rising arc | Whether generation has a quality arc from opening to close |
+| `quadquarters` CLI command | Q1/Q4 ideal_frac + coh3_mean + arc score + half improvement | Generational arc from opening quarter to closing quarter |
+| `quad_ideal_vel_mean` result key | mean velocity on ideal steps (expect low — slow focused movement) | Whether ideal steps are genuinely focused |
+| `quad_drifting_vel_mean` result key | mean velocity on drifting steps (expect high — fast chaotic movement) | Whether drift steps are genuinely fast |
+| `quad_exploring_vel_mean` result key | mean velocity on exploring steps (high=fast but coherent) | Speed of creative exploration phase |
+| `quad_flat_vel_mean` result key | mean velocity on flat steps (low but incoherent) | Whether flat steps are truly slow |
+| `quad_vel_quadrant_spread` result key | σ of the 4 per-quadrant velocity means (high=quadrants differ in speed) | How much velocity varies across quadrant states |
+| `quadvelprofile` CLI command | per-quadrant velocity means bars + spread | Velocity profile broken down by quadrant state |
+| `quad_ideal_conf_mean` result key | mean confidence on ideal steps | Whether ideal steps carry high model confidence |
+| `quad_drifting_conf_mean` result key | mean confidence on drifting steps | Whether drift is confident or uncertain |
+| `quad_exploring_conf_mean` result key | mean confidence on exploring steps | Confidence level during creative exploration |
+| `quad_flat_conf_mean` result key | mean confidence on flat steps | Confidence level during stagnation |
+| `quad_conf_quadrant_spread` result key | σ of the 4 per-quadrant confidence means (high=quadrants differ in confidence) | How differently confident the model is across quadrant states |
+| `quadconfprofile` CLI command | per-quadrant confidence means bars + spread | Confidence profile broken down by quadrant state |
+| `quad_ideal_vs_drift_conf_gap` result key | ideal_conf_mean − drifting_conf_mean (positive=ideal is more confident) | Whether ideal steps have higher model confidence than drift |
+| `quad_ideal_vs_drift_coh3_gap` result key | ideal_coh3_mean − drifting_coh3_mean (positive=ideal more coherent) | Raw coherence gap between ideal and drifting states |
+| `quad_ideal_vs_flat_coh3_gap` result key | ideal_coh3_mean − flat_coh3_mean (positive=ideal coherent, flat is not) | Coherence gap between ideal and stagnant states |
+| `quad_quality_gap_score` result key | 0.4×norm_conf_gap + 0.6×norm_coh3_gap [0,1]; high=ideal/drift well separated | Composite signal that ideal and drifting are clearly distinct |
+| `quad_signal_separation_index` result key | (ideal_coh3_mean − drift_coh3_mean) / coh3_std — Cohen's d analogue | Effect-size-like separation between ideal and drifting on coh3 |
+| `quadgaps` CLI command | ideal-vs-drift conf/coh3 gaps + quality gap + separation index | How clearly ideal steps are separated from drifting on all signals |
+| `quad_coh3_volatility` result key | std of step-to-step \|Δcoh3\| (high=erratic coherence) | How smoothly or erratically coherence changes between steps |
+| `quad_vel_volatility` result key | std of step-to-step \|Δvelocity\| (high=erratic velocity) | How smoothly or erratically velocity changes between steps |
+| `quad_conf_volatility` result key | std of step-to-step \|Δconfidence\| (high=erratic confidence) | How smoothly confidence evolves across the generation |
+| `quad_coh3_vel_volatility_ratio` result key | coh3_volatility / vel_volatility; >1=coh3 more erratic than velocity | Whether coherence or velocity is the more chaotic signal |
+| `quad_stability_composite` result key | 1 − mean(coh3_vol,vel_vol,conf_vol) clipped [0,1]; high=smooth generation | Overall smoothness/stability of all three signals |
+| `quadvolatility` CLI command | coh3/vel/conf volatility + ratio + stability composite | Step-to-step signal stability and smoothness diagnostic |
+| `quad_ideal_burst_count` result key | number of contiguous ideal runs of length ≥2 | How many sustained quality episodes the generation contains |
+| `quad_ideal_burst_max_len` result key | length of the longest consecutive ideal run | Peak quality burst duration |
+| `quad_ideal_burst_mean_len` result key | mean length of all consecutive ideal runs | Average sustained quality episode length |
+| `quad_drift_burst_count` result key | number of contiguous drifting runs of length ≥2 | How many sustained chaotic episodes the generation contains |
+| `quad_burst_quality_ratio` result key | ideal_burst_count / (drift_burst_count+1); high=quality-rich | Whether quality or drift bursts dominate the generation |
+| `quadbursts` CLI command | ideal/drift burst counts + max/mean ideal burst + quality ratio | Sustained quality vs. drift episode analysis |
+| `quad_coh3_min` result key | global minimum coh3 value across the generation | Worst-case coherence floor |
+| `quad_coh3_max` result key | global maximum coh3 value across the generation | Best-case coherence peak |
+| `quad_coh3_range` result key | coh3 max − min; high=coh3 spans a wide band | Dynamic range of coherence across the generation |
+| `quad_coh3_above_075_frac` result key | fraction of steps with coh3 > 0.75 (high=consistently high-coherence) | How often the model reaches strong coherence on an absolute scale |
+| `quad_coh3_above_090_frac` result key | fraction of steps with coh3 > 0.90 (high=elite coherence) | How often the model reaches near-peak coherence |
+| `quadcoh3stats` CLI command | coh3 min/max/range + frac>0.75 + frac>0.90 | Absolute coherence range and high-coherence threshold fractions |
+| `quad_vel_min` result key | global minimum velocity | Lowest velocity (most focused step) in the generation |
+| `quad_vel_max` result key | global maximum velocity | Highest velocity (most chaotic step) in the generation |
+| `quad_vel_range` result key | velocity max − min | Dynamic range of velocity across the generation |
+| `quad_vel_below_025_frac` result key | fraction of steps with velocity < 0.25 (focused/deep steps) | How much of the generation runs at low velocity |
+| `quad_vel_above_mean_frac` result key | fraction of velocity steps above their own mean (expect ~0.50) | Symmetry of velocity distribution |
+| `quadvelstats` CLI command | vel min/max/range + frac<0.25 + frac>mean | Absolute velocity range and focus-threshold fractions |
+| `quad_conf_min` result key | global minimum confidence across the generation | Worst-case confidence floor |
+| `quad_conf_max` result key | global maximum confidence across the generation | Best-case confidence peak |
+| `quad_conf_range` result key | confidence max − min | Dynamic range of confidence across the generation |
+| `quad_conf_above_075_frac` result key | fraction of steps with confidence > 0.75 | How often model is confidently generating |
+| `quad_conf_above_090_frac` result key | fraction of steps with confidence > 0.90 | How often model is at elite confidence |
+| `quadconfstats` CLI command | conf min/max/range + frac>0.75 + frac>0.90 | Absolute confidence range and high-confidence threshold fractions |
+| `quad_ideal_to_exploring_ratio` result key | ideal_count / max(exploring_count,1); >1=ideal dominates | Whether quality or exploration is the dominant high-coherence mode |
+| `quad_drift_to_flat_ratio` result key | drifting_count / max(flat_count,1); high=chaos over stagnation | Whether the bad steps are chaotic or stagnant |
+| `quad_coherent_states_frac` result key | (ideal+exploring) / total — fraction with above-median coh3 | How much of the generation is operating in high-coherence territory |
+| `quad_high_vel_states_frac` result key | (drifting+exploring) / total — fraction with above-median velocity | How much of the generation is running at high velocity |
+| `quadratiostats` CLI command | ideal/explore ratio + drift/flat ratio + coherent/high-vel fracs | State balance ratios and coherence/velocity occupancy fractions |
+| `quad_focus_score` result key | ideal_frac × (1−vel_mean) [0,1]; high=high ideal fraction AND low velocity | Whether the model is both on-target and focused |
+| `quad_coherence_focus_score` result key | coh3_mean × (1−vel_mean); pure signal quality-focus product | Coherence weighted by how focused/slow the generation is |
+| `quad_overall_health_score` result key | 0.25×ideal + 0.25×(1-drift) + 0.25×coh3>0.75 + 0.25×conf>0.75 [0,1] | Balanced four-axis health score |
+| `quad_generation_quality_index` result key | 0.30×ideal + 0.20×coh3 + 0.20×(1-drift) + 0.15×conf + 0.15×(1-vel) | Comprehensive generation quality index |
+| `quadhealthscore` CLI command | overall health + quality index + focus + grade A-F | Comprehensive generation health and quality summary |
+| `quad_coh3_p25` result key | 25th percentile of coh3 values | Lower-quartile coherence |
+| `quad_coh3_p50` result key | median (50th percentile) of coh3 values | Median coherence across the generation |
+| `quad_coh3_p75` result key | 75th percentile of coh3 values | Upper-quartile coherence |
+| `quad_coh3_iqr` result key | coh3 p75 − p25 inter-quartile range; high=wide spread | Robust spread measure for coherence |
+| `quadcoh3percentiles` CLI command | coh3 min/p25/p50/p75/max + IQR + skew | Full coh3 percentile distribution with skew indicator |
+| `quad_vel_p25` result key | 25th percentile of velocity values | Lower-quartile velocity |
+| `quad_vel_p50` result key | median (50th percentile) of velocity values | Median velocity across the generation |
+| `quad_vel_p75` result key | 75th percentile of velocity values | Upper-quartile velocity |
+| `quad_vel_iqr` result key | velocity p75 − p25 inter-quartile range | Robust spread measure for velocity |
+| `quadvelpercentiles` CLI command | vel min/p25/p50/p75/max + IQR + skew | Full velocity percentile distribution with skew indicator |
+| `quad_conf_p25` result key | 25th percentile of confidence values | Lower-quartile confidence |
+| `quad_conf_p50` result key | median confidence across the generation | Median confidence |
+| `quad_conf_p75` result key | 75th percentile of confidence values | Upper-quartile confidence |
+| `quad_conf_iqr` result key | confidence p75 − p25 inter-quartile range | Robust spread measure for confidence |
+| `quadconfpercentiles` CLI command | conf min/p25/p50/p75/max + IQR + skew | Full confidence percentile distribution with skew indicator |
+| `quad_coh3_positive_delta_frac` result key | fraction of step-pairs where coh3 rises; >0.5=net rising | How often coherence improves from step to step |
+| `quad_coh3_negative_delta_frac` result key | fraction of step-pairs where coh3 falls | How often coherence declines from step to step |
+| `quad_coh3_mean_positive_delta` result key | mean magnitude of positive coh3 jumps | Average size of coherence improvements |
+| `quad_coh3_mean_negative_delta` result key | mean magnitude of negative coh3 drops | Average size of coherence declines |
+| `quad_coh3_delta_asymmetry` result key | mean_pos_delta / mean_neg_delta; >1=rises bigger than falls | Whether coherence net-improves or net-declines per swing |
+| `quadcoh3deltas` CLI command | coh3 +/- delta fracs + mean magnitudes + asymmetry | Step-to-step coherence movement direction and size |
+| `quad_vel_positive_delta_frac` result key | fraction of step-pairs where velocity rises (acceleration) | How often velocity is increasing (bad) |
+| `quad_vel_negative_delta_frac` result key | fraction of step-pairs where velocity falls (deceleration) | How often velocity is decreasing toward focus (good) |
+| `quad_vel_mean_positive_delta` result key | mean magnitude of positive velocity jumps | Average size of acceleration episodes |
+| `quad_vel_mean_negative_delta` result key | mean magnitude of negative velocity drops | Average size of deceleration episodes |
+| `quad_vel_delta_asymmetry` result key | neg_delta_mean / pos_delta_mean; >1=decelerations bigger than accelerations | Whether velocity is net converging toward focus |
+| `quadveldeltas` CLI command | vel +/- delta fracs + mean magnitudes + decel asymmetry | Step-to-step velocity movement direction and convergence |
+| `quad_conf_positive_delta_frac` result key | fraction of step-pairs where confidence rises | How often model confidence is improving step-to-step |
+| `quad_conf_negative_delta_frac` result key | fraction of step-pairs where confidence falls | How often model confidence is declining step-to-step |
+| `quad_conf_mean_positive_delta` result key | mean magnitude of positive confidence jumps | Average size of confidence recoveries |
+| `quad_conf_mean_negative_delta` result key | mean magnitude of negative confidence drops | Average size of confidence erosions |
+| `quad_conf_delta_asymmetry` result key | pos_delta_mean / neg_delta_mean; >1=rises bigger than falls | Whether confidence net-builds or net-erodes across the generation |
+| `quadconfdeltas` CLI command | conf +/- delta fracs + mean magnitudes + asymmetry | Step-to-step confidence movement direction and build/erode balance |
+| `quad_coh3_momentum` result key | mean signed Δcoh3 per step (positive=overall rising coherence) | Net drift of coherence across the generation |
+| `quad_vel_momentum` result key | mean signed Δvelocity per step (negative=decelerating/converging) | Net drift of velocity — negative is ideal |
+| `quad_conf_momentum` result key | mean signed Δconfidence per step (positive=building confidence) | Net drift of model confidence across the generation |
+| `quad_coh3_curvature_mean` result key | mean \|2nd difference\| of coh3 — curvature/acceleration of coherence | How sharply coherence changes direction step-to-step |
+| `quad_vel_curvature_mean` result key | mean \|2nd difference\| of velocity — curvature of velocity signal | How sharply velocity accelerates or decelerates |
+| `quadmomentum` CLI command | coh3/vel/conf net momentum per step + coh3/vel curvature | Signal net direction and acceleration diagnostic |
+| `quad_ideal_coh3_std` result key | std of coh3 on ideal steps (low=ideal is internally consistent) | How homogeneous ideal steps are on coherence |
+| `quad_drifting_coh3_std` result key | std of coh3 on drifting steps | How homogeneous drifting steps are on coherence |
+| `quad_ideal_conf_std` result key | std of confidence on ideal steps | How homogeneous ideal steps are on confidence |
+| `quad_ideal_uniformity` result key | 1 − mean(ideal_coh3_std, ideal_conf_std); high=ideal is homogeneous | Whether ideal steps cluster tightly in coh3/conf space |
+| `quaduniformity` CLI command | ideal/drift coh3 std + ideal conf std + ideal uniformity | Internal consistency of ideal and drifting quadrant states |
+| `quad_coh3_vel_correlation` result key | Pearson r(coh3, vel); negative=ideal pairing (high coh3 + low vel) | Cross-signal alignment between coherence and velocity |
+| `quad_coh3_conf_correlation` result key | Pearson r(coh3, conf); positive=good (high coh3 + high conf) | Cross-signal alignment between coherence and confidence |
+| `quad_vel_conf_correlation` result key | Pearson r(vel, conf) | Cross-signal relationship between velocity and confidence |
+| `quad_coh3_vel_anticorrelation_score` result key | max(0, −r(coh3,vel)); high=strong ideal anticorrelation | Directional signal that coh3 and vel move oppositely |
+| `quadcorrelations` CLI command | r(coh3,vel) + r(coh3,conf) + r(vel,conf) + anticorr score | Three pairwise Pearson correlations + ideal anticorrelation |
+| `quad_ideal_max_run` result key | longest consecutive run of ideal steps | Whether ideal state is sustained in clusters |
+| `quad_drifting_max_run` result key | longest consecutive run of drifting steps | Whether drifting state is sustained in clusters |
+| `quad_ideal_mean_run` result key | mean length of ideal-step runs (>1=ideal clusters) | Average run length of ideal state |
+| `quad_run_balance` result key | ideal_max_run / drifting_max_run; >1=ideal clusters longer than drift | Which quadrant type sustains longer consecutive runs |
+| `quadruns` CLI command | ideal/drift max-run + mean-run + run balance ratio | Consecutive quadrant run-length analysis |
+| `quad_ideal_to_ideal_frac` result key | P(ideal → ideal): prob of staying ideal given currently ideal | How sticky the ideal state is |
+| `quad_ideal_to_drift_frac` result key | P(ideal → drifting): prob of falling to drift from ideal | How fragile the ideal state is |
+| `quad_drift_to_ideal_frac` result key | P(drifting → ideal): recovery rate from drift | How quickly generation escapes the drifting state |
+| `quad_drift_to_drift_frac` result key | P(drifting → drifting): prob of staying in drift | How sticky the drifting state is (bad if high) |
+| `quad_transition_stability` result key | mean(P(ideal→ideal), P(drift→drift)); high=states are sticky | Overall state persistence / regime stickiness |
+| `quadtransitions` CLI command | full 2×2 transition matrix + stability score | Markov-style quadrant transition probabilities |
+| `quad_tail_ideal_frac` result key | ideal frac in last 25% of steps | Whether generation ends strong |
+| `quad_tail_coh3_mean` result key | mean coh3 in last 25% of steps | Coherence quality at the end of the generation |
+| `quad_tail_vel_mean` result key | mean velocity in last 25% of steps | Velocity (focus) at the end of the generation |
+| `quad_tail_conf_mean` result key | mean confidence in last 25% of steps | Model confidence at the end of the generation |
+| `quad_tail_score` result key | 0.4×tail_ideal + 0.3×tail_coh3 + 0.3×(1−tail_vel); composite tail quality | Whether the generation finishes in a strong state |
+| `quadtail` CLI command | last-25% ideal/coh3/vel/conf + tail score vs global | Tail analysis: does the generation finish strong? |
+| `quad_head_ideal_frac` result key | ideal frac in first 25% of steps | How strongly the generation starts |
+| `quad_head_coh3_mean` result key | mean coh3 in first 25% of steps | Coherence quality at the start of the generation |
+| `quad_head_vel_mean` result key | mean velocity in first 25% of steps | Velocity level at the start of the generation |
+| `quad_head_conf_mean` result key | mean confidence in first 25% of steps | Model confidence at the start of the generation |
+| `quad_head_score` result key | 0.4×head_ideal + 0.3×head_coh3 + 0.3×(1−head_vel); composite head quality | Whether the generation starts in a strong state |
+| `quadhead` CLI command | first-25% ideal/coh3/vel/conf + head score vs global | Head analysis: does the generation start strong? |
+| `quad_head_tail_ideal_delta` result key | tail_ideal_frac − head_ideal_frac; positive=ideal density grows | Whether ideal state increases toward the end |
+| `quad_head_tail_coh3_delta` result key | tail_coh3_mean − head_coh3_mean; positive=coherence grows | Whether coherence builds over the generation |
+| `quad_head_tail_vel_delta` result key | tail_vel_mean − head_vel_mean; negative=decelerating (good) | Whether velocity decreases (focuses) over the generation |
+| `quad_head_tail_score_delta` result key | tail_score − head_score; positive=improving arc | Overall quality improvement from start to finish |
+| `quad_generation_arc` result key | signed (tail_score − head_score); positive=improving, negative=declining | Scalar arc of the generation: is it getting better or worse? |
+| `quadarc` CLI command | head→tail deltas for ideal/coh3/vel + composite arc label | Full generation arc: improving / stable / declining |
+| `quad_mid_ideal_frac` result key | ideal frac in the middle 50% of steps | How the body of the generation performs |
+| `quad_mid_coh3_mean` result key | mean coh3 in middle 50% of steps | Coherence quality in the body of the generation |
+| `quad_mid_vel_mean` result key | mean velocity in middle 50% of steps | Velocity level in the body of the generation |
+| `quad_mid_conf_mean` result key | mean confidence in middle 50% of steps | Model confidence in the body of the generation |
+| `quad_mid_score` result key | 0.4×mid_ideal + 0.3×mid_coh3 + 0.3×(1−mid_vel); composite mid quality | Quality of the generation's middle segment |
+| `quadmid` CLI command | middle-50% ideal/coh3/vel/conf + mid score vs global | Mid analysis: generation body quality |
+| `quad_peak_step` result key | normalized position (0=start,1=end) of max coh3; early/mid/late label | Where in the generation coherence peaks |
+| `quad_peak_coh3` result key | max coh3 value in the generation | Highest single-step coherence achieved |
+| `quad_peak_conf` result key | confidence value at the peak coh3 step | Model confidence when coherence is at its best |
+| `quad_trough_step` result key | normalized position of min coh3 step; early/mid/late label | Where in the generation coherence reaches its lowest |
+| `quad_peak_to_trough_range` result key | max_coh3 − min_coh3: dynamic range of coherence | How wide the coherence swings across the generation |
+| `quadpeak` CLI command | peak/trough coh3 position + dynamic range + conf at peak | Peak and trough analysis for coherence signal |
+| `quad_overall_segment_score` result key | 0.25×head + 0.50×mid + 0.25×tail score; center-weighted quality | Single score weighting all three generation segments |
+| `quad_segment_range` result key | max(head,mid,tail) − min(head,mid,tail); spread of quality across segments | How evenly quality is distributed across head/mid/tail |
+| `quadpanorama` CLI command | head/mid/tail scores side-by-side + best/worst + weighted overall | Quality panorama across all three generation segments |
+| `quad_q1_ideal_frac` result key | ideal frac in Q1 (steps 0-25%) | Ideal density in the first quartile |
+| `quad_q2_ideal_frac` result key | ideal frac in Q2 (steps 25-50%) | Ideal density in the second quartile |
+| `quad_q3_ideal_frac` result key | ideal frac in Q3 (steps 50-75%) | Ideal density in the third quartile |
+| `quad_q4_ideal_frac` result key | ideal frac in Q4 (steps 75-100%) | Ideal density in the fourth quartile |
+| `quad_ideal_peak_quartile` result key | quartile (1-4) with the highest ideal-step density | Which quartile the model spends most time in ideal state |
+| `quaddensity` CLI command | ideal frac per Q1-Q4 bar chart + peak quartile indicator | Ideal-state density heatmap across quartiles |
+| `quad_total_step_count` result key | total steps analyzed in the generation | Raw step count |
+| `quad_ideal_step_count` result key | raw count of ideal steps | Absolute number of ideal-state steps |
+| `quad_drifting_step_count` result key | raw count of drifting steps | Absolute number of drifting-state steps |
+| `quad_exploring_step_count` result key | raw count of exploring steps | Absolute number of exploring-state steps |
+| `quad_flat_step_count` result key | raw count of flat steps | Absolute number of flat-state steps |
+| `quadcounts` CLI command | ideal/drift/explore/flat counts + fraction bars | Absolute quadrant step counts with visual bars |
+| `quad_coh3_linear_deviation` result key | mean \|coh3[i] − linear_interp[i]\|; high=nonlinear shape | How much coherence deviates from a straight start-to-end line |
+| `quad_coh3_midpoint_vs_linear` result key | coh3[mid] − linear interp at mid; positive=arch, negative=bowl | Whether coherence arches (peaks in middle) or bowls (troughs in middle) |
+| `quad_vel_linear_deviation` result key | mean \|vel[i] − linear_interp[i]\| for velocity | How much velocity deviates from a straight start-to-end line |
+| `quad_vel_midpoint_vs_linear` result key | vel[mid] − linear interp; negative=dips in middle (good focus episode) | Whether velocity dips (focuses) or peaks in the middle of the generation |
+| `quadshape` CLI command | coh3/vel linear deviation + midpoint vs linear + shape label | Signal shape analysis: arch / bowl / linear |
+| Adaptive score floor from conf_ema decline | block bottom-20% finite candidates when conf_ema falls ≥4 steps | Raises bar for sampling when model is losing confidence |
+| `topicshift` CLI command | marks steps where velocity > mean+1σ as topic-jump candidates | Semantic jump detector for last generation |
+| `lastgen` CLI command | compact one-line summary: text + ConfEMA/Coh/C3/CohTrend/Flu/PPL | Quick re-read of last gen without re-running |
+| `genprofile <prompt>` CLI command | generate + inline conf/tokenmap/coh3/var/topk/topicshift report | All-in-one generation profiler |
 | Adaptive TFS z from entropy | _tfs.z = clip(0.97-0.04×H_norm, 0.90, 0.98) | High entropy→tighter tail cut; confident→looser |
 | `coh_trend` result key | linear slope of coh3_steps | Positive=coherence growing; negative=semantic drift |
 | Stats line additions | CohTrend, SGSlope, VPrecEMA, [!DECLINING] flag | Richer per-generation diagnostics in the output summary |
