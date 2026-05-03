@@ -12005,6 +12005,30 @@ class IECNN:
                 )()
             ))(),
             # combined third-based shape score: coh3/conf growth minus velocity growth
+            "quad_third_velocity_trend": (lambda: (
+                0.0 if len(_velocity_steps) < 3
+                else (lambda _qtvt_n=len(_velocity_steps),
+                           _qtvt_s1=max(1, int(_qtvt_n * 0.333)),
+                           _qtvt_s2=max(2, int(_qtvt_n * 0.667)),
+                           _qtvt_m1=sum(_velocity_steps[:max(1, int(_qtvt_n * 0.333))]) / max(_qtvt_s1, 1),
+                           _qtvt_m2=sum(_velocity_steps[max(1, int(_qtvt_n * 0.333)):max(2, int(_qtvt_n * 0.667))]) / max(_qtvt_s2 - _qtvt_s1, 1),
+                           _qtvt_m3=sum(_velocity_steps[max(2, int(_qtvt_n * 0.667)):]) / max(_qtvt_n - _qtvt_s2, 1):
+                    round((_qtvt_m3 - _qtvt_m1) - abs(_qtvt_m2 - ((_qtvt_m1 + _qtvt_m3) / 2.0)), 4)
+                )()
+            ))(),
+            # third-wise velocity arc: last-third minus first-third, with middle penalty
+            "quad_third_coh3_trend": (lambda: (
+                0.0 if len(_coh3_steps) < 3
+                else (lambda _qtct_n=len(_coh3_steps),
+                           _qtct_s1=max(1, int(_qtct_n * 0.333)),
+                           _qtct_s2=max(2, int(_qtct_n * 0.667)),
+                           _qtct_m1=sum(_coh3_steps[:max(1, int(_qtct_n * 0.333))]) / max(_qtct_s1, 1),
+                           _qtct_m2=sum(_coh3_steps[max(1, int(_qtct_n * 0.333)):max(2, int(_qtct_n * 0.667))]) / max(_qtct_s2 - _qtct_s1, 1),
+                           _qtct_m3=sum(_coh3_steps[max(2, int(_qtct_n * 0.667)):]) / max(_qtct_n - _qtct_s2, 1):
+                    round((_qtct_m3 - _qtct_m1) - abs(_qtct_m2 - ((_qtct_m1 + _qtct_m3) / 2.0)), 6)
+                )()
+            ))(),
+            # third-wise coh3 arc: last-third minus first-third, with middle penalty
             "quad_vel_contrast": (lambda: (
                 0.0 if min(len(_coh3_steps), len(_velocity_steps)) < 2
                 else (lambda _qvc_n=min(len(_coh3_steps), len(_velocity_steps)),

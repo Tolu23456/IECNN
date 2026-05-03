@@ -3202,6 +3202,20 @@ def _interactive_loop(model):
             print(f"  vel:    T1={_qth_t1v:.6f}  T2={_qth_t2v:.6f}  T3={_qth_t3v:.6f}")
             continue
 
+        if low.startswith("quadthirdtrends"):
+            _qtt_res = getattr(model, "_last_gen_result", None)
+            if _qtt_res is None:
+                print("  No generation yet. Run a prompt first."); continue
+            _qtt_v = _qtt_res.get("quad_third_velocity_trend", 0.0)
+            _qtt_c = _qtt_res.get("quad_third_coh3_trend", 0.0)
+            _qtt_s = _qtt_res.get("quad_third_shape_score", 0.0)
+            _qtt_lbl = ("rising" if (_qtt_v + _qtt_c) > 0.02 else "falling" if (_qtt_v + _qtt_c) < -0.02 else "mixed")
+            print(f"\n  Thirds trend analysis")
+            print(f"  velocity_trend: {_qtt_v:+.4f}")
+            print(f"  coh3_trend:     {_qtt_c:+.6f}")
+            print(f"  shape_score:     {_qtt_s:+.4f}  [{_qtt_lbl}]")
+            continue
+
         if low.startswith("quadratiostats"):
             _qrs_res = getattr(model, "_last_gen_result", None)
             if _qrs_res is None:
