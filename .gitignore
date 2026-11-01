@@ -11,9 +11,12 @@ git.key
 *_token*
 .env
 
-# data is re-downloadable
+# data corpus is re-downloadable / generated, but code must be committed
 data/*
 !data/.gitkeep
+!data/__init__.py
+!data/dataset.py
+!data/prepare.py
 
 # training artifacts are rebuilt by runs
 checkpoints/*
