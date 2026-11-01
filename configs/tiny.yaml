@@ -1,0 +1,16 @@
+# Overlay for slow computers. Use together with a rung config.
+# Does NOT change n_regions or n_passes, so rung flags keep their meaning.
+data:
+  seq_len: 128
+model:
+  d: 64
+  d_q: 16
+  d_v: 32
+  d_s: 64
+  n_dots: 4
+training:
+  steps: 3000
+  batch_size: 16
+  warmup_steps: 100
+  eval_every: 250
+  checkpoint_every: 500

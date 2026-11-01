@@ -1,0 +1,5 @@
+# Rung E3: adds within-region messages.
+base: e2_regions.yaml
+name: e3_messages
+model:
+  use_messages: true

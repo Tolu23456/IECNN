@@ -1,0 +1,10 @@
+# Rung E5: UBM checkpoint promotion on top of E4.
+base: e4_decorrelation.yaml
+name: e5_ubm_promotion
+ubm:
+  promotion:
+    enabled: true
+    every_steps: 5000
+    top_k: 16
+    settle_steps: 500
+    rollback_epsilon: 0.002

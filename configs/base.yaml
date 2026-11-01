@@ -1,0 +1,60 @@
+name: base
+seed: 0
+data:
+  dir: data
+  seq_len: 256
+  val_fraction: 0.05
+  test_fraction: 0.05
+ubm:
+  target_vocab_size: 512
+  max_base_len: 32
+  max_digit_group: 3
+model:
+  kind: iecnn            # iecnn | gru | transformer
+  d: 128
+  d_q: 32
+  d_v: 64
+  d_s: 128
+  n_dots: 8
+  n_regions: 4
+  n_passes: 3
+  spans: [32, 64, 128, 256]   # first n_regions entries are used
+  share_pass_params: true
+  dynamic_query: false
+  pooling: log_linear    # log_linear | mixture
+  use_weights: true      # false = uniform weights
+  use_cross_region: true
+  use_messages: false
+  message_dim: 16
+  message_topology: ring
+  ring_radius: 2
+  message_dropout: 0.2
+  halting: none          # none | dispersion
+  hard_top_m: 4
+consensus:
+  tau_max: 1.0
+  tau_min: 0.2
+  kappa: 0.7
+  rho: 0.5
+  weight_floor_fraction: 0.1   # floor = fraction / n_dots, zero in final 10% of steps
+training:
+  steps: 50000
+  batch_size: 64
+  lr: 1.0e-3
+  warmup_steps: 500
+  weight_decay: 0.01
+  betas: [0.9, 0.95]
+  grad_clip: 1.0
+  eval_every: 1000
+  checkpoint_every: 1000
+  seeds: [0, 1, 2]
+  lambda_r: 0.0
+  lambda_d: 0.0
+  lambda_c: 0.0
+  lambda_k: 0.0
+  lambda_w: 0.0
+  gamma_b: 2.0
+  correlation_ramp_steps: 5000
+  hard_batch_fraction: 0.0
+  hard_batch_start: 0.7
+  dot_dropout: 0.0

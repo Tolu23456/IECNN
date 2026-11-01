@@ -1,0 +1,11 @@
+# Rung E1: adds learned weights and 3 passes (one region).
+# Agent: record in DECISIONS.md which auxiliary losses are on at each rung.
+base: e0_plain_ensemble.yaml
+name: e1_weights_passes
+model:
+  n_passes: 3
+  use_weights: true
+training:
+  lambda_d: 0.1
+  lambda_k: 0.05
+  lambda_w: 0.05

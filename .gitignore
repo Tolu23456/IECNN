@@ -1,0 +1,25 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv
+*/.venv
+
+# secrets — never commit
+git.key
+*.key
+*_token*
+.env
+
+# data is re-downloadable
+data/*
+!data/.gitkeep
+
+# training artifacts are rebuilt by runs
+checkpoints/*
+!checkpoints/.gitkeep
+results/*.png
+!results/.gitkeep
+
+# spec is kept out of the public repo for now (per Tolu, 2026-11-01)
+spec/

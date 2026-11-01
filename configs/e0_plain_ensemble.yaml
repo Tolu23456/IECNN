@@ -1,0 +1,9 @@
+# Rung E0: plain ensemble. One pass, one region, uniform weights, main loss only.
+base: base.yaml
+name: e0_plain_ensemble
+model:
+  n_passes: 1
+  n_regions: 1
+  use_weights: false
+  use_cross_region: false
+  use_messages: false

@@ -1,0 +1,7 @@
+# Rung E4: adds the decorrelation penalty and late hard-mode batches.
+base: e3_messages.yaml
+name: e4_decorrelation
+training:
+  lambda_c: 0.01
+  hard_batch_fraction: 0.2
+  dot_dropout: 0.05

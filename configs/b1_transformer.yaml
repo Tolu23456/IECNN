@@ -1,0 +1,4 @@
+base: base.yaml
+name: b1_transformer
+model:
+  kind: transformer

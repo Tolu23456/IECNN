@@ -1,0 +1,8 @@
+# Rung E2: adds 4 regions as stages and cross-region competition.
+base: e1_weights_passes.yaml
+name: e2_regions
+model:
+  n_regions: 4
+  use_cross_region: true
+training:
+  lambda_r: 0.3
