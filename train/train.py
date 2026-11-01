@@ -20,20 +20,32 @@ import torch.nn.functional as F
 
 from config import load_config
 from data.dataset import Batcher, tokenize_corpus
-from models.baselines import build_gru_baseline, build_transformer_baseline
+from train.losses import main_loss
 from train.evaluate import evaluate_bpc
+from models.baselines import build_gru_baseline, build_transformer_baseline
 from train.schedules import lr_at
 from utils import set_seed, set_torch_threads, count_parameters
 
 
+def _iecnn_n_dots(model) -> int:
+    """Dots per region of an IECNN (for the weight floor eps = 0.1 / N)."""
+    try:
+        return int(model.regions[0].dots.N)
+    except AttributeError:
+        return 1
+
+
 def build_model(config: dict, vocab_size: int) -> torch.nn.Module:
-    """Model factory for the 'kind' switch (gru | transformer; iecnn: Phase 3)."""
+    """Model factory for the 'kind' switch (gru | transformer | iecnn)."""
     kind = config["model"]["kind"]
     if kind == "gru":
         return build_gru_baseline(config, vocab_size)
     if kind == "transformer":
         return build_transformer_baseline(config, vocab_size)
-    raise NotImplementedError(f"model kind '{kind}' is built in a later phase")
+    if kind == "iecnn":
+        from models.iecnn import build_iecnn
+        return build_iecnn(config, vocab_size)
+    raise ValueError(f"unknown model kind '{kind}'")
 
 
 def save_checkpoint(path: Path, state: dict) -> None:
@@ -128,6 +140,30 @@ def train_one(config: dict, seed: int, out_dir: Path, max_steps: int | None = No
     log = _CSVLog(csv_path, ["step", "lr", "loss", "bpc_val", "elapsed_s"],
                   append=start_step > 0)
 
+    # ---- IECNN-specific schedules and aux-loss weights (spec 04/06) ------
+    is_iecnn = config["model"]["kind"] == "iecnn"
+    tcfg_all = config.get("training", {})
+    lambdas = {
+        "lambda_r": float(tcfg_all.get("lambda_r", 0.0)),   # region a.u.x
+        "lambda_d": float(tcfg_all.get("lambda_d", 0.0)),   # boosted per-dot
+        "lambda_c": float(tcfg_all.get("lambda_c", 0.0)),   # decorrelation (E4)
+        "lambda_k": float(tcfg_all.get("lambda_k", 0.0)),   # confidence calib.
+        "lambda_w": float(tcfg_all.get("lambda_w", 0.0)),   # weight entropy bonus
+        "gamma_b": float(tcfg_all.get("gamma_b", 2.0)),
+    }
+    cons = config.get("consensus", {})
+    tau_max = float(cons.get("tau_max", 1.0)); tau_min = float(cons.get("tau_min", 0.2))
+    tau_warmup = int(cons.get("tau_warmup", 2000))
+    lam_ramp = int(cons.get("lambda_c_ramp_steps", 5000))
+    weight_floor_fraction = float(cons.get("weight_floor_fraction", 0.1))
+    hard_start = float(tcfg_all.get("hard_batch_start", 0.7))
+    hard_frac = float(tcfg_all.get("hard_batch_fraction", 0.2))
+    hard_rng = random.Random(seed * 7919 + 3)
+
+    from train.schedules import (temperature_at, weight_floor_at,
+                                 correlation_lambda, weight_entropy_lambda,
+                                 use_hard_batch)
+
     context = min(seq_len, getattr(model, "context_length", seq_len))
     smooth: float | None = None
     t0 = time.perf_counter()
@@ -141,9 +177,47 @@ def train_one(config: dict, seed: int, out_dir: Path, max_steps: int | None = No
         x, y = batcher.next_batch()
         xb = torch.from_numpy(np.ascontiguousarray(x))
         yb = torch.from_numpy(np.ascontiguousarray(y))
-        out = model(xb)
-        loss = F.nll_loss(out["final_log_probs"].reshape(-1, out["final_log_probs"].size(-1)),
-                          yb.reshape(-1))
+        kwargs = {}
+        if is_iecnn:
+            tau0 = temperature_at(step, steps, tau_warmup, tau_max, tau_min)
+            floor = weight_floor_at(step, steps, weight_floor_fraction / _iecnn_n_dots(model))
+            hard = use_hard_batch(step, steps, hard_start, hard_frac, hard_rng)
+            kwargs = {"tau0": tau0, "hard_mode": bool(hard), "floor": floor}
+        out = model(xb, **kwargs)
+        loss = main_loss(out["final_log_probs"], yb)
+        aux_parts = {"main": float(loss.item())}
+
+        if is_iecnn and any(v != 0 for k, v in lambdas.items() if k != "gamma_b"):
+            from train.losses import (region_loss, boosted_dot_loss,
+                                      decorrelation_penalty, confidence_loss,
+                                      weight_entropy_bonus)
+            last_pass = out["per_pass_last_region"][-1]
+            if lambdas["lambda_r"] > 0 and len(out["region_outputs"]) > 1:
+                stack = torch.stack([ro["log_b"] for ro in out["region_outputs"]])
+                lr_term = region_loss(stack, yb)
+                loss = loss + lambdas["lambda_r"] * lr_term
+                aux_parts["L_region"] = float(lr_term.detach())
+            if lambdas["lambda_d"] > 0:
+                ld = boosted_dot_loss(last_pass["log_pi"], out["final_log_probs"],
+                                      yb, lambdas["gamma_b"])
+                loss = loss + lambdas["lambda_d"] * ld
+                aux_parts["L_dot"] = float(ld.detach())
+            if lambdas["lambda_c"] > 0:
+                lc_val = correlation_lambda(step, lam_ramp, lambdas["lambda_c"])
+                lc = decorrelation_penalty(last_pass["log_pi"],
+                                           out["final_log_probs"], yb)
+                loss = loss + lc_val * lc
+                aux_parts["L_corr"] = float(lc.detach()) * lc_val
+            if lambdas["lambda_k"] > 0:
+                lk = confidence_loss(last_pass["gamma"], last_pass["log_pi"], yb)
+                loss = loss + lambdas["lambda_k"] * lk
+                aux_parts["L_conf"] = float(lk.detach())
+            if lambdas["lambda_w"] > 0:
+                lw_val = weight_entropy_lambda(step, steps, lambdas["lambda_w"])
+                lw = weight_entropy_bonus(last_pass["weights"])
+                loss = loss - lw_val * lw
+                aux_parts["L_w"] = -float(lw.detach()) * lw_val
+
         opt.zero_grad(set_to_none=True)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
@@ -154,12 +228,14 @@ def train_one(config: dict, seed: int, out_dir: Path, max_steps: int | None = No
         last = step == steps - 1
         if (step > 0 and step % eval_every == 0) or last:
             cut = None if last else eval_chars
-            bpc = evaluate_bpc(model, ubm, val_text, seq_len=context, max_chars=cut)
+            bpc = evaluate_bpc(model, ubm, val_text, seq_len=context, max_chars=cut,
+                               tau0=kwargs.get("tau0", 1.0) if is_iecnn else 1.0)
             elapsed = time.perf_counter() - t0
             log.row([step, lr, round(smooth, 5), round(bpc, 5), round(elapsed, 1)])
             best_val = min(best_val, bpc)
             if step % (eval_every * 10) == 0 or last:
-                print(f"[{name} seed{seed}] step {step} loss {smooth:.4f} "
+                aux_str = " ".join(f"{k} {v:.3f}" for k, v in aux_parts.items())
+                print(f"[{name} seed{seed}] step {step} {aux_str} "
                       f"val bpc {bpc:.4f} lr {lr:.2e} ({elapsed:.0f}s)")
 
         if (step > 0 and step % checkpoint_every == 0) or last:
@@ -177,7 +253,17 @@ def train_one(config: dict, seed: int, out_dir: Path, max_steps: int | None = No
             })
 
     elapsed_total = time.perf_counter() - t0
-    final_bpc = evaluate_bpc(model, ubm, val_text, seq_len=context)
+    final_eval_kwargs = {}
+    if is_iecnn:
+        final_eval_kwargs = {"tau0": temperature_at(steps - 1, steps, tau_warmup,
+                                                    tau_max, tau_min)}
+    final_bpc = evaluate_bpc(model, ubm, val_text, seq_len=context,
+                             **final_eval_kwargs)
+    mode_gap_val = None
+    if is_iecnn:            # spec 08: report the soft-to-hard gap at every eval
+        hard_bpc = evaluate_bpc(model, ubm, val_text, seq_len=context,
+                                hard_mode=True, **final_eval_kwargs)
+        mode_gap_val = round(hard_bpc - final_bpc, 5)
     log.row([steps - 1, lr_at(steps - 1, steps, warmup, peak_lr), smooth, round(final_bpc, 5), round(elapsed_total, 1)])
     log.close()
 
@@ -196,6 +282,9 @@ def train_one(config: dict, seed: int, out_dir: Path, max_steps: int | None = No
         "tokens_per_s": round(tokens_seen / max(elapsed_total, 1e-9), 1),
         "estimated_train_flops": int(6 * count_parameters(model) * tokens_seen),
     }
+    if mode_gap_val is not None:
+        summary["final_hard_bpc"] = round(final_bpc + mode_gap_val, 5)
+        summary["mode_gap"] = mode_gap_val
     (out_dir / "summary.json").write_text(json.dumps(summary, indent=1))
     (out_dir / "config_used.json").write_text(json.dumps(config, indent=1, default=str))
     print(f"DONE {name} seed{seed}: val bpc {final_bpc:.4f} "

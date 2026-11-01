@@ -14,12 +14,14 @@ import torch
 
 @torch.no_grad()
 def evaluate_bpc(model, ubm, text: str, hard_mode: bool = False,
-                 seq_len: int | None = None, max_chars: int | None = None) -> float:
+                 seq_len: int | None = None, max_chars: int | None = None,
+                 tau0: float = 1.0, floor: float = 0.0) -> float:
     """Bits per character of `text` under the model, optionally truncated.
 
     Truncation (`max_chars`) stops after the first prediction token whose
     cumulative expansion length reaches the cap, so the numerator NLL and the
-    denominator characters stay consistent at any cut point.
+    denominator characters stay consistent at any cut point. tau0/floor are
+    forwarded to IECNN models (annealed temperature + weight floor at eval).
     """
     device = next(model.parameters()).device
     ids = ubm.encode(text)
@@ -27,6 +29,8 @@ def evaluate_bpc(model, ubm, text: str, hard_mode: bool = False,
         raise ValueError("cannot evaluate empty text")
     expand_len = [len(ubm.expand(int(i))) for i in ids]
     context = seq_len or getattr(model, "context_length", 256) or 256
+    has_regions = hasattr(model, "regions")
+    kwargs = {"tau0": tau0, "floor": floor} if has_regions else {"hard_mode": hard_mode}
 
     nll_total = 0.0
     chars_total = 0
@@ -35,7 +39,10 @@ def evaluate_bpc(model, ubm, text: str, hard_mode: bool = False,
         window = ids[start:end]
         x = torch.tensor([window[:-1]], dtype=torch.long, device=device)
         y = torch.tensor([window[1:]], dtype=torch.long, device=device)
-        out = model(x, hard_mode=hard_mode)
+        if has_regions:
+            out = model(x, hard_mode=hard_mode, **kwargs)
+        else:
+            out = model(x)
         logp = out["final_log_probs"] if isinstance(out, dict) else out
         nll = -logp[0].gather(1, y[0].unsqueeze(1)).squeeze(1)
         done = False
