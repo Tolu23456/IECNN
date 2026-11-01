@@ -1,0 +1,7 @@
+train chars 1,003,856  val chars 55,769
+trained in 20.4s: 1024 bases, 760 merges
+vocab   264: tokens  55,769  chars/token  1.000  roundtrip True
+vocab   264: tokens  55,769  chars/token  1.000  roundtrip True
+vocab   512: tokens  29,754  chars/token  1.874  roundtrip True
+vocab  1024: tokens  24,708  chars/token  2.257  roundtrip True
+DONE

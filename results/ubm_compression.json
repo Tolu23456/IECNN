@@ -1,0 +1,34 @@
+[
+ {
+  "vocab_size": 264,
+  "merges": 0,
+  "val_chars": 55769,
+  "val_tokens": 55769,
+  "chars_per_token": 1.0,
+  "roundtrip": true
+ },
+ {
+  "vocab_size": 264,
+  "merges": 0,
+  "val_chars": 55769,
+  "val_tokens": 55769,
+  "chars_per_token": 1.0,
+  "roundtrip": true
+ },
+ {
+  "vocab_size": 512,
+  "merges": 248,
+  "val_chars": 55769,
+  "val_tokens": 29754,
+  "chars_per_token": 1.874,
+  "roundtrip": true
+ },
+ {
+  "vocab_size": 1024,
+  "merges": 760,
+  "val_chars": 55769,
+  "val_tokens": 24708,
+  "chars_per_token": 2.257,
+  "roundtrip": true
+ }
+]
