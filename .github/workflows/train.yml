@@ -132,7 +132,8 @@ jobs:
           if [ -n "$OVERLAY" ]; then ARGS="$ARGS --overlay $OVERLAY"; fi
           if [ -f "$OUT/checkpoint.pt" ]; then ARGS="$ARGS --resume"; fi
           if [ -n "$MAXSTEPS" ]; then ARGS="$ARGS --max-steps $MAXSTEPS"; fi
-          CAP=$(( ${CHUNKMIN:-320} > 0 ? ${CHUNKMIN} : 100000 ))
+          CAP_MIN="${CHUNKMIN:-320}"
+          if [ "$CAP_MIN" -gt 0 ]; then CAP="$CAP_MIN"; else CAP="100000"; fi
           echo "args: $ARGS (cap ${CAP} min)"
           set +e
           timeout "${CAP}m" python -m ${{ github.event.inputs.train_module }} $ARGS
