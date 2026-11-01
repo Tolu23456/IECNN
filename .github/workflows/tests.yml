@@ -1,0 +1,26 @@
+# Runs the test suite on every push. Fast and free on public repos.
+name: tests
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest   # 4 vCPU, 16 GB RAM, no GPU
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install PyTorch (CPU) and project requirements
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -r requirements.txt
+      - name: Run test suite
+        run: python -m pytest tests/ -v --tb=short

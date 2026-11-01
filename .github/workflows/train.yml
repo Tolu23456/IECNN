@@ -1,0 +1,82 @@
+# Long-running training on GitHub's machines.
+# Trigger from the Actions tab: choose the config, seeds, and optional overlay.
+# Results (CSV logs, checkpoints, reports) are uploaded as downloadable artifacts,
+# and small CSV/result files can optionally be committed back to the repo.
+name: train
+on:
+  workflow_dispatch:
+    inputs:
+      config:
+        description: "Config file under configs/ (e.g. e1_weights_passes.yaml)"
+        default: "e0_plain_ensemble.yaml"
+      overlay:
+        description: "Optional overlay config (e.g. tiny.yaml), empty for none"
+        default: ""
+      seeds:
+        description: "Seeds, comma separated"
+        default: "0,1,2"
+      train_module:
+        description: "Training entrypoint module"
+        default: "src.train.train"
+      commit_results:
+        description: "Commit results/*.csv back to the repo"
+        default: "true"
+
+permissions:
+  contents: write
+
+jobs:
+  train:
+    runs-on: ubuntu-latest   # 4 vCPU, 16 GB RAM, no GPU
+    timeout-minutes: 720     # 12 hours max per job
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install PyTorch (CPU) and project requirements
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -r requirements.txt
+      - name: Train (one job per seed)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p results checkpoints
+          OVERLAY=""
+          OVERLAY_ARG=""
+          if [ -n "${{ github.event.inputs.overlay }}" ]; then
+            OVERLAY="${{ github.event.inputs.overlay }}"
+            OVERLAY_ARG="--overlay $OVERLAY"
+          fi
+          for seed in ${{ github.event.inputs.seeds }}; do
+            echo "=== seed $seed ==="
+            python -m ${{ github.event.inputs.train_module }} \
+              --config configs/${{ github.event.inputs.config }} \
+              $OVERLAY_ARG \
+              --seed "$seed"
+          done
+      - name: Upload results artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: results-${{ github.event.inputs.config }}-${{ github.event.inputs.seeds }}
+          path: |
+            results/
+            checkpoints/
+            reports/
+          if-no-files-found: error
+      - name: Commit small result files back
+        if: ${{ github.event.inputs.commit_results == 'true' }}
+        run: |
+          set -euo pipefail
+          git config user.name "IECNN Actions bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add results/*.csv results/*.json 2>/dev/null || true
+          if git diff --cached --quiet; then
+            echo "No result files to commit."
+          else
+            git commit -m "results: ${{ github.event.inputs.config }} seeds ${{ github.event.inputs.seeds }} [run ${{ github.run_id }}]"
+            git push
+          fi
