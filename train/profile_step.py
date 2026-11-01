@@ -108,7 +108,9 @@ def main() -> None:
                     else:
                         from models import consensus
                         consensus.uniform_weights(region.n_dots, pi_prev)
-                    pooled = torch.einsum("bfn,bfnd->bfd", o.log_pi.exp().detach() * 0 + 0.5, state_prev)
+                    pooled = torch.einsum("bfn,bfnd->bfd",
+                                          torch.full(o.state.shape[:-1], 1.0 / region.n_dots),
+                                          state_prev)
                     if p == region.n_passes:
                         rops.append((region, o, state_prev, pooled))
                 if r + 1 < len(model.regions):
