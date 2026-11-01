@@ -14,3 +14,5 @@ training:
   warmup_steps: 100
   eval_every: 250
   checkpoint_every: 500
+  eval_chars: 6000
+  torch_threads: 2
