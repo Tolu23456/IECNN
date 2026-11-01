@@ -47,6 +47,11 @@ class TransformerLanguageModel(nn.Module):
         self.seq_len = seq_len
         self.embed = nn.Embedding(vocab_size, d)
         self.pos = nn.Embedding(seq_len, d)
+        # GPT-style init: small-normal embeddings keep tied logits near zero.
+        # (Default N(0,1) embeds + tied head gave init logits ~N(0, d_model),
+        #  i.e. a confidently-wrong model: init loss 173 nats on the full config.)
+        nn.init.normal_(self.embed.weight, mean=0.0, std=0.02)
+        nn.init.normal_(self.pos.weight, mean=0.0, std=0.02)
         self.blocks = nn.ModuleList([
             _CausalBlock(d, n_heads) for _ in range(n_layers)
         ])

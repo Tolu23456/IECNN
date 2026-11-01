@@ -117,3 +117,23 @@ def test_baseline_forward_shapes_and_valid_distribution():
     p = logp.exp()
     assert torch.allclose(p.sum(-1), torch.ones(3, 12), atol=1e-5)
     assert torch.isfinite(logp).all()
+
+
+def test_init_loss_near_uniform_at_full_config():
+    """bpc at init must be ~log(V): catches embedding-scale bugs (bug found on
+    Actions where the full transformer started at 173 nats instead of 6.24)."""
+    from config import load_config
+    from utils import set_seed
+
+    set_seed(0)
+    for name, builder in (("b1_transformer", build_transformer_baseline),
+                          ("b0_gru", build_gru_baseline)):
+        cfg = load_config(f"configs/{name}.yaml")
+        model = builder(cfg, 512)
+        x = torch.randint(0, 512, (2, 64))
+        out = model(x)
+        y = torch.randint(0, 512, (2, 64))
+        loss = torch.nn.functional.nll_loss(
+            out["final_log_probs"].reshape(-1, 512), y.reshape(-1)).item()
+        print(f"{name} init loss {loss:.3f}")
+        assert 4.0 < loss < 7.5, f"{name} init loss {loss} is not near ln(512)=6.24"
