@@ -1,0 +1,14 @@
+params 1,257,924
+aux_losses                               median      72.8 ms   (n=4)
+backward                                 median   19756.3 ms   (n=4)
+clip+step                                median      62.0 ms   (n=4)
+forward_model_real                       median   11099.0 ms   (n=4)
+main_loss                                median       8.7 ms   (n=4)
+r0.p1.consensus                          median    1096.1 ms   (n=4)
+r0.p1.dots_forward                       median    1238.0 ms   (n=4)
+r0.p2.consensus                          median    1093.6 ms   (n=4)
+r0.p2.dots_forward                       median    1253.0 ms   (n=4)
+r0.p3.consensus                          median    1093.4 ms   (n=4)
+r0.p3.dots_forward                       median    1241.2 ms   (n=4)
+r0.window_proj                           median      80.2 ms   (n=4)
+TOTAL fwd+bwd                            median   30511.4 ms/step
