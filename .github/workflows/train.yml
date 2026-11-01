@@ -52,6 +52,27 @@ jobs:
           python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
           python -m pip install -r requirements.txt
 
+      # ---- corpus: download + clean + split (idempotent) ------------------
+      # data/*.txt are git-ignored on purpose; this rebuilds them on the runner
+      # and records the same checksums as every other machine.
+      - name: Prepare corpus (download + split if absent)
+        env:
+          CONFIG: ${{ github.event.inputs.config }}
+          OVERLAY: ${{ github.event.inputs.overlay }}
+        run: |
+          set -euo pipefail
+          if [ -f data/train.txt ] && [ -f data/val.txt ]; then echo "corpus already present"; exit 0; fi
+          python - << 'PYEOF'
+          import os
+          from config import load_config
+          from data.prepare import prepare_all
+          overlays = [os.environ["OVERLAY"]] if os.environ["OVERLAY"] else []
+          cfg = load_config("configs/" + os.environ["CONFIG"], *overlays)
+          info = prepare_all(cfg)
+          for name, d in info["parts"].items():
+              print(name, d["chars"], d["sha256"][:16])
+          PYEOF
+
       # ---- optional cross-job resume: fetch the checkpoint artifact -------
       - name: Download previous run's checkpoint artifact (resume only)
         if: ${{ github.event.inputs.resume_artifact != '' }}
