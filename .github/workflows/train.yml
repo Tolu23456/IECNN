@@ -61,16 +61,20 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p checkpoints
-          ART_ID=$(curl -sf -H "Authorization: Bearer $GH_TOKEN" \
+          curl -sf -H "Authorization: Bearer $GH_TOKEN" \
             "https://api.github.com/repos/${{ github.repository }}/actions/artifacts?per_page=100" \
-            | python3 -c "
-import json,sys
-d=json.load(sys.stdin)
-name='$ARTIFACT'
-cands=[a for a in d.get('artifacts',[]) if a['name']==name and not a['expired']]
-if not cands:
-    print('ARTIFACT_NOT_FOUND:'+name, file=sys.stderr); sys.exit(1)
-print(cands[0]['id'])")
+            -o /tmp/artifacts.json
+          ART_ID=$(ARTIFACT="$ARTIFACT" python3 << 'PYEOF'
+          import json, os, sys
+          d = json.load(open("/tmp/artifacts.json"))
+          name = os.environ["ARTIFACT"]
+          cands = [a for a in d.get("artifacts", []) if a["name"] == name and not a["expired"]]
+          if not cands:
+              print("ARTIFACT_NOT_FOUND:" + name, file=sys.stderr)
+              sys.exit(1)
+          print(cands[0]["id"])
+          PYEOF
+          )
           echo "downloading artifact id $ART_ID"
           curl -sfL -H "Authorization: Bearer $GH_TOKEN" \
             -o checkpoints/resume.zip \
