@@ -113,21 +113,20 @@ Rules: a rung that fails after a fixed tuning budget is **cut**. If E1 fails, th
 ## Repository layout
 
 ```
-iecnn/
+IECNN/  (the repository root)
   README.md
   requirements.txt
+  config.py  utils.py
   DECISIONS.md       every choice the spec did not fix
   STATUS.md          running log, newest first
   RUNBOOK.md         exact commands to set up, run, resume
-  spec/              full specification (IECNN_FULL_SPEC.md)
+  spec/              full specification (IECNN_FULL_SPEC.md; git-ignored for now)
   configs/           base.yaml, tiny.yaml, one file per experiment rung
-  src/
-    config.py  utils.py
-    ubm/             tokenizer, merge training, promotion, fertility
-    data/            corpus preparation, packing, dataloaders
-    models/          baselines, dot, memory, region, consensus, messages, iecnn
-    train/           losses, schedules, training loop, evaluation
-    diagnostics/     ablation, win map, correlation, dispersion, and more
+  UBM/               tokenizer, merge training, promotion, fertility
+  data/              corpus preparation, packing, dataloaders
+  models/            baselines, dot, memory, region, consensus, messages, iecnn
+  train/             losses, schedules, training loop, evaluation
+  diagnostics/       ablation, win map, correlation, dispersion, and more
   scripts/           run_ladder.py, make_paste_back.py
   tests/             one test file per module
   results/  reports/  checkpoints/  data/
@@ -141,14 +140,14 @@ Requires Python 3.10 or newer. A GPU is helpful but not required; `configs/tiny.
 python -m venv .venv
 source .venv/bin/activate          # on Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-pytest                             # works today: config, utils, data split, tokenizer constants
+pytest                             # works today: config, utils, data split, UBM tokenizer suite
 ```
 
 Training commands (**planned**; they work once the training phases are built):
 
 ```bash
-python -m src.train.train --config configs/e0_plain_ensemble.yaml --seed 0
-python -m src.train.train --config configs/e1_weights_passes.yaml --overlay tiny.yaml --seed 0
+python -m train.train --config configs/e0_plain_ensemble.yaml --seed 0
+python -m train.train --config configs/e1_weights_passes.yaml --overlay tiny.yaml --seed 0
 python scripts/run_ladder.py
 ```
 

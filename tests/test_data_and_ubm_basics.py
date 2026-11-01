@@ -1,7 +1,7 @@
 import pytest
 
-from src.data.prepare import normalize_nfc, split_text
-from src.ubm.tokenizer import FIRST_LEARNED_ID, normalize_text
+from data.prepare import normalize_nfc, split_text
+from UBM.tokenizer import FIRST_LEARNED_ID, normalize_text
 
 
 def test_split_is_contiguous_and_complete():
@@ -22,7 +22,7 @@ def test_vocab_layout_constants():
 
 def test_banded_mask_shape_and_rule():
     torch = pytest.importorskip("torch")
-    from src.models.memory import banded_causal_mask
+    from models.memory import banded_causal_mask
     m = banded_causal_mask(6, 3)
     assert m.shape == (6, 6)
     assert bool(m[4, 4]) and bool(m[4, 2]) and not bool(m[4, 1]) and not bool(m[2, 4])

@@ -17,7 +17,7 @@ on:
         default: "0,1,2"
       train_module:
         description: "Training entrypoint module"
-        default: "src.train.train"
+        default: "train.train"
       commit_results:
         description: "Commit results/*.csv back to the repo"
         default: "true"

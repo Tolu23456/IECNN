@@ -1,8 +1,8 @@
 import math
 from pathlib import Path
 
-from src.config import load_config
-from src.utils import bits_per_char
+from config import load_config
+from utils import bits_per_char
 
 CONFIGS = Path(__file__).resolve().parents[1] / "configs"
 
