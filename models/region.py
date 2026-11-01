@@ -129,12 +129,14 @@ class Region(nn.Module):
                     return_parts=True)
                 trust = consensus.update_trust(trust, scores, self.rho)
                 w = consensus.compute_weights(trust, tau_p, floor=0.0 if hard_mode else floor)
-                crowd = loo                       # reused below for err feat
-                js_own = js
+                crowd, js_own = loo, js
             else:
                 w = consensus.uniform_weights(n, pi)          # rung E0: plain ensemble
-                crowd = consensus.leave_one_out_mean(pi)
-                js_own = consensus.js_divergence(pi, crowd)
+                if p < self.n_passes:      # only a LATER pass needs these numbers
+                    crowd = consensus.leave_one_out_mean(pi)
+                    js_own = consensus.js_divergence(pi, crowd)
+                else:
+                    crowd = js_own = None
 
             if self.pooling == "mixture":
                 b_mix = consensus.pool_mixture(pi, w)
