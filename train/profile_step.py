@@ -64,16 +64,20 @@ def main() -> None:
         timers.setdefault(name, []).append(dt)
         return out
 
-    # warmup (allocator, einsum paths)
+        # warmup (allocator, einsum paths)
+    print("profile: warmup forward/backward", flush=True)
     out = model(torch.from_numpy(x))
     loss = main_loss(out["final_log_probs"], torch.from_numpy(y))
     loss.backward()
     opt.zero_grad(set_to_none=True)
 
-    for _ in range(args.steps):
+    for i in range(args.steps):
+        if i % 1 == 0:
+            print(f"profile step {i} starting", flush=True)
         xb, yb = torch.from_numpy(x), torch.from_numpy(y)
 
         # ---- forward, split into the pieces Region.forward does ----------
+        print("profile: split forward", flush=True)
         def fwd():
             emb_table = model.embed.weight
             rows = model.embed(xb)
