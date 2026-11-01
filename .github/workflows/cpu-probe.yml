@@ -1,0 +1,58 @@
+# Read-only probe: prints GitHub runner CPU/memory details and benchmarks
+# PyTorch on that CPU. Used to tune the training code. No training happens here.
+name: cpu-probe
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install PyTorch CPU
+        run: |
+          python -m pip install --quiet --upgrade pip
+          python -m pip install --quiet torch --index-url https://download.pytorch.org/whl/cpu
+      - name: CPU details
+        run: |
+          echo "=== nproc ==="; nproc
+          echo "=== lscpu ==="; lscpu
+          echo "=== cpuinfo ==="; grep -E "model name|cache size|MHz" /proc/cpuinfo | head -6
+          echo "=== mem ==="; free -h
+          echo "=== disk ==="; df -h / | tail -1
+          echo "=== cgroup limits ==="; cat /sys/fs/cgroup/cpu.max 2>/dev/null || true
+      - name: PyTorch benchmark
+        run: |
+          python - << 'PY'
+          import torch, os, time
+          print("torch", torch.__version__)
+          print("torch.get_num_threads", torch.get_num_threads())
+          print(torch.__config__.parallel_info())
+          torch.manual_seed(0)
+          for nth in (1, 2, 4, None):
+              if nth is not None:
+                  torch.set_num_threads(nth)
+              label = nth if nth is not None else torch.get_num_threads()
+              # matmul: 512x512 @ 512x512 x50
+              a = torch.randn(512, 512); b = torch.randn(512, 512)
+              t0 = time.perf_counter()
+              for _ in range(50):
+                  c = a @ b
+              dt = time.perf_counter() - t0
+              gflops = 50 * 2 * 512**3 / dt / 1e9
+              print(f"[threads={label}] matmul512x50: {dt:.2f}s -> {gflops:.1f} GFLOPS")
+              # gru-like: einsum with dot dimension
+              x = torch.randn(8, 256, 8, 226)            # B,T,N,d_in
+              w = torch.randn(3, 8, 226, 64)             # 3 gates, N dots
+              h = torch.randn(8, 256, 8, 64)
+              t0 = time.perf_counter()
+              for _ in range(20):
+                  z = torch.einsum("btni,gkio->btnkgo", x, w)
+              dt2 = time.perf_counter() - t0
+              print(f"[threads={label}] grouped einsum x20: {dt2:.2f}s")
+          print("PROBE_DONE")
+          PY

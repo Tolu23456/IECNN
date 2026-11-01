@@ -1,7 +1,9 @@
-# Long-running training on GitHub's machines.
-# Trigger from the Actions tab: choose the config, seeds, and optional overlay.
-# Results (CSV logs, checkpoints, reports) are uploaded as downloadable artifacts,
-# and small CSV/result files can optionally be committed back to the repo.
+# Long-running training on GitHub's machines. Trigger manually from the
+# Actions tab ("Run workflow"); it never starts automatically.
+# - All checkpoints, results, and reports are uploaded as downloadable artifacts.
+# - Resume across jobs: pass `resume_artifact` = the artifact name of a previous
+#   run (quoted exactly, e.g. "e1_weights_passes-seeds-0-1-2"); the job downloads
+#   its checkpoint part before training and continues from where it stopped.
 name: train
 on:
   workflow_dispatch:
@@ -10,7 +12,7 @@ on:
         description: "Config file under configs/ (e.g. e1_weights_passes.yaml)"
         default: "e0_plain_ensemble.yaml"
       overlay:
-        description: "Optional overlay config (e.g. tiny.yaml), empty for none"
+        description: "Optional overlay config (e.g. tiny.yaml); leave empty for none"
         default: ""
       seeds:
         description: "Seeds, comma separated"
@@ -18,8 +20,17 @@ on:
       train_module:
         description: "Training entrypoint module"
         default: "train.train"
+      resume_artifact:
+        description: "Artifact name from an earlier run to resume from (optional)"
+        default: ""
+      run_suffix:
+        description: "Unique suffix for the artifact name (avoid collisions)"
+        default: ""
+      max_steps:
+        description: "Override training.steps (optional; empty = use config)"
+        default: ""
       commit_results:
-        description: "Commit results/*.csv back to the repo"
+        description: "Commit results/*.csv and reports/*.md back to the repo"
         default: "true"
 
 permissions:
@@ -28,7 +39,7 @@ permissions:
 jobs:
   train:
     runs-on: ubuntu-latest   # 4 vCPU, 16 GB RAM, no GPU
-    timeout-minutes: 720     # 12 hours max per job
+    timeout-minutes: 720     # 12 hours max per job <- resuming lets long runs span jobs
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -40,33 +51,66 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
           python -m pip install -r requirements.txt
-      - name: Train (one job per seed)
+
+      # ---- optional cross-job resume: fetch the checkpoint artifact -------
+      - name: Download previous run's checkpoint artifact (resume only)
+        if: ${{ github.event.inputs.resume_artifact != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT: ${{ github.event.inputs.resume_artifact }}
+        run: |
+          set -euo pipefail
+          mkdir -p checkpoints
+          ART_ID=$(curl -sf -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/artifacts?per_page=100" \
+            | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+name='$ARTIFACT'
+cands=[a for a in d.get('artifacts',[]) if a['name']==name and not a['expired']]
+if not cands:
+    print('ARTIFACT_NOT_FOUND:'+name, file=sys.stderr); sys.exit(1)
+print(cands[0]['id'])")
+          echo "downloading artifact id $ART_ID"
+          curl -sfL -H "Authorization: Bearer $GH_TOKEN" \
+            -o checkpoints/resume.zip \
+            "https://api.github.com/repos/${{ github.repository }}/actions/artifacts/$ART_ID/zip"
+          python3 -c "import zipfile; zipfile.ZipFile('checkpoints/resume.zip').extractall('checkpoints')"
+          rm checkpoints/resume.zip
+          echo "restored:"; find checkpoints -maxdepth 2 -type f | head -20
+
+      # ---- per-seed training; the trainer auto-resumes from its out dir ---
+      - name: Train (one pass per seed)
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p results checkpoints
-          OVERLAY=""
-          OVERLAY_ARG=""
-          if [ -n "${{ github.event.inputs.overlay }}" ]; then
-            OVERLAY="${{ github.event.inputs.overlay }}"
-            OVERLAY_ARG="--overlay $OVERLAY"
-          fi
+          mkdir -p results checkpoints reports
+          ARGS=""
+          if [ -n "${{ github.event.inputs.overlay }}" ];   then ARGS="$ARGS --overlay ${{ github.event.inputs.overlay }}"; fi
+          if [ -n "${{ github.event.inputs.resume_artifact }}" ]; then ARGS="$ARGS --resume"; fi
+          if [ -n "${{ github.event.inputs.max_steps }}" ]; then ARGS="$ARGS --max-steps ${{ github.event.inputs.max_steps }}"; fi
           for seed in ${{ github.event.inputs.seeds }}; do
             echo "=== seed $seed ==="
             python -m ${{ github.event.inputs.train_module }} \
               --config configs/${{ github.event.inputs.config }} \
-              $OVERLAY_ARG \
-              --seed "$seed"
+              --seed "$seed" \
+              --out-dir "checkpoints/${{ github.event.inputs.config }}_seed$seed" \
+              $ARGS
           done
-      - name: Upload results artifact
+
+      # ---- artifacts: everything a run produces, always uploaded ----------
+      - name: Upload checkpoints/results/reports artifact
         uses: actions/upload-artifact@v4
         with:
-          name: results-${{ github.event.inputs.config }}-${{ github.event.inputs.seeds }}
+          name: ${{ github.event.inputs.config }}-seeds-${{ github.event.inputs.seeds }}${{ github.event.inputs.run_suffix }}
           path: |
-            results/
             checkpoints/
+            results/
             reports/
+            data/split_info.json
           if-no-files-found: error
+          retention-days: 30
+
       - name: Commit small result files back
         if: ${{ github.event.inputs.commit_results == 'true' }}
         run: |
