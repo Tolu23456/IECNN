@@ -20,3 +20,12 @@ Run the test suite:
 cd /home/t85491005/IECNN
 .venv/bin/python -m pytest tests/ -v
 ```
+
+Run training on GitHub's computers (GitHub Actions), instead of this slow local box:
+
+1. Open https://github.com/Tolu23456/IECNN/-/ — actually the Actions tab: https://github.com/Tolu23456/IECNN/actions
+2. Click "train" in the left sidebar, then "Run workflow".
+3. Fill in: config file name (e.g. `e1_weights_passes.yaml`), optional overlay (e.g. `tiny.yaml`), seeds (`0,1,2`).
+4. Click "Run workflow". Each seed runs as one job (4 vCPU, 16 GB RAM). Results come back as download artifacts plus committed CSV files.
+
+Every push to GitHub also runs the full test suite automatically (workflow "tests").
