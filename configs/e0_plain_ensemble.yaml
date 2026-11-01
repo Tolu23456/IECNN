@@ -1,4 +1,6 @@
 # Rung E0: plain ensemble. One pass, one region, uniform weights, main loss only.
+# pooling: mixture so the consensus is the arithmetic mean of the dots'
+# distributions — exactly a "plain ensemble" (spec 08 B2).
 base: base.yaml
 name: e0_plain_ensemble
 model:
@@ -7,3 +9,4 @@ model:
   use_weights: false
   use_cross_region: false
   use_messages: false
+  pooling: mixture

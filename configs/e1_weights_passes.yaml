@@ -5,6 +5,7 @@ name: e1_weights_passes
 model:
   n_passes: 3
   use_weights: true
+  pooling: log_linear      # explicit: do NOT inherit E0's mixture pooling
 training:
   lambda_d: 0.1
   lambda_k: 0.05

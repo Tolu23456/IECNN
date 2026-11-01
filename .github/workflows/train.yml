@@ -1,9 +1,14 @@
 # Long-running training on GitHub's machines. Trigger manually from the
 # Actions tab ("Run workflow"); it never starts automatically.
-# - All checkpoints, results, and reports are uploaded as downloadable artifacts.
-# - Resume across jobs: pass `resume_artifact` = the artifact name of a previous
-#   run (quoted exactly, e.g. "e1_weights_passes-seeds-0-1-2"); the job downloads
-#   its checkpoint part before training and continues from where it stopped.
+#
+# Structure (spec file 08 wants 3 seeds per rung; real runs exceed the
+# 6-hour hosted-job cap, so with no queue timeout GitHub would kill them):
+# - one job per seed (matrix), so seeds train in parallel,
+# - each job trains one chunk of up to CHUNK minutes, uploads its checkpoint
+#   artifact, and - if the rung is not finished - re-dispatches itself with
+#   resume_artifact to continue. The chain ends when steps_final >= target.
+# - artifacts hold checkpoints + results + split info with a stable name per
+#   (rung, seed), so resume is always the newest uploaded one.
 name: train
 on:
   workflow_dispatch:
@@ -15,53 +20,59 @@ on:
         description: "Optional overlay config (e.g. tiny.yaml); leave empty for none"
         default: ""
       seeds:
-        description: "Seeds, comma separated"
+        description: "Seeds for the matrix, comma separated"
         default: "0,1,2"
       train_module:
         description: "Training entrypoint module"
         default: "train.train"
       resume_artifact:
-        description: "Artifact name from an earlier run to resume from (optional)"
+        description: "Artifact name from an earlier chunked run to resume (self-chained)"
         default: ""
       run_suffix:
-        description: "Unique suffix for the artifact name (avoid collisions)"
+        description: "Unique suffix for the artifact name (avoid collisions between rungs)"
         default: ""
       max_steps:
-        description: "Override training.steps (optional; empty = use config)"
+        description: "Override training.steps (optional; empty = config target)"
+        default: ""
+      chunk_minutes:
+        description: "Max minutes of training per job (empty = 320 in chain mode; 0 disables)"
         default: ""
       commit_results:
-        description: "Commit results/*.csv and reports/*.md back to the repo"
+        description: "Commit results/*.csv to the repo at the end of every chunk"
         default: "true"
 
 permissions:
   contents: write
+  actions: write
 
 jobs:
   train:
     runs-on: ubuntu-latest   # 4 vCPU, 16 GB RAM, no GPU
-    timeout-minutes: 350     # GitHub-hosted job cap is 6 h; stay under it and rely on resume for longer runs
+    timeout-minutes: 348     # under the 6-hour hosted cap; chains resume past it
+    strategy:
+      fail-fast: false
+      matrix:
+        seed: ${{ fromJSON(format('[{0}]', github.event.inputs.seeds)) }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: pip
-      - name: Install PyTorch (CPU) and project requirements
+      - name: Install PyTorch (CPU) + requirements
         run: |
           python -m pip install --upgrade pip
           python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
           python -m pip install -r requirements.txt
 
-      # ---- corpus: download + clean + split (idempotent) ------------------
-      # data/*.txt are git-ignored on purpose; this rebuilds them on the runner
-      # and records the same checksums as every other machine.
-      - name: Prepare corpus (download + split if absent)
+      # ---- corpus: rebuild data/*.txt on the runner (corpus is git-ignored) ----
+      - name: Prepare corpus
         env:
           CONFIG: ${{ github.event.inputs.config }}
           OVERLAY: ${{ github.event.inputs.overlay }}
         run: |
           set -euo pipefail
-          if [ -f data/train.txt ] && [ -f data/val.txt ]; then echo "corpus already present"; exit 0; fi
+          if [ -f data/train.txt ] && [ -f data/val.txt ]; then echo "present"; exit 0; fi
           python - << 'PYEOF'
           import os
           from config import load_config
@@ -73,8 +84,8 @@ jobs:
               print(name, d["chars"], d["sha256"][:16])
           PYEOF
 
-      # ---- optional cross-job resume: fetch the checkpoint artifact -------
-      - name: Download previous run's checkpoint artifact (resume only)
+      # ---- resume: fetch the previous chunk's checkpoint artifact ----------
+      - name: Restore previous chunk (resume only)
         if: ${{ github.event.inputs.resume_artifact != '' }}
         env:
           GH_TOKEN: ${{ github.token }}
@@ -85,7 +96,7 @@ jobs:
           curl -sf -H "Authorization: Bearer $GH_TOKEN" \
             "https://api.github.com/repos/${{ github.repository }}/actions/artifacts?per_page=100" \
             -o /tmp/artifacts.json
-          ART_ID=$(ARTIFACT="$ARTIFACT" python3 << 'PYEOF'
+          python - << 'PYEOF'
           import json, os, sys
           d = json.load(open("/tmp/artifacts.json"))
           name = os.environ["ARTIFACT"]
@@ -93,59 +104,92 @@ jobs:
           if not cands:
               print("ARTIFACT_NOT_FOUND:" + name, file=sys.stderr)
               sys.exit(1)
-          print(cands[0]["id"])
+          newest = max(cands, key=lambda a: (a["created_at"], a["id"]))
+          open("/tmp/art_id", "w").write(str(newest["id"]))
+          print("resuming from artifact", newest["id"], "created", newest["created_at"])
           PYEOF
-          )
-          echo "downloading artifact id $ART_ID"
+          ART_ID=$(cat /tmp/art_id)
           curl -sfL -H "Authorization: Bearer $GH_TOKEN" \
             -o checkpoints/resume.zip \
             "https://api.github.com/repos/${{ github.repository }}/actions/artifacts/$ART_ID/zip"
           python3 -c "import zipfile; zipfile.ZipFile('checkpoints/resume.zip').extractall('checkpoints')"
           rm checkpoints/resume.zip
-          echo "restored:"; find checkpoints -maxdepth 2 -type f | head -20
+          echo "restored:"; find checkpoints -maxdepth 3 -type f | head
 
-      # ---- per-seed training; the trainer auto-resumes from its out dir ---
-      - name: Train (one pass per seed)
-        shell: bash
+      # ---- train one chunk (resumes automatically inside the workspace) ----
+      - name: Train chunk
+        id: train
+        env:
+          CONFIG: ${{ github.event.inputs.config }}
+          OVERLAY: ${{ github.event.inputs.overlay }}
+          MAXSTEPS: ${{ github.event.inputs.max_steps }}
+          CHUNKMIN: ${{ github.event.inputs.chunk_minutes }}
         run: |
-          set -euo pipefail
+          set -uo pipefail
           mkdir -p results checkpoints reports
-          ARGS=""
-          if [ -n "${{ github.event.inputs.overlay }}" ];   then ARGS="$ARGS --overlay ${{ github.event.inputs.overlay }}"; fi
-          if [ -n "${{ github.event.inputs.resume_artifact }}" ]; then ARGS="$ARGS --resume"; fi
-          if [ -n "${{ github.event.inputs.max_steps }}" ]; then ARGS="$ARGS --max-steps ${{ github.event.inputs.max_steps }}"; fi
-          for seed in ${{ github.event.inputs.seeds }}; do
-            echo "=== seed $seed ==="
-            python -m ${{ github.event.inputs.train_module }} \
-              --config configs/${{ github.event.inputs.config }} \
-              --seed "$seed" \
-              --out-dir "checkpoints/${{ github.event.inputs.config }}_seed$seed" \
-              $ARGS
-          done
+          OUT="checkpoints/${CONFIG%.*}_seed${{ matrix.seed }}"
+          ARGS="--config configs/$CONFIG --seed ${{ matrix.seed }} --out-dir $OUT"
+          if [ -n "$OVERLAY" ]; then ARGS="$ARGS --overlay $OVERLAY"; fi
+          if [ -f "$OUT/checkpoint.pt" ]; then ARGS="$ARGS --resume"; fi
+          if [ -n "$MAXSTEPS" ]; then ARGS="$ARGS --max-steps $MAXSTEPS"; fi
+          CAP=$(( ${CHUNKMIN:-320} > 0 ? ${CHUNKMIN} : 100000 ))
+          echo "args: $ARGS (cap ${CAP} min)"
+          set +e
+          timeout "${CAP}m" python -m ${{ github.event.inputs.train_module }} $ARGS
+          RC=$?
+          cat "$OUT/summary.json" || true
+          echo "chunk rc: $RC"
+          if [ "$RC" = "124" ]; then
+            echo "CHAIN_NEXT=1" >> "$GITHUB_ENV"     # time cap hit: need one more chunk
+          elif [ "$RC" != "0" ]; then
+            exit "$RC"                                # real crash: fail loudly, no chain
+          fi
 
-      # ---- artifacts: everything a run produces, always uploaded ----------
-      - name: Upload checkpoints/results/reports artifact
+      # ---- artifacts: always uploaded, stable name per (rung, seed) --------
+      - name: Upload checkpoint artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ github.event.inputs.config }}-seeds-${{ github.event.inputs.seeds }}${{ github.event.inputs.run_suffix }}
+          name: ${{ github.event.inputs.config }}-seeds-${{ matrix.seed }}${{ github.event.inputs.run_suffix }}
           path: |
             checkpoints/
             results/
-            reports/
             data/split_info.json
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 30
+          overwrite: true
 
-      - name: Commit small result files back
-        if: ${{ github.event.inputs.commit_results == 'true' }}
+      # ---- chain control: only if the time cap was hit, re-dispatch self ---
+      - name: Chain control
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SEED: ${{ matrix.seed }}
+          SUFFIX: ${{ github.event.inputs.run_suffix }}
         run: |
           set -euo pipefail
+          if [ "${{ env.CHAIN_NEXT || '' }}" != "1" ]; then
+            echo "no chaining needed (finished, crashed, or single-chunk run)"
+            exit 0
+          fi
+          ARTIFACT="${{ github.event.inputs.config }}-seeds-${{ matrix.seed }}${{ github.event.inputs.run_suffix }}"
+          gh workflow run train.yml --ref main \
+            -f "config=${{ github.event.inputs.config }}" \
+            -f "seeds=${{ matrix.seed }}" \
+            -f "overlay=${{ github.event.inputs.overlay }}" \
+            -f "resume_artifact=$ARTIFACT" \
+            -f "run_suffix=${{ github.event.inputs.run_suffix }}" \
+            -f "commit_results=false"
+          echo "chained to a new chunk (artifact $ARTIFACT)"
+
+      - name: Commit results when finished
+        if: always() && github.event.inputs.commit_results == 'true'
+        run: |
+          set -euo pipefail
+          OUT="checkpoints/${{ github.event.inputs.config }}_seed${{ matrix.seed }}"
+          if [ -f "$OUT/summary.json" ]; then cp "$OUT/summary.json" "results/summary_${{ github.event.inputs.config }}_seed${{ matrix.seed }}.json"; fi
           git config user.name "IECNN Actions bot"
           git config user.email "actions@users.noreply.github.com"
-          git add results/*.csv results/*.json 2>/dev/null || true
-          if git diff --cached --quiet; then
-            echo "No result files to commit."
-          else
-            git commit -m "results: ${{ github.event.inputs.config }} seeds ${{ github.event.inputs.seeds }} [run ${{ github.run_id }}]"
-            git push
-          fi
+          git pull --rebase origin main
+          git add results/ && git commit -m "results: ${{ github.event.inputs.config }} seed ${{ matrix.seed }} [run ${{ github.run_id }}]" || echo "nothing to commit"
+          git push || (git pull --rebase origin main && git push)
