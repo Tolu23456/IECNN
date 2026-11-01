@@ -55,11 +55,28 @@ def error_features(pi: torch.Tensor, loo_mean: torch.Tensor) -> torch.Tensor:
 
 
 def compute_scores(pi: torch.Tensor, gamma: torch.Tensor, trust_term: torch.Tensor,
-                   alpha: float | torch.Tensor, beta: float | torch.Tensor) -> torch.Tensor:
-    """u_k = alpha * (-JS(pi_k, loo_k)) + beta * gamma_k + gate_k (spec 04, section 3)."""
+                   alpha: float | torch.Tensor, beta: float | torch.Tensor,
+                   return_parts: bool = False):
+    """u_k = alpha * (-JS(pi_k, loo_k)) + beta * gamma_k + gate_k (spec 04, section 3).
+
+    Also returns (loo_mean, js) so the caller can reuse them for the error
+    feature of the NEXT pass instead of recomputing two leaves over [., N, V].
+    """
     loo = leave_one_out_mean(pi)
     js = js_divergence(pi, loo)
-    return alpha * (-js) + beta * gamma + trust_term
+    scores = alpha * (-js) + beta * gamma + trust_term
+    if return_parts:
+        return scores, loo, js
+    return scores
+
+
+def error_features_from_parts(pi: torch.Tensor, loo_mean: torch.Tensor,
+                              js: torch.Tensor) -> torch.Tensor:
+    """Same as `error_features` but reusing already-computed loo/JS tensors."""
+    own_top = pi.argmax(dim=-1)
+    crowd_on_own_top = loo_mean.gather(-1, own_top.unsqueeze(-1)).squeeze(-1)
+    peak = pi.max(dim=-1).values
+    return torch.stack([js, crowd_on_own_top, peak], dim=-1)
 
 
 def update_trust(prev_trust: torch.Tensor | None, scores: torch.Tensor, rho: float) -> torch.Tensor:

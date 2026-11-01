@@ -93,9 +93,12 @@ class Region(nn.Module):
 
         state = self.dots.initial_state((b, t))
         trust = None
-        log_b_prev = None
         pi_prev = None
+        prev_crowd = prev_js = None
+        w_prev = None
+        state_prev = None
         msg_read = None
+        log_b_prev = None
         per_pass = []
 
         for p in range(1, self.n_passes + 1):
@@ -106,9 +109,11 @@ class Region(nn.Module):
                 pooled = torch.einsum("bfn,bfnd->bfd", w_prev, state_prev)  # [B,T,d_s]
                 h_pool = pooled[:, :, None, :].expand(b, t, n, self.d_s)
                 # ^ every dot reads the SAME pooled opinion (spec 01, input table)
-            err = torch.zeros(b, t, n, 3, device=device, dtype=rows.dtype) \
-                if p == 1 else consensus.error_features(pi_prev,
-                                                        consensus.leave_one_out_mean(pi_prev))
+            if p == 1:
+                err = torch.zeros(b, t, n, 3, device=device, dtype=rows.dtype)
+            else:
+                # error features from the numbers already computed at pass p-1
+                err = consensus.error_features_from_parts(pi_prev, prev_crowd, prev_js)
             out = self.dots(wind_k, wind_v, valid, h_pool, err, round_idx=p - 1,
                             msg_in=msg_read if p > 1 else None, state=state,
                             emb_table=emb_table)
@@ -116,12 +121,20 @@ class Region(nn.Module):
             pi = out.log_pi.exp()
 
             if self.use_weights:
-                scores = consensus.compute_scores(pi, out.gamma, out.trust_term,
-                                                  self.alpha, self.beta)
+                # loo/JS are computed ONCE here and reused for the error
+                # feature of the next pass (spec 04 = same numbers either way;
+                # computing them twice cost ~30% of the forward).
+                scores, loo, js = consensus.compute_scores(
+                    pi, out.gamma, out.trust_term, self.alpha, self.beta,
+                    return_parts=True)
                 trust = consensus.update_trust(trust, scores, self.rho)
                 w = consensus.compute_weights(trust, tau_p, floor=0.0 if hard_mode else floor)
+                crowd = loo                       # reused below for err feat
+                js_own = js
             else:
                 w = consensus.uniform_weights(n, pi)          # rung E0: plain ensemble
+                crowd = consensus.leave_one_out_mean(pi)
+                js_own = consensus.js_divergence(pi, crowd)
 
             if self.pooling == "mixture":
                 b_mix = consensus.pool_mixture(pi, w)
@@ -132,6 +145,7 @@ class Region(nn.Module):
                              "log_b": log_b, "gamma": out.gamma, "tau": tau_p})
             log_b_prev = log_b
             pi_prev = pi
+            prev_crowd, prev_js = crowd, js_own
             w_prev = w
             if self.messages is not None:
                 msg_write = self.messages(out.state, training=training)   # read at p+1

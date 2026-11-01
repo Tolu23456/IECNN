@@ -58,8 +58,10 @@ def test_leave_one_out_invariance_to_own_output():
 def test_label_independence_of_weights():
     """Scores/weights are computed from pi/gamma only: no label argument exists."""
     import inspect
-    sig = inspect.signature(consensus.compute_scores)
-    assert list(sig.parameters) == ["pi", "gamma", "trust_term", "alpha", "beta"]
+    names = list(inspect.signature(consensus.compute_scores).parameters)
+    assert names[:5] == ["pi", "gamma", "trust_term", "alpha", "beta"]
+    bad = [n for n in names if "label" in n or "target" in n or n == "y"]
+    assert not bad
 
 
 def test_pooled_output_is_valid_distribution():
