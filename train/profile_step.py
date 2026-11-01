@@ -25,7 +25,8 @@ from train.losses import main_loss
 from utils import set_seed, set_torch_threads
 
 
-def main() -> None:
+def main() -> None:  # noqa: C901 (diagnostic script)
+    import gc
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True)
     ap.add_argument("--overlay", action="append", default=[])
@@ -70,6 +71,8 @@ def main() -> None:
     loss = main_loss(out["final_log_probs"], torch.from_numpy(y))
     loss.backward()
     opt.zero_grad(set_to_none=True)
+    del out, loss
+    gc.collect()
 
     for i in range(args.steps):
         if i % 1 == 0:
@@ -77,7 +80,6 @@ def main() -> None:
         xb, yb = torch.from_numpy(x), torch.from_numpy(y)
 
         # ---- forward, split into the pieces Region.forward does ----------
-        print("profile: split forward", flush=True)
         def fwd():
             emb_table = model.embed.weight
             rows = model.embed(xb)
@@ -122,7 +124,11 @@ def main() -> None:
                         region.chain_proj[min(r, len(region.chain_proj) - 1)](state_prev * 0) + rows)
             return rops
 
-        rops = timed("forward_full", lambda: timed("forwardRegions", fwd))
+        # no_grad: timing only; the real-graph forward comes separately below.
+        print("profile: split forward", flush=True)
+        with torch.no_grad():
+            fwd()          # split timings
+        gc.collect()
 
         # full training-style forward to get real grads (the split above is
         # approximate; the full one is what the trainer actually runs)
@@ -142,6 +148,8 @@ def main() -> None:
         timed("clip+step", lambda: (torch.nn.utils.clip_grad_norm_(
             model.parameters(), 0.5), opt.step()))
         opt.zero_grad(set_to_none=True)
+        del out, loss
+        gc.collect()
 
     # ---- report ---------------------------------------------------------
     lines = [f"params {sum(p.numel() for p in model.parameters()):,}"]
