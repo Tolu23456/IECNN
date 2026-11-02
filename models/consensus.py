@@ -27,17 +27,20 @@ def leave_one_out_mean(pi: torch.Tensor) -> torch.Tensor:
     return (total - pi) / (n - 1)
 
 
-def js_divergence(p: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
+def js_divergence(p: torch.Tensor, q: torch.Tensor,
+                  log_p: torch.Tensor | None = None) -> torch.Tensor:
     """Jensen-Shannon divergence JS(p, q), bounded [0, ln 2], stable.
 
-    Accepts probability tensors [..., V]; broadcasting supported.
+    Accepts probability tensors [..., V]; broadcasting supported. `log_p` may
+    carry the caller's already-computed log(p) (e.g. a dot's log distribution)
+    so the expensive log over [.., N, V] is not recomputed.
     """
     eps = _EPS
     p_ = p.clamp_min(eps)
     q_ = q.clamp_min(eps)
     m = 0.5 * (p_ + q_)
     logm = m.log()
-    kl_pm = (p * (p_.log() - logm)).sum(-1)
+    kl_pm = (p * ((p_.log() if log_p is None else log_p) - logm)).sum(-1)
     kl_qm = (q * (q_.log() - logm)).sum(-1)
     return 0.5 * kl_pm + 0.5 * kl_qm
 
@@ -56,14 +59,16 @@ def error_features(pi: torch.Tensor, loo_mean: torch.Tensor) -> torch.Tensor:
 
 def compute_scores(pi: torch.Tensor, gamma: torch.Tensor, trust_term: torch.Tensor,
                    alpha: float | torch.Tensor, beta: float | torch.Tensor,
-                   return_parts: bool = False):
+                   return_parts: bool = False,
+                   log_pi: torch.Tensor | None = None):
     """u_k = alpha * (-JS(pi_k, loo_k)) + beta * gamma_k + gate_k (spec 04, section 3).
 
     Also returns (loo_mean, js) so the caller can reuse them for the error
     feature of the NEXT pass instead of recomputing two leaves over [., N, V].
+    `log_pi` (optional) saves one log over [., N, V] inside the JS.
     """
     loo = leave_one_out_mean(pi)
-    js = js_divergence(pi, loo)
+    js = js_divergence(pi, loo, log_p=log_pi if log_pi is not None else None)
     scores = alpha * (-js) + beta * gamma + trust_term
     if return_parts:
         return scores, loo, js

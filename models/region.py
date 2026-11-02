@@ -127,7 +127,7 @@ class Region(nn.Module):
                 # computing them twice cost ~30% of the forward).
                 scores, loo, js = consensus.compute_scores(
                     pi, out.gamma, out.trust_term, self.alpha, self.beta,
-                    return_parts=True)
+                    return_parts=True, log_pi=out.log_pi)
                 trust = consensus.update_trust(trust, scores, self.rho)
                 w = consensus.compute_weights(trust, tau_p, floor=0.0 if hard_mode else floor)
                 crowd, js_own = loo, js
