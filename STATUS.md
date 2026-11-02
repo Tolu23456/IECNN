@@ -2,6 +2,13 @@
 
 Newest entry at the top.
 
+## 2026-11-02 — Equal-compute ladder dispatched (Tolu chose option b)
+
+- Checkpoint-B follow-up options presented with measured numbers; **Tolu chose (b): equal-compute stepping**, budget W = B0's 50k-step compute (~47,850 s/seed, from B0's measured 0.957 s/step). Resulting step counts: **E0 → 12,000** (3.9 s/step = 46,800 s), **E1 → 2,880** (16.56 s/step = 47,692 s).
+- Schedule-shape fairness: absolute-step schedule knobs scaled by steps/50,000 in the new `configs/*_eqc.yaml` (LR warmup 500→120/30, tau warmup 2000→480/115, eval/checkpoint cadence likewise), so every rung ends past its own cosine anneal with the same schedule shape; everything else was already relative to total steps. Local 5-step smoke of the E1 eqc config passes.
+- Chain-control improvement: chained chunks now forward `commit_results` (final chunk after a chain previously could not commit its results — for the running B0 `-r2` this means its final summaries must be recovered from artifacts).
+- Dispatched `e0_plain_ensemble_eqc.yaml` and `e1_weights_passes_eqc.yaml`, seeds 0,1,2, suffix `-eqc`, `commit_results=true` (runs 28/29 train dispatches at 07:06 UTC). Expect ~13 h/seed (3 chained chunks each), B0 finishes its 50k ladder in parallel today.
+
 ## 2026-11-02 — Checkpoint B follow-through: (c) executed — E1 optimized 42 → 16.6 s/step; B0 overfitting found; best-checkpoint protocol
 
 - **Fast-dot rewrite** (`models/dot.py`, `fast_math` flag default ON): GRU gates + tied head as plain batched GEMMs over merged `[B*T, N]` layout; einsum version kept as `_forward_reference`; equivalence test fast↔reference incl. dynamic query. Suite now **61 passed, 6 skipped**.
