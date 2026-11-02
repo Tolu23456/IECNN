@@ -2,6 +2,16 @@
 
 Newest entry at the top.
 
+## 2026-11-02 — Checkpoint B follow-through: (c) executed — E1 optimized 42 → 16.6 s/step; B0 overfitting found; best-checkpoint protocol
+
+- **Fast-dot rewrite** (`models/dot.py`, `fast_math` flag default ON): GRU gates + tied head as plain batched GEMMs over merged `[B*T, N]` layout; einsum version kept as `_forward_reference`; equivalence test fast↔reference incl. dynamic query. Suite now **61 passed, 6 skipped**.
+- **Chain of measured E1 speeds on the runner**: 42 → 22.1 (loo/JS dedup) → 17.4 s/step (fast-math) → **16.6 s/step, 989 tok/s** (JS reuses the dot's `log_pi` instead of re-taking `log(p)`). Below the self-set bar (≥1200 tok/s would justify torch.compile), so optimization stops here.
+- **Op-level profiler** (torch.profiler table in `train/profile_step.py`, real fwd+bwd on the runner): after the GEMM rewrite, remaining cost = elementwise `[f, N, V]` chains (mul/log/div/copy_/add/sub/neg/where) in consensus + backward — i.e., mostly intrinsic to the ensemble-over-vocab design.
+- **B0 `-r2` chunk 1 finished and self-chained at 04:28 for all 3 seeds (runs 21/22/23, chunk 2 in progress)**. The CSVs carried back show **real overfitting**: train loss → 0.25 while in-loop val bpc rises monotonically 1.95 (step 1k) → 5.43 (20k) — at ~14k tokens/step the 50k target is ~3,900 epochs on a 540k-token corpus. Run so far has been valuable regardless: it also proved the 320-min timeout → artifact → resume handoff works.
+- **Trainer now tracks the best checkpoint** (`best_state`/`best_step` saved + resumed; final `summary.json` gains `best_full_val_bpc`, `best_step`, `best_mode_gap` at the best point, all scored on FULL validation). The rung headline is the best point, not the most-overfit final state.
+- **Workflow results-commit fixed** (`git pull --rebase --autostash`): seed 0's chunk-1 commit failed on unstaged-changes rebase error (chain itself unaffected — chunk 2 fired on schedule). Chains dispatched before the fix still run old code, so per-chunk `results/` commits may fail; artifacts are fine.
+- Reports: `reports/phase_03_report.md` §6b (real-number ladder table: B0 13 h, E0 54 h, E1 ~230 h per seed at 50k). DECISIONS.md updated (fast-math default, best-checkpoint protocol, optimizer stopped).
+
 ## 2026-11-02 — Phase 3 core IECNN built, tested, and timed on Actions; B0 ladder running
 
 - **Core model complete and spec-tested** (`models/dot.py`, `memory.py`, `region.py`,

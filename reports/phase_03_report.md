@@ -78,6 +78,32 @@ Also learned: two profile runs died with "runner shutdown signal" ~100 s in. Roo
 - E1 measured 42 → **22 s/step** after the dedup fix (742 tok/s; pure compute ≈ 300 s / 12 steps... measured 5-step wall 110 s = 5×22.1) → 50k steps ≈ **~300 h/seed** — outside the 35–90 h projection, ~10× a B1 seed, and ~2 weeks for the 3-seed ladder even fully parallel.
 - Options presented at Checkpoint B: (a) run all rungs at a fixed 50k steps (honest, slow, ~2.5 weeks for E1); (b) equal-compute stepping (E-rungs get fewer steps to match B0/B1 measured FLOPs — spec-faithful "equal compute" but trains on less text); (c) more optimization first (bmm rewrites, maybe torch.compile) with equivalence tests, aiming E1 ≤ E0×(passes) ≈ 12 s/step ≈ 170 h/seed. Agent recommendation: (c) then re-measure, and only then pick (a) vs (b) with real numbers.
 
+## 6b. Tolu chose (c): optimization round, re-measured (2026-11-02)
+
+Three changes, each pinned by tests, dispatched and measured on Actions:
+
+1. **Fast torch-dot path** (`models/dot.py`, `fast_dot_math` flag, default ON): the three heavy per-dot contractions (GRU in-gates over inputs, GRU hidden gates, tied head logits) rewritten from grouped einsums to plain batched GEMMs over a merged `[B*T, N]` layout; einsum version kept as `_forward_reference`. Equivalence test `test_pyi_fast_math_matches_reference` pins fast vs reference (incl. the dynamic-query variant and mask handling); suite went 28 → 61 tests after this session's additions.
+2. **torch.profiler op table** added to `train/profile_step.py` (one real fwd+bwd).
+3. **JS log-reuse** (`models/consensus.py`): `js_divergence` accepts the caller's already-computed `log_pi`, saving one `log()` over the `[., N, V]` tensor per pass.
+
+Op-table reading (E1, contended runner): bmm 5.8 s, then mul/log/div/copy_/add/sub/neg/where ≈ elementwise chains over the `[f, N, V]` consensus tensors — that + backward is now the floor; further gains would need fusing (torch.compile), which re-compiles on float scalars and is kept out for now.
+
+**Re-measured (timing4 → timing5, same contended conditions): 17.4 → 16.6 s/step (946 → 989 tok/s).** Below our own "worth another pass if ≥ ~1200 tok/s" bar — optimization stops here.
+
+### Ladder cost with real numbers (Checkpoint B decision data)
+
+| rung | s/step | 50k steps/seed |
+|---|---|---|
+| B0 | 0.96 (measured, `-r2` chunk 1) | ~13 h |
+| E0 | 3.9 | ~54 h |
+| E1 | 16.6 | ~230 h (~10 days, ~27 chained chunks/seed) |
+
+### Second real training-signal finding (from the B0 `-r2` chunk-1 CSVs)
+
+B0 trains 20k steps in chunk 1: train loss → 0.25 while **in-loop val bpc rises monotonically 1.95 (step 1k) → 5.43 (step 20k)** — genuine overfitting on the 540k-token corpus, not eval breakage (smooth curve, train loss falling). At ~14k tokens/step, 50k steps ≈ 3,900 epochs — far past memorization. Consequence implemented in `train/train.py`: **best-checkpoint tracking** — the trainer keeps the best in-loop point's weights and at the end re-scores that point on the FULL validation text (`best_full_val_bpc`, `best_step`, also hard-mode gap at the best point); the headline rung number is the best point, not the most-overfit final state. Resume carries `best_state` through chained chunks.
+
+Also fixed (found breaking seed 0's chunk-1 commit step): results commit now `git pull --rebase --autostash`; the chain itself was unaffected (chain-control step succeeded and chunk 2 fired on schedule at 04:28 for all 3 seeds).
+
 ## 7. Workflow (train.yml) upgrades for long runs
 
 - Seeds became a **matrix** (one job per seed, parallel).
