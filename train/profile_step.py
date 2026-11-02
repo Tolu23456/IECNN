@@ -151,6 +151,20 @@ def main() -> None:  # noqa: C901 (diagnostic script)
         del out, loss
         gc.collect()
 
+    # ---- op-level profile of one REAL training step (last i) --------------
+    from torch.profiler import ProfilerActivity, profile
+
+    xftp, yftp = torch.from_numpy(x), torch.from_numpy(y)
+    with profile(activities=[ProfilerActivity.CPU]) as prof:
+        out = model(xftp, tau0=1.0, floor=0.1 / _n_dots(model))
+        loss = main_loss(out["final_log_probs"], yftp)
+        if any(v > 0 for v in lambdas.values()):
+            _aux(out, yftp, lambdas)
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
+    table = prof.key_averages().table(sort_by="self_cpu_time_total", row_limit=22)
+    print(table, flush=True)
+
     # ---- report ---------------------------------------------------------
     lines = [f"params {sum(p.numel() for p in model.parameters()):,}"]
     for name, ts in sorted(timers.items()):
