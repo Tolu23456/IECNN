@@ -122,6 +122,8 @@ def train_one(config: dict, seed: int, out_dir: Path, max_steps: int | None = No
     ckpt_path = out_dir / "checkpoint.pt"
     start_step = 0
     best_val = float("inf")
+    best_step = 0
+    best_state = None
     if resume and ckpt_path.exists():
         state = torch.load(ckpt_path, weights_only=False)
         model.load_state_dict(state["model"])
@@ -133,6 +135,8 @@ def train_one(config: dict, seed: int, out_dir: Path, max_steps: int | None = No
         batcher.rng.bit_generator.state = state["batcher_rng"]
         start_step = int(state["step"]) + 1
         best_val = float(state.get("best_val", best_val))
+        best_step = int(state.get("best_step", 0))
+        best_state = state.get("best_state")          # best weights so far
         print(f"resumed from {ckpt_path} at step {start_step}")
 
     csv_path = Path("results") / f"train_{name}_seed{seed}.csv"
@@ -232,11 +236,16 @@ def train_one(config: dict, seed: int, out_dir: Path, max_steps: int | None = No
                                tau0=kwargs.get("tau0", 1.0) if is_iecnn else 1.0)
             elapsed = time.perf_counter() - t0
             log.row([step, lr, round(smooth, 5), round(bpc, 5), round(elapsed, 1)])
-            best_val = min(best_val, bpc)
+            if bpc < best_val:
+                best_val = bpc
+                best_step = step
+                # keep the weights of the best point (they are what full-val is
+                # finally scored on): measured B0 overfits well before 50k steps
+                best_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
             if step % (eval_every * 10) == 0 or last:
                 aux_str = " ".join(f"{k} {v:.3f}" for k, v in aux_parts.items())
                 print(f"[{name} seed{seed}] step {step} {aux_str} "
-                      f"val bpc {bpc:.4f} lr {lr:.2e} ({elapsed:.0f}s)")
+                      f"val bpc {bpc:.4f} lr {lr:.2e} ({elapsed:.0f}s)", flush=True)
 
         if (step > 0 and step % checkpoint_every == 0) or last:
             save_checkpoint(ckpt_path, {
@@ -244,6 +253,8 @@ def train_one(config: dict, seed: int, out_dir: Path, max_steps: int | None = No
                 "model": model.state_dict(),
                 "opt": opt.state_dict(),
                 "best_val": best_val,
+                "best_step": best_step,
+                "best_state": best_state,
                 "batcher_pos": batcher._pos,
                 "batcher_order": batcher._order,
                 "batcher_epoch": batcher.epoch,
@@ -264,6 +275,26 @@ def train_one(config: dict, seed: int, out_dir: Path, max_steps: int | None = No
         hard_bpc = evaluate_bpc(model, ubm, val_text, seq_len=context,
                                 hard_mode=True, **final_eval_kwargs)
         mode_gap_val = round(hard_bpc - final_bpc, 5)
+
+    # ---- best checkpoint, scored on FULL validation ----------------------
+    # In-loop evals score a subsample; the honest "best" headline is the best
+    # tracked point re-scored on the full validation text (B0 measured on the
+    # runner: val bpc degrades monotonically long before the 50k target, so
+    # final-only numbers would report the most-overfit point of every model).
+    best_full_val_bpc = None
+    if best_state is not None and best_step != steps - 1:
+        last_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
+        model.load_state_dict(best_state)
+        best_full_val_bpc = evaluate_bpc(model, ubm, val_text, seq_len=context,
+                                         **final_eval_kwargs)
+        mode_gap_best = None
+        if is_iecnn:
+            mb = evaluate_bpc(model, ubm, val_text, seq_len=context,
+                              hard_mode=True, **final_eval_kwargs)
+            mode_gap_best = round(mb - best_full_val_bpc, 5)
+        model.load_state_dict(last_state)
+        print(f"[{name} seed{seed}] BEST at step {best_step}: full-val bpc "
+              f"{best_full_val_bpc:.4f}", flush=True)
     log.row([steps - 1, lr_at(steps - 1, steps, warmup, peak_lr), smooth, round(final_bpc, 5), round(elapsed_total, 1)])
     log.close()
 
@@ -285,6 +316,11 @@ def train_one(config: dict, seed: int, out_dir: Path, max_steps: int | None = No
     if mode_gap_val is not None:
         summary["final_hard_bpc"] = round(final_bpc + mode_gap_val, 5)
         summary["mode_gap"] = mode_gap_val
+    if best_full_val_bpc is not None:
+        summary["best_full_val_bpc"] = round(best_full_val_bpc, 5)
+        summary["best_step"] = best_step
+        if mode_gap_best is not None:
+            summary["best_mode_gap"] = mode_gap_best
     (out_dir / "summary.json").write_text(json.dumps(summary, indent=1))
     (out_dir / "config_used.json").write_text(json.dumps(config, indent=1, default=str))
     print(f"DONE {name} seed{seed}: val bpc {final_bpc:.4f} "
