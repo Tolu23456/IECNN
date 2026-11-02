@@ -1,0 +1,16 @@
+# Rung E1, equal-compute ladder (Tolu's Checkpoint-B decision, 2026-11-02).
+#
+# W = B0's 50k-step compute budget ~= 47,850 s per seed (see
+# e0_plain_ensemble_eqc.yaml). E1 measured 16.56 s/step on the runner
+# (fast-math + JS log-reuse) -> 2,880 steps fit (47,692 s, under budget).
+# Absolute-step schedules scaled by 2880/50000 so the schedule shape matches
+# the rest of the ladder (warmup 1%, tau warmup 4%).
+base: e1_weights_passes.yaml
+name: e1_weights_passes_eqc
+consensus:
+  tau_warmup: 115            # 2000 * 2880/50000
+training:
+  steps: 2880
+  warmup_steps: 30           # 500 * 2880/50000
+  eval_every: 60             # 1000 * 2880/50000 (dense best-point tracking)
+  checkpoint_every: 60

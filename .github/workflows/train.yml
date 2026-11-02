@@ -180,7 +180,7 @@ jobs:
             -f "overlay=${{ github.event.inputs.overlay }}" \
             -f "resume_artifact=$ARTIFACT" \
             -f "run_suffix=${{ github.event.inputs.run_suffix }}" \
-            -f "commit_results=false"
+            -f "commit_results=${{ github.event.inputs.commit_results }}"
           echo "chained to a new chunk (artifact $ARTIFACT)"
 
       - name: Commit results when finished
