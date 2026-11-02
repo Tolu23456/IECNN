@@ -2,6 +2,37 @@
 
 Newest entry at the top.
 
+## 2026-11-02 — Phase 3 core IECNN built, tested, and timed on Actions; B0 ladder running
+
+- **Core model complete and spec-tested** (`models/dot.py`, `memory.py`, `region.py`,
+  `consensus.py`, `messages.py`, `iecnn.py`): 28 new tests, all passing; full suite
+  **60 passed, 6 skipped**. Highlights: E0 is bit-exactly a plain uniform ensemble;
+  causality is bit-exact; every dot receives gradient; cross-region competition einsum
+  bug (`btr,brv->btv` vs proper `btr,brtv->btv` with `[B,R,T,V]` stacking) caught by
+  tests before it could silently corrupt E2+.
+- **Full-size Actions timings (EPYC, 2 threads, fp32)**: E0 3.9 s/step → 2775 tok/s
+  after a small fix (was 4228 before an accidental extra JS computation; restored);
+  init loss 6.238 = ln 512 exactly. E1 first measured **42 s/step** → component
+  profiled on Actions: consensus machinery was computed twice per pass; after reusing
+  loo/JS parts, E1 **22 s/step** (742 tok/s). E1 vs E0 ratio now ~5.6× (3 passes +
+  weighting); a bmm/einsum rewrite of `dots_forward` is listed for Phase 4 before any
+  long E1 chain.
+- **Workflow upgraded for >6 h rungs**: seeds matrix (parallel per-seed jobs), 320-min
+  chunks with **self-chaining resume only on exit code 124** (crashes fail loudly),
+  overwrite artifacts named `{config}-seeds-{seed}{suffix}`. A bash arithmetic bug
+  (`${CHUNKMIN:-320}` empty expansion) crashed all 3 first B0 ladder jobs in minute 1
+  — found on the runner, fixed, re-dispatched as `-r2` (3 seeds, 50k steps, in
+  progress and healthy: 40+ min into chunk 1 of ~4).
+- **Profile-run casualties teach a lesson**: two profile dispatches died with a
+  "runner shutdown signal" ~100 s in — self-inflicted RAM exhaustion (7 GB hosted
+  runner; warmup graph retained under a second full graph). The real E1 trainer
+  survives full size but the memory margin is thin; memory-lean audit scheduled
+  before long chains.
+- Reports: `reports/phase_03_report.md` (structure table, 6 bugs found on the way,
+  measured profile breakdown, ladder implication: E1-at-50k ≈ 424 h/seed uncompressed
+  → options a/b/c to be decided with Tolu at Checkpoint B). DECISIONS.md updated
+  (cyclic ring, E0 mixture pooling pin, aux lambdas per rung only, chaining policy).
+
 ## 2026-11-01 — Phase 2 complete: baselines + trainer validated on Actions; 3 workflow bugs found and fixed
 
 - **train.yml now actually dispatches** after 3 fixes: (1) embedded python in the resume step de-indented out of its YAML block scalar → file unparseable → GitHub silently dropped `workflow_dispatch` (cause of every 422); (2) `.gitignore`'s `data/*` excluded `data/dataset.py`/`prepare.py` from the commit → `ModuleNotFoundError` on runner; corpus step added (rebuilds data/*.txt on runner; checksums **byte-identical** to local); (3) `timeout-minutes: 720` → 350 (hosted job cap is 6h; longer runs must use resume).

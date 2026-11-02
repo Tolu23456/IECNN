@@ -48,7 +48,8 @@ Subtleties recorded in test docstrings (honesty notes):
 |---|---|---|
 | B0 ladder `-r1` (seeds 0,1,2, 50k target) | b0_gru | **failed in minute 1** — workflow bash bug above; fixed; re-dispatched as `-r2` (in progress at time of writing) |
 | E0 timing `-timing-E` | e0 full size | 5 steps OK; 1,257,892 params; **init loss 6.238 = ln 512 exactly** (tied-head init health confirmed at full size); 3.9 s/step incl. warmup/eval amortization |
-| E1 timing `-timing-E` | e1 full size (P=3, weights on) | 5 steps OK; **~42 s/step** wall — flagged below |
+| E1 timing `-timing-E` | e1 full size (P=3, weights on) | 5 steps OK; **~42 s/step** wall — flagged below; after the consensus-dedup fix re-measured at **22.1 s/step** (742 tok/s) |
+| E0 timing `-timing2/3-E` | e0 full size | re-measured after the dedup: 3586 tok/s (an accidental extra JS computation in single-pass rungs had regressed it to 2775; fixed) |
 | E1 component profile `-prof5-E1` | e1 full size | breakdown in §6 |
 
 ## 6. The E1 slowness: measured breakdown and what was done within Phase 3
@@ -73,8 +74,8 @@ Also learned: two profile runs died with "runner shutdown signal" ~100 s in. Roo
 
 ### Ladder implication (decision pushed to Checkpoint B)
 
-- E0 measured ≈ 3.9 s/step → 50k steps ≈ **54 h/seed** (projection was 35–90 h: inside).
-- E1 measured ≈ 30.5 s/step pure compute (42 s incl. eval/startup overhead) → 50k steps ≈ **424 h/seed** — outside the projection, and ~2.5 weeks for the 3-seed ladder even fully parallel.
+- E0 measured ≈ 3.9 s/step (3586 tok/s incl. amortized eval/startup) → 50k steps ≈ **54 h/seed** (projection was 35–90 h: inside).
+- E1 measured 42 → **22 s/step** after the dedup fix (742 tok/s; pure compute ≈ 300 s / 12 steps... measured 5-step wall 110 s = 5×22.1) → 50k steps ≈ **~300 h/seed** — outside the 35–90 h projection, ~10× a B1 seed, and ~2 weeks for the 3-seed ladder even fully parallel.
 - Options presented at Checkpoint B: (a) run all rungs at a fixed 50k steps (honest, slow, ~2.5 weeks for E1); (b) equal-compute stepping (E-rungs get fewer steps to match B0/B1 measured FLOPs — spec-faithful "equal compute" but trains on less text); (c) more optimization first (bmm rewrites, maybe torch.compile) with equivalence tests, aiming E1 ≤ E0×(passes) ≈ 12 s/step ≈ 170 h/seed. Agent recommendation: (c) then re-measure, and only then pick (a) vs (b) with real numbers.
 
 ## 7. Workflow (train.yml) upgrades for long runs
