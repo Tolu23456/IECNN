@@ -57,6 +57,53 @@ def test_every_dot_receives_gradient():
     assert torch.isfinite(torch.tensor(1.0))
 
 
+def test_fast_math_matches_reference_and_is_default():
+    """The optimized [B*T, N] batched-GEMM pass must match the einsum
+    reference numerically (same weights, same inputs; fp32 tolerance) and be
+    the default path, so what the ladder trains on is what is tested."""
+    from models.dot import DotPopulation
+
+    g = torch.Generator().manual_seed(5)
+    common = dict(n_dots=5, d=24, d_q=12, d_v=20, d_s=18, vocab_size=64,
+                  message_dim=0, n_passes=3, share_pass_params=True)
+
+    fast = DotPopulation(seed=3, fast_math=True, **common)
+    ref = DotPopulation(seed=3, fast_math=False, **common)
+    ref.load_state_dict(fast.state_dict())                 # identical weights
+    ref.eval(); fast.eval()
+
+    emb = torch.randn(64, 24, generator=g)
+    torch.manual_seed(11)
+    b, t, w = 2, 7, 5
+    wind_k = torch.randn(b, t, w, 12)
+    wind_v = torch.randn(b, t, w, 20)
+    valid = torch.ones(t, w, dtype=torch.bool)
+    valid[:2] = False                                      # exercise masking
+    h_pool = torch.randn(b, t, 5, 18)
+    err = torch.randn(b, t, 5, 3)
+    state = torch.randn(b, t, 5, 18)
+
+    with torch.no_grad():
+        of, orf = (fast(wind_k, wind_v, valid, h_pool, err, 1, None, state, emb),
+                   ref(wind_k, wind_v, valid, h_pool, err, 1, None, state, emb))
+    for a, b_ in ((of.log_pi, orf.log_pi), (of.state, orf.state),
+                  (of.gamma, orf.gamma), (of.trust_term, orf.trust_term)):
+        assert torch.allclose(a, b_, atol=1e-5, rtol=1e-5), \
+            (a - b_).abs().max().item()
+
+    # dynamic-query variant must match through both paths as well
+    fast_dq = DotPopulation(seed=4, fast_math=True, dynamic_query=True, **common)
+    ref_dq = DotPopulation(seed=4, fast_math=False, dynamic_query=True, **common)
+    ref_dq.load_state_dict(fast_dq.state_dict())
+    fast_dq.eval(); ref_dq.eval()
+    with torch.no_grad():
+        a = fast_dq(wind_k, wind_v, valid, h_pool, err, 2, None, state, emb)
+        r = ref_dq(wind_k, wind_v, valid, h_pool, err, 2, None, state, emb)
+    assert torch.allclose(a.log_pi, r.log_pi, atol=1e-5, rtol=1e-5)
+
+    # the fast path is the default everywhere the ladder trains
+    assert fast.fast_math and DotPopulation(seed=0, **common).fast_math
+
 def test_query_cosine_below_half_at_init():
     """No two dot queries start aligned (spec 01: distinct dots)."""
     model = _model()

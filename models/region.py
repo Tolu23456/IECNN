@@ -43,7 +43,8 @@ class Region(nn.Module):
             message_dim=(16 if self.use_messages else 0),
             n_passes=self.n_passes, dynamic_query=self.dynamic_query,
             share_pass_params=self.share_pass_params,
-            seed=1000 + region_index)
+            seed=1000 + region_index,
+            fast_math=bool(m.get("fast_dot_math", True)))
         self.w_k = nn.Linear(d, d_q, bias=False)
         self.w_v = nn.Linear(d, d_v, bias=False)
         self.rel_emb = nn.Embedding(self.span, d_q)

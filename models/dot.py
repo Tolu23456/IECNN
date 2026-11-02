@@ -77,7 +77,7 @@ class DotPopulation(nn.Module):
 
     def __init__(self, n_dots, d, d_q, d_v, d_s, vocab_size, message_dim=0,
                  n_passes=3, dynamic_query=False, share_pass_params=True,
-                 seed: int = 0):
+                 seed: int = 0, fast_math: bool = True):
         super().__init__()
         self.N = n_dots
         self.d = d
@@ -88,13 +88,15 @@ class DotPopulation(nn.Module):
         self.P = n_passes
         self.dynamic_query = dynamic_query
         self.shared = share_pass_params
+        self.fast_math = fast_math
         self.in_dim = gru_input_dim(d_v, d_s, message_dim)
 
         p_layers = 1 if share_pass_params else n_passes   # stacked per-pass depth
         g = torch.Generator().manual_seed(seed)
 
         self.q = nn.Parameter(torch.stack([_orth_cols(d_q, n_dots, g) for _ in range(p_layers)]))
-        self.u_q = nn.Parameter(torch.stack([_xavier(d_s, d_q, g) for _ in range(p_layers)])) \
+        self.u_q = nn.Parameter(torch.stack(
+            [torch.stack([_xavier(d_s, d_q, g) for _ in range(n_dots)]) for _ in range(p_layers)])) \
             if dynamic_query else None
         self.s0 = nn.Parameter(0.02 * torch.randn(p_layers, n_dots, d_s, generator=g))
         self.w_ih = nn.Parameter(torch.stack(
@@ -139,6 +141,19 @@ class DotPopulation(nn.Module):
         state     [B, T, N, d_s]   s_prev
         emb_table [V, d]           tied embedding, shared by the whole model
         """
+        if getattr(self, "fast_math", True):
+            return self._forward_fast(wind_k, wind_v, valid_mask, h_pool,
+                                      err_feat, round_idx, msg_in, state,
+                                      emb_table)
+        return self._forward_reference(wind_k, wind_v, valid_mask, h_pool,
+                                       err_feat, round_idx, msg_in, state,
+                                       emb_table)
+
+    # the einsum-per-op version, kept for the equivalence test and as a
+    # reference implementation of spec 01 (slower: einsum re-plans paths the
+    # kernel cannot fuse into batched GEMMs)
+    def _forward_reference(self, wind_k, wind_v, valid_mask, h_pool, err_feat,
+                           round_idx: int, msg_in, state, emb_table) -> DotOutputs:
         b, t, w = wind_k.shape[0], wind_k.shape[1], wind_k.shape[2]
         device = wind_k.device
 
@@ -182,3 +197,78 @@ class DotPopulation(nn.Module):
         trust = torch.einsum("bfnd,nd->bfn", s_new, self._sel(round_idx, self.g_w)) \
             + self._sel(round_idx, self.g_b)
         return DotOutputs(log_pi=log_pi, gamma=gamma, trust_term=trust, state=s_new)
+
+    # the optimized twin: same math, same op ORDER within each vector op, but
+    # the three heavy contractions (GRU in-gates, GRU hidden gates, tied head)
+    # run as plain batched GEMMs over a merged [B*T, N] layout. Differences
+    # vs the reference are last-bit floating-point (summation order inside a
+    # GEMM); pinned by test_pyi_fast_math_matches_reference.
+    def _forward_fast(self, wind_k, wind_v, valid_mask, h_pool, err_feat,
+                      round_idx: int, msg_in, state, emb_table) -> DotOutputs:
+        b, t, w = wind_k.shape[0], wind_k.shape[1], wind_k.shape[2]
+        f = b * t
+        n = self.N
+        device = wind_k.device
+        dt = wind_k.dtype
+
+        wk = wind_k.reshape(f, w, self.d_q)                              # [f, w, d_q]
+        wv = wind_v.reshape(f, w, self.d_v)                              # [f, 1?, w, d_v]
+
+        # ---- queries + reads ---------------------------------------------
+        if self.dynamic_query:
+            s_f = state.reshape(f, n, self.d_s)
+            q_dyn = torch.bmm(
+                s_f.transpose(0, 1),                                    # [N, f, d_s]
+                self._sel(round_idx, self.u_q))                         # [N, d_s, d_q]
+            q_dyn = (q_dyn.transpose(0, 1)                              # [f, N, d_q]
+                     + self._sel(round_idx, self.q).unsqueeze(0))
+            # read by query: scores[n, f?, w] per position: contract d_q
+            scores = torch.einsum("fwj,fnj->fnw", wk, q_dyn)
+        else:
+            # one GEMM: [f*w, d_q] @ [d_q, N] -> [f, w, N]
+            scores = torch.tensordot(wk, self._sel(round_idx, self.q), dims=([2], [1]))
+            scores = scores.permute(0, 2, 1)                            # [f, N, w]
+        scores = scores / math.sqrt(self.d_q)
+        if valid_mask is not None:
+            vm = valid_mask.unsqueeze(0).expand(b, t, w).reshape(f, 1, w)
+            scores = scores.masked_fill(~vm, float("-inf"))             # [f, N, w]
+        attn = torch.nan_to_num(F.softmax(scores, dim=-1), nan=0.0)     # [f, N, w]
+        ctx = torch.matmul(attn.unsqueeze(-2), wv.unsqueeze(1)).squeeze(-2)  # [f, N, d_v]
+
+        # ---- GRU step (batched GEMM per dot over merged [B*T]) ------------
+        parts = [ctx, h_pool.reshape(f, n, self.d_s), err_feat.reshape(f, n, 3),
+                 self.round_emb.weight[round_idx].expand(f, n, -1)]
+        if self.d_m > 0:
+            parts.append(msg_in.reshape(f, n, self.d_m) if msg_in is not None else
+                         torch.zeros(f, n, self.d_m, device=device, dtype=dt))
+        x = torch.cat(parts, dim=-1)                                    # [f, N, d_in]
+
+        w_ih_b = self._sel(round_idx, self.w_ih)                        # [N, in, 3h]
+        in_gates = torch.bmm(x.transpose(0, 1), w_ih_b)                 # [N, f, 3h]
+        s_f = state.reshape(f, n, self.d_s)
+        hid_gates = torch.bmm(s_f.transpose(0, 1),                      # [N, f, d_s]
+                              self._sel(round_idx, self.w_hh))          # [N, d_s, 3h]
+        in_gates = (in_gates.transpose(0, 1)                            # [f, N, 3h]
+                    + self._sel(round_idx, self.b_ih).unsqueeze(0))
+        h3 = hid_gates.transpose(0, 1)                                  # [f, N, 3h] (view)
+        iz, ir, inet = in_gates.chunk(3, dim=-1)
+        hz, hr, hnet = h3.chunk(3, dim=-1)
+        z = torch.sigmoid(iz + hz)
+        r = torch.sigmoid(ir + hr)
+        n_t = torch.tanh(inet + r * hnet)
+        s_new = (1.0 - z) * n_t + z * s_f                               # [f, N, d_s]
+
+        # ---- heads --------------------------------------------------------
+        e_state = torch.bmm(s_new.transpose(0, 1),                      # [N, f, d_s]
+                            self._sel(round_idx, self.p_out))           # [N, d_s, d]
+        logits = torch.matmul(e_state, emb_table.t())                   # [N, f, V]
+        log_pi = F.log_softmax(logits, dim=-1).permute(1, 0, 2)         # [f, N, V]
+        log_pi = log_pi.reshape(b, t, n, -1)                            # [B, T, N, V]
+        gamma = torch.einsum("fnd,nd->fn", s_new, self._sel(round_idx, self.c_w)) \
+            + self._sel(round_idx, self.c_b).unsqueeze(0)
+        trust = torch.einsum("fnd,nd->fn", s_new, self._sel(round_idx, self.g_w)) \
+            + self._sel(round_idx, self.g_b).unsqueeze(0)
+        return DotOutputs(log_pi=log_pi,
+                          gamma=gamma.reshape(b, t, n),
+                          trust_term=trust.reshape(b, t, n),
+                          state=s_new.reshape(b, t, n, self.d_s))
