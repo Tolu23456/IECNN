@@ -7,6 +7,11 @@ model:
   use_weights: true
   pooling: log_linear      # explicit: do NOT inherit E0's mixture pooling
 training:
+
+  # regularization parity (Tolu, 2026-11-02): identical values at every rung
+  weight_decay: 0.01
+  dot_dropout: 0.0
+  message_dropout: 0.2
   lambda_d: 0.1
   lambda_k: 0.05
   lambda_w: 0.05

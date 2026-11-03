@@ -37,6 +37,7 @@ class Region(nn.Module):
         self.hard_top_m = int(m.get("hard_top_m", 4))
         self.dynamic_query = bool(m.get("dynamic_query", False))
         self.share_pass_params = bool(m.get("share_pass_params", True))
+        self.dot_dropout = float(m.get("dot_dropout", 0.0))
 
         self.dots = DotPopulation(
             self.n_dots, d, d_q, d_v, d_s, vocab_size,
@@ -102,6 +103,15 @@ class Region(nn.Module):
         log_b_prev = None
         per_pass = []
 
+        # dot dropout (spec table at E4: "5% of steps, one random dot masked
+        # per region"): active only in training; the SAME dot is masked across
+        # this region's passes so the region behaves as if the dot were absent.
+        dot_mask = None
+        if training and self.dot_dropout > 0 and torch.rand(()) < self.dot_dropout:
+            k = int(torch.randint(0, n, ()))
+            dot_mask = torch.ones(n, device=device, dtype=rows.dtype)
+            dot_mask[k] = 0.0
+
         for p in range(1, self.n_passes + 1):
             tau_p = tau0 * (self.kappa ** (p - 1))
             if p == 1 or not self.use_weights:
@@ -138,6 +148,10 @@ class Region(nn.Module):
                     js_own = consensus.js_divergence(pi, crowd)
                 else:
                     crowd = js_own = None
+
+            if dot_mask is not None:      # dot dropout: excluded dot gets 0
+                w = w * dot_mask
+                w = w / w.sum(-1, keepdim=True).clamp_min(1e-9)
 
             if self.pooling == "mixture":
                 b_mix = consensus.pool_mixture(pi, w)

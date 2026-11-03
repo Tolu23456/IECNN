@@ -82,3 +82,34 @@ def test_final_output_valid_distribution():
     lp = model(x)["final_log_probs"]
     err = (lp.exp().sum(-1) - 1).abs().max().item()
     assert err < 1e-5 and torch.isfinite(lp).all()
+
+
+def test_dot_drops_its_pooled_weight():
+    """Spec table at E4: '5% of steps, one random dot masked per region'.
+    With dropout forced ON in training mode, exactly one dot's pooled weight
+    is 0 and the rest renormalize to 1; with dropout off, train == eval."""
+    from models.iecnn import build_iecnn
+
+    set_seed(0)
+    cfg = load_config("configs/e1_weights_passes.yaml", "tiny.yaml")
+    cfg["model"]["dot_dropout"] = 1.0            # mask on every training step
+    model = build_iecnn(cfg, 512)
+    model.train()
+    torch.manual_seed(123)
+    x = torch.randint(0, 512, (2, 32))
+    out = model(x)
+    for ro in out["region_outputs"]:
+        w = ro["weights"]                        # [B, N]
+        assert torch.isclose(w.sum(-1), torch.ones_like(w.sum(-1))).all()
+        zeros_per_row = (w.broadcast_to(w.shape) < 1e-9).float().sum(-1)
+        assert (zeros_per_row == 1).all(), zeros_per_row
+
+    # dropout off: identical with model in train and eval mode
+    cfg["model"]["dot_dropout"] = 0.0
+    model0 = build_iecnn(cfg, 512)
+    model0.train()
+    a = model0(x)["final_log_probs"]
+    model0.eval()
+    b = model0(x)["final_log_probs"]
+    assert torch.allclose(a, b)
+

@@ -4,4 +4,9 @@ name: e4_decorrelation
 training:
   lambda_c: 0.01
   hard_batch_fraction: 0.2
-  dot_dropout: 0.05
+  # regularization parity (Tolu, 2026-11-02): the spec table gave E4 a 5% dot
+  # dropout, but rung comparisons must not vary regularization — all rungs pin
+  # the same values. Deviation recorded in DECISIONS.md.
+  dot_dropout: 0.0
+  weight_decay: 0.01
+  message_dropout: 0.2

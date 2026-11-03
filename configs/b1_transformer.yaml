@@ -2,3 +2,10 @@ base: base.yaml
 name: b1_transformer
 model:
   kind: transformer
+
+training:
+
+  # regularization parity (Tolu, 2026-11-02): identical values at every rung
+  weight_decay: 0.01
+  dot_dropout: 0.0
+  message_dropout: 0.2

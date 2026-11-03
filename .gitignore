@@ -26,3 +26,4 @@ results/*.png
 
 # spec is kept out of the public repo for now (per Tolu, 2026-11-01)
 spec/
+data_big/

@@ -124,6 +124,17 @@ def train_one(config: dict, seed: int, out_dir: Path, max_steps: int | None = No
     best_val = float("inf")
     best_step = 0
     best_state = None
+    # early stopping (config training.early_stop): stop after N evals without
+    # improvement, plus a total wall-clock cap. Both survive chunked resume:
+    # best_val/best_step/best_state come from the checkpoint below, and the
+    # accumulated training seconds are carried in it too.
+    es_cfg = tcfg.get("early_stop", {})
+    es_patience = int(es_cfg.get("patience_evals", 0))
+    es_min_improve = float(es_cfg.get("min_improvement", 0.001))
+    es_wall_hours = float(es_cfg.get("wall_hours", 0.0))
+    train_seconds = 0.0
+    since_best_evals = 0
+    stopped_reason = None
     if resume and ckpt_path.exists():
         state = torch.load(ckpt_path, weights_only=False)
         model.load_state_dict(state["model"])
@@ -137,6 +148,8 @@ def train_one(config: dict, seed: int, out_dir: Path, max_steps: int | None = No
         best_val = float(state.get("best_val", best_val))
         best_step = int(state.get("best_step", 0))
         best_state = state.get("best_state")          # best weights so far
+        train_seconds = float(state.get("train_seconds", 0.0))
+        since_best_evals = int(state.get("since_best_evals", 0))
         print(f"resumed from {ckpt_path} at step {start_step}")
 
     csv_path = Path("results") / f"train_{name}_seed{seed}.csv"
@@ -174,6 +187,7 @@ def train_one(config: dict, seed: int, out_dir: Path, max_steps: int | None = No
     tokens_seen = 0
 
     for step in range(start_step, steps):
+        t_step = time.perf_counter()
         lr = lr_at(step, steps, warmup, peak_lr)
         for group in opt.param_groups:
             group["lr"] = lr
@@ -228,6 +242,7 @@ def train_one(config: dict, seed: int, out_dir: Path, max_steps: int | None = No
         opt.step()
         tokens_seen += int(x.shape[0]) * int(x.shape[1])
         smooth = _ema(float(loss.item()), smooth)
+        train_seconds += time.perf_counter() - t_step
 
         last = step == steps - 1
         if (step > 0 and step % eval_every == 0) or last:
@@ -236,16 +251,33 @@ def train_one(config: dict, seed: int, out_dir: Path, max_steps: int | None = No
                                tau0=kwargs.get("tau0", 1.0) if is_iecnn else 1.0)
             elapsed = time.perf_counter() - t0
             log.row([step, lr, round(smooth, 5), round(bpc, 5), round(elapsed, 1)])
+            prev_best = best_val
             if bpc < best_val:
                 best_val = bpc
                 best_step = step
                 # keep the weights of the best point (they are what full-val is
                 # finally scored on): measured B0 overfits well before 50k steps
                 best_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
+            # early stopping (Tolu's rule): N evals without a real improvement,
+            # or a total wall-clock cap. Improvement must beat min_improvement
+            # so eval noise cannot reset the patience counter.
+            if bpc <= prev_best - es_min_improve:
+                since_best_evals = 0
+            else:
+                since_best_evals += 1
+            if es_patience > 0 and since_best_evals >= es_patience and not last:
+                stopped_reason = (f"patience: {since_best_evals} evals without "
+                                  f"improvement > {es_min_improve}")
+            elif 0 < es_wall_hours < train_seconds / 3600:
+                stopped_reason = (f"wall cap {es_wall_hours}h reached at "
+                                  f"{train_seconds / 3600:.2f}h")
             if step % (eval_every * 10) == 0 or last:
                 aux_str = " ".join(f"{k} {v:.3f}" for k, v in aux_parts.items())
                 print(f"[{name} seed{seed}] step {step} {aux_str} "
                       f"val bpc {bpc:.4f} lr {lr:.2e} ({elapsed:.0f}s)", flush=True)
+            if stopped_reason is not None:
+                print(f"EARLY STOP at step {step}: {stopped_reason}", flush=True)
+                break
 
         if (step > 0 and step % checkpoint_every == 0) or last:
             save_checkpoint(ckpt_path, {
@@ -261,6 +293,8 @@ def train_one(config: dict, seed: int, out_dir: Path, max_steps: int | None = No
                 "batcher_rng": batcher.rng.bit_generator.state,
                 "py_rng": random.getstate(),
                 "tokens_seen": tokens_seen,
+                "train_seconds": train_seconds,
+                "since_best_evals": since_best_evals,
             })
 
     elapsed_total = time.perf_counter() - t0
@@ -308,6 +342,9 @@ def train_one(config: dict, seed: int, out_dir: Path, max_steps: int | None = No
         "best_val_bpc": round(min(best_val, final_bpc), 5),
         "vocab_size": vocab_size,
         "batch_size": used_batch,
+        "stopped_early": stopped_reason is not None,
+        "stopped_reason": stopped_reason,
+        "train_seconds_total": round(train_seconds, 1),
         "seq_len": seq_len,
         "wall_seconds": round(elapsed_total, 1),
         "tokens_per_s": round(tokens_seen / max(elapsed_total, 1e-9), 1),
