@@ -13,18 +13,24 @@ from pathlib import Path
 import numpy as np
 
 
-def tokenize_corpus(text: str, vocab_size: int = 512, cache_dir: str = "data") -> np.ndarray:
-    """Encode text with the fixed v0 vocabulary, caching ids as npy.
+def tokenize_corpus(text: str, vocab_size: int = 512, cache_dir: str = "data",
+                    vocab_file: str = "UBM/vocab_v0.json") -> np.ndarray:
+    """Encode text with the given UBM vocabulary, caching ids as npy.
 
-    Uses `UBM/vocab_v0.json` (the fixed 512-base vocabulary, DECISIONS.md).
-    Returns an int32 array of token ids (no specials inserted).
+    `vocab_file` MUST match the vocab the model is built with (train.py passes
+    config's ubm.vocab_file). The cache key includes the vocab file name so a
+    v0-tokenized stream can never be served for a v1 model (or vice versa) —
+    the ids are only meaningful under ONE merge set. Returns an int32 array of
+    token ids (no specials inserted).
     """
     from UBM import UBM
 
-    cache = Path(cache_dir) / f"tokens_v{vocab_size}_{_text_hash(text)[:10]}.npy"
+    vname = Path(vocab_file).stem
+    cache = (Path(cache_dir) /
+             f"tokens_{vname}_v{vocab_size}_{_text_hash(text)[:10]}.npy")
     if cache.exists():
         return np.load(cache)
-    ubm = UBM.load("UBM/vocab_v0.json")
+    ubm = UBM.load(vocab_file)
     ids = ubm.encode(text)
     arr = np.asarray(ids, dtype=np.int32)
     cache.parent.mkdir(parents=True, exist_ok=True)

@@ -94,3 +94,34 @@ def test_evaluator_full_text_char_identity():
     nll_h = (len(ids) - 1) * math.log(_V)
     assert math.isclose(evaluate_bpc(uniform, ubm, text, seq_len=128),
                         bpc_from_nll(nll_h, chars_predicted), rel_tol=1e-6)
+
+
+def test_per_pass_evaluator_reports_all_passes_and_entropy():
+    """evaluate_bpc_per_pass: 3 passes for E1, final == last pass (soft, R=1),
+    weight entropy in (0, ln N], and prepared-text reuse gives identical bpc."""
+    from config import load_config
+    from models.iecnn import build_iecnn
+    from train.evaluate import evaluate_bpc_per_pass, prepare_text
+    from utils import set_seed
+
+    ubm = _tiny_ubm()
+    set_seed(0)
+    cfg = load_config("configs/e1_weights_passes.yaml", "tiny.yaml")
+    model = build_iecnn(cfg, len(ubm.bases))
+    model.eval()
+    text = "abcdefgh " * 60
+    prepared = prepare_text(ubm, text)
+
+    ev = evaluate_bpc_per_pass(model, ubm, text, seq_len=64, prepared=prepared)
+    assert len(ev["passes"]) == 3, ev
+    assert all(b > 0 for b in ev["passes"])
+    # single region + soft mode: the model's final IS the last pass's consensus
+    assert math.isclose(ev["final"], ev["passes"][-1], rel_tol=1e-6), ev
+    n = model.regions[0].n_dots
+    assert 0.0 < ev["weight_entropy"] <= math.log(n) + 1e-6, ev
+    # same answer on a re-prepared text (cache path consistency)
+    ev2 = evaluate_bpc_per_pass(model, ubm, text, seq_len=64)
+    assert ev2["final"] == ev["final"] and ev2["passes"] == ev["passes"]
+    # and the plain evaluator agrees with the per-pass final
+    assert math.isclose(evaluate_bpc(model, ubm, text, seq_len=64),
+                        ev["final"], rel_tol=1e-6)

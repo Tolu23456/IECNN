@@ -1,0 +1,19 @@
+# Pilot (Tolu, 2026-11-04): ONE B0 run, seed 0, ~2 h wall cap, corpus v1.
+# Purpose: the baseline anchor for the pilot table (train/val bpc, best
+# full-val bpc) on the new whole-book-held-out corpus + UBM v1 vocab.
+# Early stop governs; `steps` is only the schedule ceiling (no chain needed:
+# 2.0 h wall < 320 min chunk cap < 6 h runner cap).
+base: b0_gru.yaml
+name: b0_gru_pilot
+data:
+  corpus: big                 # corpus v1: whole held-out books split
+ubm:
+  vocab_file: UBM/vocab_v1.json
+training:
+  eval_chars: 100000          # Tolu: larger fixed eval sample for stop checks
+  eval_every: 240
+  checkpoint_every: 240
+  early_stop:
+    patience_evals: 6
+    min_improvement: 0.005    # above 100k-char eval noise (~0.002 bpc)
+    wall_hours: 2.0

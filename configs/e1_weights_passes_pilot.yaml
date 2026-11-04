@@ -1,0 +1,15 @@
+# Pilot (Tolu, 2026-11-04): ONE E1 run, seed 0, ~2 h wall cap, corpus v1.
+# Schedule shape from the eqc ladder (2880-step ceiling: warmup 1%, tau
+# warmup 4%); the 2 h wall cap governs the real stop.
+base: e1_weights_passes_eqc.yaml
+name: e1_weights_passes_pilot
+data:
+  corpus: big
+ubm:
+  vocab_file: UBM/vocab_v1.json
+training:
+  eval_chars: 100000
+  early_stop:
+    patience_evals: 6
+    min_improvement: 0.005
+    wall_hours: 2.0

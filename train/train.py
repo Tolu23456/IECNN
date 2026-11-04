@@ -21,7 +21,7 @@ import torch.nn.functional as F
 from config import load_config
 from data.dataset import Batcher, tokenize_corpus
 from train.losses import main_loss
-from train.evaluate import evaluate_bpc
+from train.evaluate import evaluate_bpc, evaluate_bpc_per_pass, prepare_text
 from models.baselines import build_gru_baseline, build_transformer_baseline
 from train.schedules import lr_at
 from utils import set_seed, set_torch_threads, count_parameters
@@ -95,9 +95,13 @@ def train_one(config: dict, seed: int, out_dir: Path, max_steps: int | None = No
     ubm = UBM.load(vocab_file)
     vocab_size = len(ubm.bases)
 
-    train_text = Path("data/train.txt").read_text(encoding="utf-8")
-    val_text = Path("data/val.txt").read_text(encoding="utf-8")
-    train_ids = tokenize_corpus(train_text, vocab_size)
+    train_text = Path(config.get("data", {}).get(
+        "train_file", "data/train.txt")).read_text(encoding="utf-8")
+    val_text = Path(config.get("data", {}).get(
+        "val_file", "data/val.txt")).read_text(encoding="utf-8")
+    train_ids = tokenize_corpus(train_text, vocab_size,
+                                cache_dir=config.get("data", {}).get("dir", "data"),
+                                vocab_file=vocab_file)
 
     tcfg = config.get("training", {})
     seq_len = int(config.get("data", {}).get("seq_len", 256))
@@ -135,6 +139,7 @@ def train_one(config: dict, seed: int, out_dir: Path, max_steps: int | None = No
     train_seconds = 0.0
     since_best_evals = 0
     stopped_reason = None
+    stop_kind = None            # "patience" | "wall_cap" | None (target reached)
     if resume and ckpt_path.exists():
         state = torch.load(ckpt_path, weights_only=False)
         model.load_state_dict(state["model"])
@@ -152,10 +157,19 @@ def train_one(config: dict, seed: int, out_dir: Path, max_steps: int | None = No
         since_best_evals = int(state.get("since_best_evals", 0))
         print(f"resumed from {ckpt_path} at step {start_step}")
 
-    csv_path = Path("results") / f"train_{name}_seed{seed}.csv"
+    csv_path = Path(tcfg.get("csv_dir", "results")) / f"train_{name}_seed{seed}.csv"
     csv_path.parent.mkdir(parents=True, exist_ok=True)
-    log = _CSVLog(csv_path, ["step", "lr", "loss", "bpc_val", "elapsed_s"],
+    # per-pass columns (p1..p3) are blank for baselines; tau0 is the schedule
+    # temperature at the eval step; L_w is the weight-entropy bonus value.
+    log = _CSVLog(csv_path, ["step", "lr", "loss", "bpc_val",
+                             "bpc_p1", "bpc_p2", "bpc_p3", "bpc_train",
+                             "tau0", "weight_entropy", "L_w", "elapsed_s"],
                   append=start_step > 0)
+    # encode the eval texts ONCE (full val + a fixed training slice); evals
+    # reuse the prepared (ids, expand_len) pairs instead of re-encoding.
+    prepared_val = prepare_text(ubm, val_text)
+    eval_slice = train_text[:max(eval_chars * 6, 512_000)]
+    prepared_train = prepare_text(ubm, eval_slice)
 
     # ---- IECNN-specific schedules and aux-loss weights (spec 04/06) ------
     is_iecnn = config["model"]["kind"] == "iecnn"
@@ -247,10 +261,22 @@ def train_one(config: dict, seed: int, out_dir: Path, max_steps: int | None = No
         last = step == steps - 1
         if (step > 0 and step % eval_every == 0) or last:
             cut = None if last else eval_chars
-            bpc = evaluate_bpc(model, ubm, val_text, seq_len=context, max_chars=cut,
-                               tau0=kwargs.get("tau0", 1.0) if is_iecnn else 1.0)
+            ev = evaluate_bpc_per_pass(model, ubm, val_text, seq_len=context,
+                                       max_chars=cut, tau0=kwargs.get("tau0", 1.0)
+                                       if is_iecnn else 1.0,
+                                       prepared=prepared_val)
+            bpc = ev["final"]
+            bpc_tr = evaluate_bpc(model, ubm, eval_slice, seq_len=context,
+                                  tau0=kwargs.get("tau0", 1.0) if is_iecnn else 1.0,
+                                  max_chars=eval_chars, prepared=prepared_train)
             elapsed = time.perf_counter() - t0
-            log.row([step, lr, round(smooth, 5), round(bpc, 5), round(elapsed, 1)])
+            p3 = (ev["passes"] + [""] * 3)[:3]
+            log.row([step, lr, round(smooth, 5), round(bpc, 5),
+                     p3[0], p3[1], p3[2], round(bpc_tr, 5),
+                     round(kwargs.get("tau0", 1.0), 5) if is_iecnn else "",
+                     ev["weight_entropy"] if is_iecnn else "",
+                     round(aux_parts.get("L_w", 0.0), 5) if "L_w" in aux_parts else "",
+                     round(elapsed, 1)])
             prev_best = best_val
             if bpc < best_val:
                 best_val = bpc
@@ -266,17 +292,34 @@ def train_one(config: dict, seed: int, out_dir: Path, max_steps: int | None = No
             else:
                 since_best_evals += 1
             if es_patience > 0 and since_best_evals >= es_patience and not last:
+                stop_kind = "patience"
                 stopped_reason = (f"patience: {since_best_evals} evals without "
                                   f"improvement > {es_min_improve}")
             elif 0 < es_wall_hours < train_seconds / 3600:
+                stop_kind = "wall_cap"
                 stopped_reason = (f"wall cap {es_wall_hours}h reached at "
                                   f"{train_seconds / 3600:.2f}h")
             if step % (eval_every * 10) == 0 or last:
                 aux_str = " ".join(f"{k} {v:.3f}" for k, v in aux_parts.items())
-                print(f"[{name} seed{seed}] step {step} {aux_str} "
-                      f"val bpc {bpc:.4f} lr {lr:.2e} ({elapsed:.0f}s)", flush=True)
+                pp_str = " ".join(f"p{i+1} {b:.3f}" for i, b in enumerate(ev["passes"]))
+                print(f"[{name} seed{seed}] step {step} {aux_str} val bpc {bpc:.4f} "
+                      f"({pp_str}) train bpc {bpc_tr:.4f} "
+                      f"wtH {ev['weight_entropy']:.3f} lr {lr:.2e} ({elapsed:.0f}s)",
+                      flush=True)
             if stopped_reason is not None:
-                print(f"EARLY STOP at step {step}: {stopped_reason}", flush=True)
+                print(f"EARLY STOP ({stop_kind}) at step {step}: {stopped_reason}",
+                      flush=True)
+                save_checkpoint(ckpt_path, {          # stop-state is resumable
+                    "step": step, "model": model.state_dict(),
+                    "opt": opt.state_dict(), "best_val": best_val,
+                    "best_step": best_step, "best_state": best_state,
+                    "batcher_pos": batcher._pos, "batcher_order": batcher._order,
+                    "batcher_epoch": batcher.epoch,
+                    "batcher_rng": batcher.rng.bit_generator.state,
+                    "py_rng": random.getstate(), "tokens_seen": tokens_seen,
+                    "train_seconds": train_seconds,
+                    "since_best_evals": since_best_evals,
+                })
                 break
 
         if (step > 0 and step % checkpoint_every == 0) or last:
@@ -302,12 +345,14 @@ def train_one(config: dict, seed: int, out_dir: Path, max_steps: int | None = No
     if is_iecnn:
         final_eval_kwargs = {"tau0": temperature_at(steps - 1, steps, tau_warmup,
                                                     tau_max, tau_min)}
-    final_bpc = evaluate_bpc(model, ubm, val_text, seq_len=context,
-                             **final_eval_kwargs)
+    final_ev = evaluate_bpc_per_pass(model, ubm, val_text, seq_len=context,
+                                     **final_eval_kwargs, prepared=prepared_val)
+    final_bpc = final_ev["final"]
     mode_gap_val = None
     if is_iecnn:            # spec 08: report the soft-to-hard gap at every eval
         hard_bpc = evaluate_bpc(model, ubm, val_text, seq_len=context,
-                                hard_mode=True, **final_eval_kwargs)
+                                hard_mode=True, prepared=prepared_val,
+                                **final_eval_kwargs)
         mode_gap_val = round(hard_bpc - final_bpc, 5)
 
     # ---- best checkpoint, scored on FULL validation ----------------------
@@ -339,10 +384,17 @@ def train_one(config: dict, seed: int, out_dir: Path, max_steps: int | None = No
         "steps_final": steps,
         "parameters": count_parameters(model),
         "final_val_bpc": round(final_bpc, 5),
+        "final_bpc_per_pass": final_ev["passes"],
+        "final_bpc_train": None,          # filled below (fixed training slice)
+        "final_weight_entropy": final_ev["weight_entropy"] if is_iecnn else None,
+        "final_tau0": final_eval_kwargs.get("tau0") if is_iecnn else None,
         "best_val_bpc": round(min(best_val, final_bpc), 5),
         "vocab_size": vocab_size,
         "batch_size": used_batch,
+        "stop_kind": stop_kind,           # "patience" | "wall_cap" | None
         "stopped_early": stopped_reason is not None,
+        "hit_wall_cap": stop_kind == "wall_cap",
+        "reached_step_target": stopped_reason is None,
         "stopped_reason": stopped_reason,
         "train_seconds_total": round(train_seconds, 1),
         "seq_len": seq_len,
@@ -350,6 +402,11 @@ def train_one(config: dict, seed: int, out_dir: Path, max_steps: int | None = No
         "tokens_per_s": round(tokens_seen / max(elapsed_total, 1e-9), 1),
         "estimated_train_flops": int(6 * count_parameters(model) * tokens_seen),
     }
+    # train bpc on the FIXED slice (same text every run: fit, not generalization)
+    summary["final_bpc_train"] = round(evaluate_bpc(
+        model, ubm, eval_slice, seq_len=context, max_chars=eval_chars,
+        tau0=final_eval_kwargs.get("tau0", 1.0) if is_iecnn else 1.0,
+        prepared=prepared_train), 5)
     if mode_gap_val is not None:
         summary["final_hard_bpc"] = round(final_bpc + mode_gap_val, 5)
         summary["mode_gap"] = mode_gap_val

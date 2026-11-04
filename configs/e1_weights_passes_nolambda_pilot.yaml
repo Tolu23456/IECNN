@@ -1,0 +1,19 @@
+# Pilot (Tolu, 2026-11-04): E1 ablation, seed 0, ~2 h wall cap, corpus v1.
+# Identical to e1_weights_passes_pilot.yaml except ALL auxiliary losses are
+# off (lambda_d/k/w = 0; lambda_r/lambda_c were already 0) — isolates what the
+# aux terms contribute to E1's optimization. Weights + 3 passes stay ON.
+base: e1_weights_passes_eqc.yaml
+name: e1_weights_passes_nolambda_pilot
+data:
+  corpus: big
+ubm:
+  vocab_file: UBM/vocab_v1.json
+training:
+  eval_chars: 100000
+  lambda_d: 0.0
+  lambda_k: 0.0
+  lambda_w: 0.0
+  early_stop:
+    patience_evals: 6
+    min_improvement: 0.005
+    wall_hours: 2.0

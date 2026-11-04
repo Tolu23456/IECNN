@@ -29,10 +29,13 @@ jobs:
         with:
           python-version: "3.11"
           cache: pip
-      - name: Install requirements (no torch needed for BPE)
+      - name: Install requirements (stdlib-only, no torch)
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
+          # BPE training + corpus build are pure stdlib; requirements.txt pins
+          # torch==2.15.0+cpu which only resolves from the PyTorch index (the
+          # train.yml workflow installs torch separately). Skip it here.
+          python -m pip install regex==2026.9.29 pyyaml==6.0.3
 
       - name: Prepare corpus (v1, whole-book held-out split)
         run: |
