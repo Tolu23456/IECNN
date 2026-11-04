@@ -1,0 +1,98 @@
+# Trains a UBM vocabulary (deterministic byte-level BPE) on the corpus train
+# split. Dispatched manually; never starts automatically.
+#
+# Why a workflow: the dev box (2-core, 2.7 GB) OOM-kills on the full 38.6M-char
+# corpus (~3 GB of merge statistics); the runner (4-core, 16 GB) handles it.
+# Writes UBM/vocab_v1.json + a compression report, commits both, and uploads
+# them as an artifact.
+name: vocab
+on:
+  workflow_dispatch:
+    inputs:
+      size:
+        description: "Target vocabulary size (total bases)"
+        default: "512"
+      out:
+        description: "Output vocab file under UBM/"
+        default: "UBM/vocab_v1.json"
+
+permissions:
+  contents: write
+
+jobs:
+  vocab:
+    runs-on: ubuntu-latest   # 4 vCPU, 16 GB RAM, no GPU
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install requirements (no torch needed for BPE)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Prepare corpus (v1, whole-book held-out split)
+        run: |
+          set -euo pipefail
+          python - << 'PYEOF'
+          from data.prepare import prepare_big_corpus
+          info = prepare_big_corpus({"data_dir": "data", "data": {"corpus": "big"}})
+          for name, d in info["parts"].items():
+              print(name, d["chars"], d["sha256"][:16], "books:", d["books"])
+          PYEOF
+
+      - name: Train vocabulary
+        run: |
+          set -euo pipefail
+          python scripts/train_vocab.py \
+            --train data/train.txt --val data/val.txt \
+            --size ${{ github.event.inputs.size }} \
+            --out ${{ github.event.inputs.out }}
+
+      - name: Sanity-check vocabulary
+        run: |
+          set -euo pipefail
+          python - << 'PYEOF'
+          import json, os
+          vpath = os.environ["VOUT"]
+          ubm = json.load(open(vpath))
+          n_bases = len(ubm["bases"]) if isinstance(ubm, dict) and "bases" in ubm else None
+          print("vocab file:", vpath, "keys:", list(ubm)[:5], "bases:", n_bases)
+          rep = json.load(open("results/" +
+              os.path.basename(vpath).replace(".json", "") + "_compression.json"))
+          train_ct = rep["stats"][0]["chars_per_token"]
+          val_ct = rep["stats"][1]["chars_per_token"]
+          print(f"chars/token: train {train_ct}, val {val_ct}")
+          assert val_ct >= 1.0, "val compression collapsed (vocab broken?)"
+          assert n_bases is None or n_bases >= 256, "fewer bases than bytes?!"
+          PYEOF
+        env:
+          VOUT: ${{ github.event.inputs.out }}
+
+      - name: Upload vocab artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ubm-vocab-${{ github.run_id }}
+          path: |
+            UBM/vocab_*.json
+            results/ubm_*_compression.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Commit vocabulary + report
+        run: |
+          set -euo pipefail
+          git config user.name "IECNN Actions bot"
+          git config user.email "actions@users.noreply.github.com"
+          git pull --rebase --autostash origin main
+          git add "${{ github.event.inputs.out }}" results/
+          if git diff --cached --quiet; then
+            echo "nothing to commit"
+          else
+            git commit -m "vocab: ${{ github.event.inputs.out }} (size ${{ github.event.inputs.size }}) [run ${{ github.run_id }}]"
+            git push
+          fi

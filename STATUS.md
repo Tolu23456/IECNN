@@ -49,7 +49,7 @@ Newest entry at the top.
 ## 2026-11-02 — Checkpoint B follow-through: (c) executed — E1 optimized 42 → 16.6 s/step; B0 overfitting found; best-checkpoint protocol
 
 - **Fast-dot rewrite** (`models/dot.py`, `fast_math` flag default ON): GRU gates + tied head as plain batched GEMMs over merged `[B*T, N]` layout; einsum version kept as `_forward_reference`; equivalence test fast↔reference incl. dynamic query. Suite now **61 passed, 6 skipped**.
-- **Chain of measured E1 speeds on the runner**: 42 → 22.1 (loo/JS dedup) → 17.4 s/step (fast-math) → **16.6 s/step, 989 tok/s** (JS reuses the dot's `log_pi` instead of re-taking `log(p)`). Below the self-set bar (≥1200 tok/s would justify torch.compile), so optimization stops here.
+- **Chain of measured E1 speeds on the runner**: 42 → 22.1 (loo/JS dedup) → 17.4 s/step (fast-math) → **16.6 s/step, 989 tok/s** (JS reuses the dot's `log_pi` instead of re-taking `log(p)`). Ratio check (Tolu): 42 → 16.6 is a **~2.5×** total speedup, not 7×; per-rung ratios are E1/E0 ≈ 4.2×, E1/B1 ≈ 6.5×, E1/B0 ≈ 17.3×, and E1 vs *B1's own optimizer-fitted* speed is NOT a like-for-like claim anyway. Below the self-set bar (≥1200 tok/s would justify torch.compile), so optimization stops here.
 - **Op-level profiler** (torch.profiler table in `train/profile_step.py`, real fwd+bwd on the runner): after the GEMM rewrite, remaining cost = elementwise `[f, N, V]` chains (mul/log/div/copy_/add/sub/neg/where) in consensus + backward — i.e., mostly intrinsic to the ensemble-over-vocab design.
 - **B0 `-r2` chunk 1 finished and self-chained at 04:28 for all 3 seeds (runs 21/22/23, chunk 2 in progress)**. The CSVs carried back show **real overfitting**: train loss → 0.25 while in-loop val bpc rises monotonically 1.95 (step 1k) → 5.43 (20k) — at ~14k tokens/step the 50k target is ~3,900 epochs on a 540k-token corpus. Run so far has been valuable regardless: it also proved the 320-min timeout → artifact → resume handoff works.
 - **Trainer now tracks the best checkpoint** (`best_state`/`best_step` saved + resumed; final `summary.json` gains `best_full_val_bpc`, `best_step`, `best_mode_gap` at the best point, all scored on FULL validation). The rung headline is the best point, not the most-overfit final state.
@@ -68,9 +68,7 @@ Newest entry at the top.
   after a small fix (was 4228 before an accidental extra JS computation; restored);
   init loss 6.238 = ln 512 exactly. E1 first measured **42 s/step** → component
   profiled on Actions: consensus machinery was computed twice per pass; after reusing
-  loo/JS parts, E1 **22 s/step** (742 tok/s). E1 vs E0 ratio now ~5.6× (3 passes +
-  weighting); a bmm/einsum rewrite of `dots_forward` is listed for Phase 4 before any
-  long E1 chain.
+  loo/JS parts, E1 **22 s/step** (742 tok/s). E1 vs E0 ratio: 22.1/3.9 ≈ 5.6× then; after the final round of optimisation it settled at 16.6/3.9 ≈ **4.2×** (3 passes + weighting; elementwise consensus is the leftover cost).
 - **Workflow upgraded for >6 h rungs**: seeds matrix (parallel per-seed jobs), 320-min
   chunks with **self-chaining resume only on exit code 124** (crashes fail loudly),
   overwrite artifacts named `{config}-seeds-{seed}{suffix}`. A bash arithmetic bug
