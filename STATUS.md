@@ -2,6 +2,64 @@
 
 Newest entry at the top.
 
+## 2026-11-04 — Tolu's A/B/C decisions executed; 4 pilots dispatched
+
+- **Decisions in**: (A) early-stop adopted with edits — eval sample raised to
+  a fixed **100k chars** (`training.eval_chars`) AND `min_improvement` 0.005
+  (100k-char eval noise ≈ 0.002 bpc, so 0.005 is safely above it); every
+  summary now records `stop_kind` ("patience" | "wall_cap" | null) plus
+  `stopped_early`, `hit_wall_cap`, `reached_step_target`. (B) corpus v1 with a
+  fresh **UBM v1 vocab @512**. (C) pilot first — ONE seed-0 run per config.
+- **Corpus v1 split (Tolu's question answered)**: whole held-out BOOKS, not
+  tail blocks. Train = 32 books (38,620,418 chars), **val = The Wonderful
+  Wizard of Oz (book 55, 207,823 chars)**, test = Heart of Darkness (219) +
+  A Modest Proposal (1080) + The Yellow Wallpaper (1952) = 260,911 chars. No
+  book appears in two parts (asserted by id AND by body sha16); Gutenberg
+  boilerplate stripped between the license markers for all 38 books
+  (`markers_found: True` each); NFC-normalized. Builder: `data/prepare.py`
+  (`data.corpus: big`); split_info.json carries sha256 per part.
+- **UBM v1 trained on the RUNNER** (dev box OOM-kills at 38.6M chars — the
+  in-memory merge trainer needs ~3 GB; new `vocab.yml` workflow does corpus
+  prep + vocab training + commit). Result: 512 bases, 248 merges,
+  **2.00 chars/token train, 2.09 val** (val compresses better — Oz is more
+  regular English than the KJV-heavy train mix). `UBM/vocab_v1.json` +
+  `results/vocab_v1_compression.json` committed.
+- **Pilot-corrupting bug caught before dispatch**: `tokenize_corpus`
+  HARDCODED `UBM/vocab_v0.json` — every pilot would have tokenized the train
+  stream with the v0 merge set while the model used v1 ids (same size 512,
+  different semantics). Fixed: vocab_file is threaded through from config, and
+  the npy cache key now includes the vocab file name.
+- **Per-pass logging implemented** (Tolu's pilot logging list):
+  `evaluate_bpc_per_pass` scores passes 1/2/3 of the last region from ONE
+  forward (pass p predicts from its own pooled log-prob), plus weight entropy
+  of the last pass's dot-weights and per-pass tau. The training CSV now logs
+  `step,lr,loss,bpc_val,bpc_p1,bpc_p2,bpc_p3,bpc_train,tau0,weight_entropy,L_w,
+  elapsed_s`; summaries carry `final_bpc_per_pass`, `final_bpc_train`,
+  `final_weight_entropy`, `final_tau0`. `bpc_train` = fixed 100k-char slice of
+  the train stream (fit, not generalization).
+- **CI chaining test added** (`tests/test_chaining.py`): (1) two chained
+  `train_one` chunks on a synthetic corpus — asserts chunk 2 RESUMES
+  (`steps_trained_this_run == 4` after `max_steps` 4→8; the 11-03 bug would
+  have re-trained 8 from 0) and the CSV stays one continuous log; (2) a
+  workflow lint asserting `train.yml` extracts the resume artifact at the repo
+  root (the `checkpoints/checkpoints/...` bug cannot return silently). Suite:
+  **67 passed, 6 skipped** locally.
+- **"7x" correction** in STATUS done (42→16.6 s/step ≈ 2.5×; rung ratios
+  E1/E0 4.2×, E1/B1 6.5×, E1/B0 17.3×).
+- **B0's old best full-val bpc**: NOT recoverable from the old artifact (its
+  checkpoint stores the 20k overfit state; `best_state` tracking postdates
+  that run, and the in-loop best 1.95 was a 12k-char subsample on corpus v0).
+  The honest like-for-like number comes from today's B0 pilot on corpus v1
+  (`best_full_val_bpc`), reported in the pilot table with E0/E1/E1-nolambda.
+- **Pilots dispatched (runs 72–75, seed 0, suffix -pilot)**: `b0_gru_pilot`,
+  `e0_plain_ensemble_pilot`, `e1_weights_passes_pilot`,
+  `e1_weights_passes_nolambda_pilot` (lambda_d/k/w = 0 isolates the aux
+  losses; weights + 3 passes stay on). All: corpus v1, vocab v1,
+  eval_chars 100k, patience 6 evals, wall cap 2.0 h (accumulated train
+  seconds, chunk-safe). Schedule ceilings keep eqc shapes (B0 50k / E0 12k /
+  E1 2,880 steps; warmup 1%, tau warmup 4%) but the 2 h cap governs — none of
+  these runs reaches its ceiling. NO full ladder dispatched.
+
 ## 2026-11-03/04 — Tolu's pause: what the runner actually did (and didn't) do
 
 - **Cancellation order executed**: B0 50k chain (runs 21/22/23) and all 6 remaining
