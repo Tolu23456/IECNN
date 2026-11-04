@@ -2,6 +2,43 @@
 
 Newest entry at the top.
 
+## 2026-11-03/04 — Tolu's pause: what the runner actually did (and didn't) do
+
+- **Cancellation order executed**: B0 50k chain (runs 21/22/23) and all 6 remaining
+  in-flight eqc chain continuations (runs 66–71) cancelled. Nothing else dispatched.
+- **Chain-resume bug found and fixed** (this explains everything): the uploaded
+  artifact zip is rooted at `checkpoints/`, but the chain's restore step extracted
+  it *into* `checkpoints/` → `checkpoints/checkpoints/...`; `train.py` never saw
+  `checkpoint.pt` in its out-dir, so `--resume` never engaged and **every chained
+  chunk re-trained the rung from step 0**. Effects: the B0 `-r2` "50k ladder"
+  actually only ever completed its first chunk (20k steps — the committed CSV is
+  that single chunk); the E0/E1 eqc rungs burned ~30 chains × 320 min producing
+  only chunk-1 data segments; and the artifact nests deeper every chunk (131 MB
+  zips full of duplicate .pts). Fix: extract at repo root (`dd83589`), one line +
+  comment. Honest statement: my "chain handoff works" from yesterday was verified
+  only as "the next run started", not as "the step counter continued" — wrong.
+- **What the eqc chunks actually delivered (single-chunk curves, 16,384 tokens/step
+  for every rung, all still on v0 corpus/vocab)**: E0 plain ensemble reached
+  **2.395 / 2.418 / 2.427 bpc by ~5.0–5.8k steps (seeds 0/1/2, still falling)**;
+  E1 weights rung reached **2.997 / 2.990 / 3.107 bpc at ~0.9–1.1k steps, then
+  flattening**. Under contention, measured s/step: E0 ≈ 4.2–4.3, E1 ≈ 17.4–21.4.
+  At equal compute so far, **E0 (plain ensemble) is ahead**. No true bottom
+  reached; these are "still falling at chunk end" points, not converged values.
+- **L_w / tau reporting**: tau at each best point is computable exactly from the
+  schedule (e.g. E1 best steps 900/1,080/1,260 with tau_warmup 115 → tau
+  0.851/0.783/0.707); `L_w` is only in stdout logs and no chained chunk ever
+  finalized, so per-best `L_w` needs either the in-progress logs or a re-run —
+  not faked. CSV loss column is the total (main + aux).
+- Work done locally while paused: evaluator-health tests (uniform at init ≈
+  4.80 bpc = exactly ln(512)/(ln2×1.874) on real vocab; low bpc on a trained
+  slice), trainer early-stop keys implemented (patience + wall cap, chunk-safe),
+  regularization parity pinned in every rung config (E4's spec-default 5% dot
+  dropout removed after Tolu's equalization request), and — a real catch —
+  `dot_dropout` had NO implementation behind the config key; one was written
+  (spec table semantics: 5% of steps, one random dot masked per region, training
+  only) plus tests. Corpus v1 (39.1 M chars, 38 public-domain books) built with
+  a deterministic deterministic manifest; huge divergence story pending approval.
+
 ## 2026-11-02 — Equal-compute ladder dispatched (Tolu chose option b)
 
 - Checkpoint-B follow-up options presented with measured numbers; **Tolu chose (b): equal-compute stepping**, budget W = B0's 50k-step compute (~47,850 s/seed, from B0's measured 0.957 s/step). Resulting step counts: **E0 → 12,000** (3.9 s/step = 46,800 s), **E1 → 2,880** (16.56 s/step = 47,692 s).
