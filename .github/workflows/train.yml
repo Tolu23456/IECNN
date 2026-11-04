@@ -110,10 +110,15 @@ jobs:
           PYEOF
           ART_ID=$(cat /tmp/art_id)
           curl -sfL -H "Authorization: Bearer $GH_TOKEN" \
-            -o checkpoints/resume.zip \
+            -o /tmp/eqc_resume.zip \
             "https://api.github.com/repos/${{ github.repository }}/actions/artifacts/$ART_ID/zip"
-          python3 -c "import zipfile; zipfile.ZipFile('checkpoints/resume.zip').extractall('checkpoints')"
-          rm checkpoints/resume.zip
+          # The artifact zip already stores the checkpoints/ (and results/)
+          # prefixes, so it MUST be unpacked at the repo root. Extracting it
+          # into checkpoints/ once produced checkpoints/checkpoints/... (the
+          # resume file was never found, so every chained chunk re-trained the
+          # rung from step 0 — found on the runner 2026-11-03).
+          python3 -c "import zipfile; zipfile.ZipFile('/tmp/eqc_resume.zip').extractall('.')"
+          rm /tmp/eqc_resume.zip
           echo "restored:"; find checkpoints -maxdepth 3 -type f | head
 
       # ---- train one chunk (resumes automatically inside the workspace) ----
