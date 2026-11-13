@@ -252,8 +252,7 @@ def main() -> None:
           flush=True)
     B, T, t0 = 4, 256, 200
     torch.manual_seed(2)
-    chunk = chunk_text(train_text[:20_000])[0]
-    ids_all = torch.tensor(ubm.encode(chunk), dtype=torch.long)
+    ids_all = torch.tensor(ubm.encode(train_text[:20_000]), dtype=torch.long)
     idx = torch.randint(0, len(ids_all) - T, (B,))
     x = torch.stack([ids_all[i:i + T] for i in idx])
 
