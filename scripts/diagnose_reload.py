@@ -188,9 +188,10 @@ def main() -> None:
 
     # ---------------- (c) torch.save / torch.load round trip ---------------
     print("(c) torch.save -> torch.load round trip:", flush=True)
-    tmp = Path("/tmp/opencode/_roundtrip.pt")
+    tmp = Path("_roundtrip_tmp.pt")          # cwd (runner-safe), cleaned below
     torch.save({"model": live.state_dict()}, tmp)
     rt_state = torch.load(tmp, weights_only=False)["model"]
+    tmp.unlink(missing_ok=True)
     rt = build_model(config, V)
     rt.load_state_dict(rt_state, strict=True)
     rt.eval()
