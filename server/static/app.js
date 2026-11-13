@@ -28,6 +28,36 @@ const fmt = (x, d = 4) => (x === null || x === undefined ||
 const esc = s => String(s ?? "");
 const uniq = a => [...new Set(a)];
 
+/* ---- token display ----------------------------------------------------
+   256 of the 512 vocab slots are raw byte-fallback tokens. Printable ASCII
+   shows as-is; control bytes show as \t \n \r and everything else (high
+   bytes 0x80-0xFF, the lone bad merge) as hex <xx>. In checkpoint exports
+   the runner-side decode has already replaced invalid bytes with U+FFFD,
+   which we can't map back to the original byte — shown as <fffd>. */
+const _CTRL_JS = { 9: "\\t", 10: "\\n", 13: "\\r" };
+const byteDisp = b => (b in _CTRL_JS) ? _CTRL_JS[b] :
+  (b >= 0x20 && b <= 0x7e) ? String.fromCharCode(b) :
+  `<${b.toString(16).padStart(2, "0")}>`;
+function tokDisp(s) {
+  s = String(s ?? "");
+  let out = "";
+  for (const ch of s) {
+    const o = ch.codePointAt(0);
+    if (o === 0xfffd) out += "<fffd>";
+    else if (o in _CTRL_JS) out += _CTRL_JS[o];
+    else if (o < 0x20 || o === 0x7f) out += `<${o.toString(16).padStart(2, "0")}>`;
+    else out += ch;
+  }
+  return out;
+}
+const tokEscaped = s => tokDisp(s) !== String(s ?? "");
+/* display for a vocab id (0..511), using the export's id-ordered labels */
+const idDisp = (i, labels) =>
+  i < 256 ? byteDisp(i)
+  : !Array.isArray(labels) ? `id ${i}`
+  : !labels[i] ? `<special ${i}>`
+  : tokDisp(labels[i]);
+
 const PALETTE = ["#4fc3f7", "#ffb74d", "#81c784", "#e57373", "#ba68c8", "#4db6ac",
                  "#f06292", "#fff176", "#64b5f6", "#aed581"];
 function rungColor(rung) {
@@ -784,15 +814,17 @@ async function renderViz(root, v) {
   // ---- embedding map
   const pts = v.embeddings?.points;
   if (Array.isArray(pts) && pts.length) {
+    const labels = v.embeddings.labels;
     root.append(h("h2", {}, "Token embedding map (2-D projection of the tied table)"),
-      h("p", { class: "legend" }, `Each point is a vocab entry (${pts.length}). Nearby points are embedded close together. Hover to read tokens.`));
+      h("p", { class: "legend" }, `Each point is a vocab entry (${pts.length}). Nearby points are embedded close together. Hover to read tokens. `,
+        "Byte-fallback tokens (ids 0–255) display as their byte: printable ASCII as-is, otherwise hex ", h("code", {}, "<xx>"), " — 129 of 512 entries display that way, by design."));
     const cv = h("canvas", { style: "max-height:420px" });
     root.append(h("div", { class: "chartbox" }, cv));
     if (HAS_CHART) requestAnimationFrame(() => {
       try {
         new Chart(cv, { type: "scatter",
           data: { datasets: [{ data: pts.map((p, i) => ({ x: p[0], y: p[1],
-            label: v.embeddings.labels?.[i] ?? String(i) })),
+            label: idDisp(i, labels) })),
             pointRadius: 2.2, pointHoverRadius: 5,
             backgroundColor: "#4fc3f7aa" }] },
           options: { responsive: true, maintainAspectRatio: false,
@@ -821,6 +853,9 @@ async function renderViz(root, v) {
         h("summary", {}, `${esc((S.text || "").length)} chars of sample text`),
         h("pre", {}, esc((S.text || "").slice(0, 800)) + " …")),
       "Drag the position slider to inspect any token: how much each dot trusted itself (weights), its confidence (γ), and what each dot actually predicted. ",
+      "Token display: raw byte tokens show as ", h("code", {}, "<xx>"), " hex; ",
+      h("code", {}, "<fffd>"), " marks a byte the runner-side export decode already lost; ",
+      h("code", {}, "\\n"), " is a newline. The · dots mark token boundaries — the model reads in ~2-char chunks by design. ",
       h("span", { class: "pill " + (hits / Math.max(1, scored) >= .5 ? "ok" : "") },
         `pooled top-1 correct on ${hits}/${scored} positions (${fmt(100 * hits / Math.max(1, scored), 1)}%)`)));
 
@@ -833,20 +868,22 @@ async function renderViz(root, v) {
   const redraw = () => {
     const i = Math.min(+bar.value, nPos - 1), P = S.positions[i];
     if (!P) return;
-    posLabel.textContent = `position ${i} / ${nPos - 1} · token “${esc(P.token)}” → target next “${esc(P.next)}” (id ${P.next_id ?? "?"})`;
+    posLabel.textContent = `position ${i} / ${nPos - 1} · token “${tokDisp(P.token)}” → target next “${tokDisp(P.next)}” (id ${P.next_id ?? "?"}${P.next_id !== undefined && P.next_id < 256 ? ` = byte ${byteDisp(P.next_id)}` : ""})`;
     zone.innerHTML = "";
-    // token context strip
+    // token context strip — one token per chunk, · separators make the
+    // chunking visible; byte-fallback tokens render as hex escapes
     const toks = Array.isArray(S.tokens) ? S.tokens : null;
     if (toks && toks.length) {
       const a = Math.max(0, i - 14), b = Math.min(toks.length, i + 8);
       const strip = h("div", { class: "tokline" });
       if (a > 0) strip.append("… ");
       toks.slice(a, b).forEach((t, j) => {
-        const idx = a + j;
-        if (idx === i) strip.append(h("span", { class: "cur" }, esc(t)));
-        else if (idx === i + 1) strip.append(h("span", { class: "tgt" }, esc(t)));
-        else strip.append(esc(t));
-        strip.append(" ");
+        const idx = a + j, disp = tokDisp(t), escaped = disp !== t;
+        const cls = (idx === i ? "cur" : idx === i + 1 ? "tgt" : "") +
+          (escaped ? " btk" : "");
+        if (cls) strip.append(h("span", { class: cls.trim() }, disp));
+        else strip.append(disp);
+        strip.append(h("span", { class: "tsep" }, "·"));
       });
       if (b < toks.length) strip.append("…");
       zone.append(strip);
@@ -877,10 +914,11 @@ async function renderViz(root, v) {
     zone.append(h("h3", {}, "pooled region answer (log-linear over dots)"),
       h("div", { class: "dotcard" },
         ...pool.map(([tok, prob]) =>
-          h("span", { class: "pill" + (tok === P.next ? " ok" : "") },
-            `${esc(tok)} ${fmt(prob * 100, 1)}%`)),
+          h("span", { class: "pill" + (tok === P.next ? " ok" : "") +
+            (tokEscaped(tok) ? " esc" : "") },
+            `${tokDisp(tok)} ${fmt(prob * 100, 1)}%`)),
         h("div", { class: "muted" },
-          pool[0] && pool[0][0] === P.next ? "✓ top-1 == target" : `✗ top-1 ≠ target “${esc(P.next)}”`)));
+          pool[0] && pool[0][0] === P.next ? "✓ top-1 == target" : `✗ top-1 ≠ target “${tokDisp(P.next)}”`)));
 
     // per-dot predictions at selected pass
     const pSel = h("select", {}, passes.map((pn, pi) =>
@@ -898,8 +936,9 @@ async function renderViz(root, v) {
             h("span", { class: "muted" }, `w=${fmt(d.weights?.[pl], 3)} γ=${fmt(d.gamma?.[pl], 3)}`)),
           h("div", { class: "muted" }, `${esc(passes[pl])} top predictions: `),
           ...top.map(([tok, prob]) =>
-            h("span", { class: "pill" + (tok === P.next ? " ok" : "") },
-              `${esc(tok)} ${fmt(prob * 100, 1)}%`))));
+            h("span", { class: "pill" + (tok === P.next ? " ok" : "") +
+              (tokEscaped(tok) ? " esc" : "") },
+              `${tokDisp(tok)} ${fmt(prob * 100, 1)}%`))));
       });
     };
     pSel.addEventListener("change", fillDots);
@@ -1157,14 +1196,54 @@ async function pageVocab(root) {
   root.append(h("h1", {}, "Vocabulary (UBM)"));
   const c = rep.vocab_v1_compression || {};
   const st = Object.fromEntries((c.stats || []).map(x => [x.split, x]));
+  const comp = voc.composition || {};
+  const nByte = comp.byte ?? (voc.bases || []).filter(b => b.kind === "byte").length;
+  const nSpec = comp.special ?? 8;
+  const nMerge = comp.merge ?? (voc.bases || []).filter(b => b.kind === "merge").length;
+
+  // composition bar: byte-fallback vs specials vs learned merges
+  const seg = (n, color, label) => n > 0 ? h("div", {
+    style: `flex:${n};background:${color};min-width:3px`,
+    title: `${label}: ${n}` }) : null;
+  const compBar = h("div", { class: "compbar" },
+    seg(nByte, "#e5737388", "byte-fallback"),
+    seg(nSpec, "#8a95ad", "specials"),
+    seg(nMerge, "#81c784", "learned merges"));
+  const compLbl = h("div", { class: "muted", style: "font-size:11px;margin:-2px 0 6px" },
+    `${nByte} byte-fallback · ${nSpec} specials · ${nMerge} learned merges (of ${voc.size ?? 512})`);
+
   root.append(h("div", { class: "cards" },
-    card(voc.size ?? 512, "vocab size"),
-    card(`${c.merges ?? "?"} merges`, "256 bytes + 8 specials + merges"),
     card(fmt(st.train?.chars_per_token, 3), "chars/token (train)"),
-    card(fmt(st.val?.chars_per_token, 3), "chars/token (val)")));
+    card(fmt(st.val?.chars_per_token, 3), "chars/token (val)"),
+    card(voc.size ?? 512, "vocab size"),
+    card(`${st.train ? (st.train.tokens / 1e6).toFixed(1) + "M" : "—"}`,
+      "train tokens"),
+    card(`${c.merges ?? nMerge} merges`, "learned beyond 256 bytes + 8 specials")));
+  root.append(compBar, compLbl);
+
+  // plain-English explainer for the chunking Tolu noticed
+  root.append(h("div", { class: "explain" },
+    h("b", {}, "Why the model reads in ~2-character pieces — by design. "),
+    "At vocab size 512 the tokenizer compresses text to ",
+    h("b", {}, `${fmt(st.train?.chars_per_token, 2)} chars/token (train), ${fmt(st.val?.chars_per_token, 2)} (val)`),
+    " — i.e. the model reads text in roughly two-character chunks, and ",
+    h("b", {}, `${nByte} of the ${voc.size ?? 512} slots are single-byte fallback`),
+    ", so ordinary short words are multi-token: “the” = ", h("code", {}, "\" t\""), " + ",
+    h("code", {}, "\"he\""), ". This is intentional at pilot scale: the UBM vocabulary is FIXED across every rung so bpc comparisons never mix tokenizers, and half the vocab being raw bytes guarantees nothing can ever be un-representable. ",
+    "Rung E5 (ubm promotion) later promotes frequent whole tokens into the embedding during training, which is where chunk granularity improves."));
+
+  // display legend for the hex escapes
+  root.append(h("div", { class: "explain" },
+    h("b", {}, "Token display. "),
+    "ids 0–255 are raw single bytes: printable ASCII shows as-is; control bytes show as ",
+    h("code", {}, "\\n"), ", ", h("code", {}, "\\t"), "; high bytes (0x80–0xFF) and the one merge whose bytes are not valid UTF-8 show as ",
+    h("code", {}, "<xx>"), " hex — hover any row for the exact bytes. ",
+    `${(voc.bases || []).filter(b => b.escaped).length} of ${voc.size ?? 512} entries display as escapes. In checkpoint exports the runner-side decode has already replaced invalid bytes with U+FFFD; the inspector shows those as `,
+    h("code", {}, "<fffd>"), "."));
+
   if (Array.isArray(c.first_20_merges)) {
     root.append(h("h2", {}, "First 20 merges learned"),
-      h("p", { class: "legend" }, "shown as JSON-escaped strings"),
+      h("p", { class: "legend" }, "shown as JSON-escaped strings — note how they are ~2-char pieces, matching the fertility stats above"),
       h("div", { class: "chips" }, c.first_20_merges.map(m =>
         h("span", { class: "chip on" }, JSON.stringify(m)))));
   }
@@ -1172,12 +1251,12 @@ async function pageVocab(root) {
     root.append(h("details", { class: "rawjson" }, h("summary", {}, "merge-freq dump (results/ubm_first20_merges.txt)"),
       h("pre", {}, rep.first20_merges)));
   }
-  const q = h("input", { placeholder: "filter tokens… (type e.g. the)" });
+  const q = h("input", { placeholder: "filter tokens… (type e.g. the, or a hex escape like e2)" });
   const info = h("span", { class: "muted" });
   const tbl = h("table", {});
   const more = h("button", {}, "show more");
   root.append(h("h2", {}, `All ${voc.size} bases`),
-    h("p", {}, "Merges are shown as their decoded text; byte/special tokens as escaped text."), q, info,
+    h("p", {}, "Merges are shown as their decoded text; byte/special tokens as readable escapes."), q, info,
     tbl, h("div", { class: "toolbar" }, more));
   let limit = 120;
   const fill = () => {
@@ -1188,11 +1267,13 @@ async function pageVocab(root) {
     const body = h("tbody", {});
     let shown = 0, matched = 0;
     for (const b of (voc.bases || [])) {
-      if (query && !(b.text.includes(query) || (b.raw_text || "").includes(query))) continue;
+      if (query && !(b.text.includes(query) || (b.hex || "").includes(query))) continue;
       matched++;
       if (shown < limit) {
         body.append(h("tr", {}, h("td", { class: "num" }, String(b.id)),
-          h("td", {}, JSON.stringify(b.text)),
+          h("td", { class: b.escaped ? "btk" : "",
+            title: b.hex ? `raw bytes (hex): ${b.hex}` : undefined },
+            JSON.stringify(b.text)),
           h("td", {}, b.kind || (b.merge ? "merge" : "byte")),
           h("td", { class: "num" }, String(b.n_bytes ?? 0))));
         shown++;

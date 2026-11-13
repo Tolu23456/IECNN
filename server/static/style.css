@@ -219,7 +219,18 @@ input:focus-visible, select:focus-visible, button:focus-visible {
   padding: 8px 12px; margin: 8px 0; line-height: 1.9; word-break: break-all; }
 .tokline .cur { color: #0b0d12; background: var(--accent); border-radius: 4px; padding: 1px 4px; font-weight: 700; }
 .tokline .tgt { color: var(--good); border: 1px dashed #81c78488; border-radius: 4px; padding: 0 4px; }
+.tokline .btk, td.btk, .pill.esc { color: var(--accent2); }
+.tsep { color: #46536e; margin: 0 1px; user-select: none; }
 .ctx { color: var(--muted); }
+
+/* vocab composition bar + explainers */
+.compbar { display: flex; height: 14px; border-radius: 7px; overflow: hidden;
+  border: 1px solid var(--line); max-width: 760px; margin: 2px 0; }
+.explain { background: var(--panel); border: 1px solid var(--line);
+  border-left: 3px solid var(--accent); border-radius: 8px;
+  padding: 10px 16px; margin: 10px 0; max-width: 980px;
+  color: var(--muted); font-size: 13px; }
+.explain b { color: var(--text); }
 
 .legend { color: var(--muted); font-size: 12px; margin: 4px 0 10px; }
 .warn { color: var(--accent2); }

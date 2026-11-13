@@ -34,6 +34,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 STATIC = Path(__file__).resolve().parent / "static"
 
+# visible escapes for control characters inside token payloads
+_CTRL_ESC = {0x09: "\\t", 0x0A: "\\n", 0x0D: "\\r"}
+
 RESULTS = ROOT / "results"
 VIZ = RESULTS / "viz"
 DIAG = RESULTS / "diagnosis"
@@ -238,14 +241,51 @@ def _git_head() -> str:
         return "(git unavailable)"
 
 
+def _byte_disp(b: int) -> str:
+    """Readable display for one raw byte (byte-fallback tokens, ids 0–255).
+
+    Printable ASCII shows as-is; tab/newline/CR as escapes; everything else
+    (control bytes, high bytes 0x80–0xFF) as lowercase hex <xx>.
+    """
+    if b in _CTRL_ESC:
+        return _CTRL_ESC[b]
+    if 0x20 <= b <= 0x7E:
+        return chr(b)
+    return f"<{b:02x}>"
+
+
+def _token_display(raw: bytes) -> str:
+    """Token payload bytes -> human-readable display string.
+
+    Valid UTF-8 stays normal text (" the", "café"); anything that is not
+    valid standalone UTF-8 (the 128 high byte-fallback tokens plus one
+    merge in vocab_v1) renders as readable hex escapes (<e2>, <ff>) instead
+    of the U+FFFD tofu. Control characters inside otherwise-valid text
+    (e.g. \\n) show as visible escapes too.
+    """
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return "".join(_byte_disp(b) for b in raw)
+    out = []
+    for ch in text:
+        o = ord(ch)
+        if o in _CTRL_ESC:
+            out.append(_CTRL_ESC[o])
+        elif o < 0x20 or o == 0x7F:
+            out.append(f"<{o:02x}>")
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
 def _vocab_overview(vpath: Path):
     """Decode UBM/vocab_v1.json into a display-friendly table.
 
     The committed vocab stores each token's payload as a base64 `bytes`
-    string (older drafts used a list of ints — support both). Merge tokens
-    carry their payload directly, so the table can show real text like
-    " the" instead of "<merge 32+111>"; specials have empty bytes and are
-    shown as <special id>.
+    string (older drafts used a list of ints — support both). Invalid-UTF-8
+    tokens are shown as hex escapes (see _token_display) instead of U+FFFD,
+    with the exact bytes in the `hex` field for the tooltip.
     """
     data = _read_json(vpath)
     if not data:
@@ -268,25 +308,40 @@ def _vocab_overview(vpath: Path):
 
     out = []
     decoded = {}
+    composition: dict = {}
     for b in bases[:2048]:
         raw = _raw(b)
         parts = b.get("parts")
-        if raw is not None and len(raw) > 0:
-            text = raw.decode("utf-8", "replace")
-            n_bytes = len(raw)
+        origin = b.get("origin") or ("merge" if parts is not None else "byte")
+        composition[origin] = composition.get(origin, 0) + 1
+        if origin == "special":
+            display, hexs = f"<special {b.get('id')}>", ""
+        elif raw is not None and len(raw) > 0:
+            display, hexs = _token_display(raw), raw.hex()
         elif parts is not None and len(parts) == 2:      # legacy fallback
             a, c = decoded.get(parts[0], ""), decoded.get(parts[1], "")
-            text, n_bytes = a + c, len((a + c).encode("utf-8"))
+            display = _token_display((a + c).encode("utf-8"))
+            hexs = ""
         else:
-            text, n_bytes = "", 0
-        decoded[b.get("id")] = text
-        origin = b.get("origin") or ("merge" if parts is not None else "byte")
-        display = f"<special {b.get('id')}>" if origin == "special" else text
-        out.append({"id": b.get("id"), "text": display.replace("\n", "\\n"),
-                    "raw_text": text, "kind": origin,
+            display, hexs = "", ""
+        decoded[b.get("id")] = display
+        # "escaped" = the display needed an escape (not plain readable text)
+        try:
+            plain = raw.decode("utf-8") if raw else ""
+        except UnicodeDecodeError:
+            plain = None
+        escaped = (origin != "special" and bool(hexs or raw) and display != plain)
+        out.append({"id": b.get("id"), "text": display,
+                    "hex": hexs, "kind": origin,
                     "merge": origin == "merge",
-                    "n_bytes": n_bytes})
+                    "byte_fallback": origin == "byte",
+                    "escaped": escaped,
+                    "n_bytes": len(raw) if raw else 0})
     return {"file": vpath.name, "size": len(bases), "bases": out,
+            "composition": composition,
+            "legend": "ids 0-255 are single byte-fallback tokens: printable "
+                      "ASCII shows as-is, everything else as <xx> hex; the "
+                      "hex field carries the exact bytes",
             "sha_note": "checksum recorded in every checkpoint (vocab_sha256)"}
 
 

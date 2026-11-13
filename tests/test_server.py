@@ -102,6 +102,31 @@ def test_unknown_viz_and_unknown_endpoint_404():
 
 
 # ----------------------------------------------------------- new content ---
+def test_byte_disp_renders_readably():
+    """Byte-fallback token display: ASCII as-is, controls escaped, hex else."""
+    f = server_mod._byte_disp
+    assert f(0x41) == "A"                # printable ASCII as-is
+    assert f(0x20) == " " and f(0x7e) == "~"
+    assert f(0x0a) == "\\n"              # control bytes as visible escapes
+    assert f(0x09) == "\\t" and f(0x0d) == "\\r"
+    assert f(0xe2) == "<e2>"             # high bytes as lowercase hex
+    assert f(0x00) == "<00>"             # non-printing controls too
+    assert f(0x7f) == "<7f>"             # DEL is not printable
+
+
+def test_token_display_escapes_invalid_utf8():
+    """Payload display: valid UTF-8 stays text; bad bytes become <xx> escapes."""
+    f = server_mod._token_display
+    assert f(b" the") == " the"          # valid text untouched
+    assert f(b"caf\xc3\xa9") == "café"   # multi-byte UTF-8 stays intact
+    assert f(b"\xff") == "<ff>"          # lone invalid byte
+    assert f(b"\xe2\x82") == "<e2><82>"  # truncated UTF-8 sequence
+    assert f(b"a\x00b") == "a<00>b"
+    assert f(b"\n\n") == "\\n\\n"        # control chars inside valid text
+    assert f(b"hi\x7f") == "hi<7f>"
+    assert f(b"") == ""
+
+
 def test_vocab_endpoint_decodes_real_merge_text():
     srv, base = _start()
     try:
@@ -116,6 +141,19 @@ def test_vocab_endpoint_decodes_real_merge_text():
         # the 8 specials are flagged
         assert bases[256]["kind"] == "special"
         assert bases[0]["kind"] == "byte"
+        # escape/hex/composition fields from the Tolu follow-up
+        assert bases[65]["text"] == "A" and bases[65]["hex"] == "41"
+        assert bases[65]["escaped"] is False and bases[65]["byte_fallback"] is True
+        assert bases[10]["text"] == "\\n" and bases[10]["escaped"] is True
+        assert bases[226]["text"] == "<e2>" and bases[226]["hex"] == "e2"
+        assert bases[268]["hex"] == "20746865" and bases[268]["escaped"] is False
+        assert bases[268]["byte_fallback"] is False
+        assert d["composition"] == {"byte": 256, "special": 8, "merge": 248}
+        assert "byte-fallback" in d["legend"]
+        # exactly the non-plain-readable entries are flagged escaped:
+        # 32 ctl bytes + DEL + 128 high bytes + 1 bad merge + "\n\n" merge
+        bad = sum(1 for b in d["bases"] if b["escaped"])
+        assert bad == 163, bad
     finally:
         srv.shutdown()
 
