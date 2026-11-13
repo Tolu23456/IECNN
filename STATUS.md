@@ -2,6 +2,47 @@
 
 Newest entry at the top.
 
+## 2026-11-13 (late evening) — E2 memory lesson, vocab pilots, consensus audit
+
+- **E2 pilot killed 3× by runner RAM (~7 GB usable, not the nominal 16 GB).**
+  Bisected with a 5-step probe: full-dim E2 died ~85 s in every time; a
+  tiny-overlay probe **completed** → the code path is correct, memory is the
+  cause. E2's four regions materialize windowed memory over spans
+  32+64+128+256 = 480 slots; retained-for-backward tensors at batch 64/seq 256
+  exceed the runner. **Agent bug found during the bisect:** the first "fix"
+  wrote `batch:` — a key train.py ignores (it reads `training.batch_size`,
+  default 16, base.yaml sets 64) — so the "batch 16" attempt silently ran at
+  64. Real fix: `batch_size: 8` in `configs/e2_regions_pilot.yaml`. E2 pilot
+  (run 43520535363) has now survived far past the old kill window.
+- **Bigger vocab per Tolu's question ("can't we increase the vocab from
+  256…?"): yes.** 512 of the vocab are 256 mandatory byte-fallback tokens +
+  248 merges (fertility 2.00 chars/token train / 2.09 val — the "words in
+  chunks" observation is by design at this scale, not a bug). Trained
+  **vocab_v2 @ 2048** (`UBM/vocab_v2.json`): fertility **2.856 train / 2.975
+  val** (+43% compression, 19.3M → 13.5M train tokens). Dispatched
+  **vocab_v3 @ 4096** for the fertility curve. Memory catch: the per-pass
+  per-dot log-prob block `[B,T,N,V]` quadruples with V → the E1+vocab2 pilot
+  (`configs/e1_weights_passes_vocab2.yaml`) runs at `batch_size: 16` to keep
+  the E1@512/batch-64 memory class.
+- **Warm-protocol (patience-only, constant LR) runs in flight:** E0 warm
+  (43494318309), E1 warm (43508978701), E1 seed-1 pilot (43515821271),
+  E2 pilot batch_size 8 (43520535363), E1 vocab2 pilot (43521585038),
+  vocab v3 (43521589596). Also repaired 3 eqc CSVs that had stacked
+  stash-pop conflict markers committed (dedupe by step, sorted;
+  commit 8295859).
+- **Consensus audit (Tolu's viz observation, quantified on the 47-position
+  export, E1@step 540):** pooled top-1 **3/47 (6%)**; oracle best-dot top-1
+  **6/47 (13%)**, oracle top-5 **11/47 (23%)**; 3 positions had a dot's
+  TOP-1 correct yet outvoted (one muted to weight 5.9e-7; one held
+  0.13–0.24 and lost to a sharper wrong dot); 8/47 had it in some dot's
+  top-5. Small sample / early checkpoint — a trend, not a verdict. Fix
+  underway on two fronts: viz export now samples **256 positions**
+  (n_tokens 48 → 256), and the Explorer gains a consensus-audit panel
+  (outvoted badges + oracle stats).
+- **Explorer follow-ups shipped by the viz subagent:** readable hex escapes
+  for byte-fallback tokens (no more � walls), visible token boundaries,
+  fertility explainer on the Vocab page (commit 4c943ec; tests green).
+
 ## 2026-11-13 (evening) — Reload anomaly SOLVED: it was the wrong corpus, not the reload
 
 - **Root cause (proven by probe + log forensics):** the `eval`/`viz` re-score
