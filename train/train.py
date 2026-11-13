@@ -309,6 +309,12 @@ def train_one(config: dict, seed: int, out_dir: Path, max_steps: int | None = No
 
         last = step == steps - 1
         if (step > 0 and step % eval_every == 0) or last:
+            # eval() around in-loop evals: numerically neutral today (the
+            # 2026-11-13 diagnosis showed train-vs-eval mode scores identical
+            # — E1's forward has no stochastic eval path) but correct for any
+            # rung whose forward gains dropout/BN-style behavior later.
+            was_training = model.training
+            model.eval()
             cut = None if last else eval_chars
             ev = evaluate_bpc_per_pass(model, ubm, val_text, seq_len=context,
                                        max_chars=cut, tau0=kwargs.get("tau0", 1.0)
@@ -318,6 +324,7 @@ def train_one(config: dict, seed: int, out_dir: Path, max_steps: int | None = No
             bpc_tr = evaluate_bpc(model, ubm, eval_slice, seq_len=context,
                                   tau0=kwargs.get("tau0", 1.0) if is_iecnn else 1.0,
                                   max_chars=eval_chars, prepared=prepared_train)
+            model.train(was_training)
             elapsed = time.perf_counter() - t0
             p3 = (ev["passes"] + [""] * 3)[:3]
             gn7 = [round(gn.get(b, 0.0), 4) for b in

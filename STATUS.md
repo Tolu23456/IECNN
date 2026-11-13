@@ -2,6 +2,50 @@
 
 Newest entry at the top.
 
+## 2026-11-13 (evening) — Reload anomaly SOLVED: it was the wrong corpus, not the reload
+
+- **Root cause (proven by probe + log forensics):** the `eval`/`viz` re-score
+  workflows rebuilt the corpus with a **base rung config**
+  (`e1_weights_passes.yaml`) whose default `data.corpus` is **v0** (tiny
+  Shakespeare). Every "re-scored" number yesterday — val 3.777, train 3.738,
+  passes 4.226/4.112/3.777 — was computed on the **v0 Shakespeare val
+  (55,769 chars)**, not corpus v1's Oz book (207,823 chars). The job log even
+  printed it: `train 1003856 / val 55769 / test 55769`. The reload path,
+  dropout mode, seq_len (128 vs 256), and fast_math are **all innocent**.
+- **One-process factorial probes** (`scripts/diagnose_reload.py`, run
+  43501937855, results in
+  `results/diagnosis/e1_weights_passes_pilot_seed0_reload.json`) on the
+  training run's own `best_state`, with the corpus **verified against the
+  run's `split_info.json`** (val sha16 b94503186e683737):
+  - A1 (train-mode, seq 128, head-100k) = **3.21328** [3.60097, 3.49581,
+    3.21328] — the in-loop number reproduced EXACTLY with reloaded weights.
+  - A2 (eval-mode) = A1; A3 (seq 256) = A1 → dropout & window irrelevant
+    (E1's forward has no stochastic eval path: `use_messages: false`,
+    `dot_dropout: 0.0`).
+  - T1 (train slice 100k) = **3.28431** [3.73774, 3.63683, 3.28431] — matches
+    in-loop train exactly.
+  - **Full-val Oz = 3.20294** [3.5845, 3.48395, 3.20294] — identical to 5
+    decimals for live (A6), fresh rebuild + `load_state_dict` (B2), and
+    torch.save/torch.load round trip (C2). B1/C1 max param diffs = 0.0;
+    forward max|Δ| live vs round-trip = 0.0 (bit-identical).
+  - D1–D4 (fast_math True/False, live + reloaded) all = 3.21328.
+  - **Causality probe on trained weights** (B=4, T=256, fast path, tokens
+    randomized after position 200): log-probs at positions ≤ 200
+    **bit-identical** on live AND reloaded models (max|Δ| = 0.0).
+  - Oz chars 100k–207.8k tail scores 3.19468 (even easier than the head).
+- **Retraction:** the earlier "full-val re-score" numbers 3.777/3.967/4.451
+  and "train 3.738" are **wrong-corpus artifacts**; E0/B0 pilot numbers are
+  unaffected (computed in-process on the right corpus).
+- **Guard baked into every workflow** (`eval.yml`, `viz.yml`, `diagnose.yml`):
+  corpus_config defaults to the `*_pilot.yaml`; the artifact is downloaded
+  FIRST and its `data/split_info.json` (carried by training artifacts) is used
+  to verify the rebuilt val's sha256 before any scoring; a val < 150k chars
+  fails loudly (diagnose script raises too). Verified locally: local val
+  (207,823 chars, b94503186e683737) == the E1 training run's recorded split.
+- **train.py hygiene:** `model.eval()` around in-loop evals, train mode
+  restored after — numerically neutral today (A1==A2), correct for any rung
+  whose forward later gains stochastic eval behavior.
+
 ## 2026-11-13 (later) — IECNN Explorer: viz server for everything
 
 - **`server/server.py` + `server/static/`**: a zero-dependency (stdlib-only,
