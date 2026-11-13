@@ -38,7 +38,7 @@ def main() -> None:
     ap.add_argument("--ckpt-dir", required=True)
     ap.add_argument("--vocab", default="UBM/vocab_v1.json")
     ap.add_argument("--data", default="data/val.txt")
-    ap.add_argument("--n-tokens", type=int, default=48)
+    ap.add_argument("--n-tokens", type=int, default=256)   # 48 was too few for consensus-audit stats (Tolu, 2026-11-13)
     ap.add_argument("--top", type=int, default=5)
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
