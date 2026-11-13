@@ -69,7 +69,11 @@ jobs:
           import json, os, sys
           d = json.load(open("/tmp/artifacts.json"))
           name = os.environ["ARTIFACT"]
-          cands = [a for a in d.get("artifacts", []) if a["name"] == name and not a["expired"]]
+          arts = d.get("artifacts", [])
+          print("total artifacts listed:", len(arts))
+          for a in arts[:5]:
+              print("  sample:", a["name"], "expired" if a["expired"] else "ok", a["created_at"])
+          cands = [a for a in arts if a["name"] == name and not a["expired"]]
           if not cands:
               print("ARTIFACT_NOT_FOUND:" + name, file=sys.stderr)
               sys.exit(1)
