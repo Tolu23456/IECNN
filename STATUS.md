@@ -2,6 +2,52 @@
 
 Newest entry at the top.
 
+## 2026-11-13 — Tolu's six items implemented; trainer defects found by pilots fixed; CI green
+
+- **Item 1 — fresh-clone pip fix**: `requirements.txt` no longer pins torch
+  (the `+cpu` build only exists on PyTorch's own index, so plain
+  `pip install -r requirements.txt` failed from a fresh clone). Torch moved to
+  `requirements-torch.txt` (CPU index pinned); `train.yml`/`tests.yml` install
+  both files; README's Getting Started updated. The `vocab.yml` workflow needs
+  no torch at all.
+- **Item 2 — vocab name + checksum everywhere**: `UBM.tokenizer.fingerprint()`
+  (sha256 of the vocab file's bytes). Every `checkpoint.pt` and `summary.json`
+  now records `vocab_file` + `vocab_sha256`; resume **raises loudly** on a
+  mismatch (exact error names both hashes and the file to point back at);
+  `scripts/eval_checkpoint.py` exercises the same guard before evaluating.
+- **Item 3 — one identical LR schedule for the next wave**:
+  `train/schedules.py::lr_at_constant` (linear warmup then FLAT peak) with
+  `training.lr_schedule: "constant"` (default stays cosine). The warm-start E0
+  config uses constant 1e-3 after warmup 500.
+- **Item 4 — per-component gradient norms + zero-init test**:
+  `grad_norms_by_component()` logs pre-clip L2 norms per bucket —
+  emb / regions / messages / chain / gate / other — as CSV columns
+  `gn_total,gn_emb,gn_regions,gn_chain,gn_gate,gn_messages,gn_other`.
+  `tests/test_zero_init.py`: (a) E1 with the learned-weight pathway at zero
+  init produces EXACTLY uniform dot-weights and its output equals E0's at
+  step 0 (forward-only, no training); (b) the grad buckets sum to the model's
+  total gradient norm. NOTE: first CI run failed because the score-path
+  params (`alpha`/`beta` scalars + `c_w/c_b/g_w/g_b` heads) are shared names
+  across E0/E1 and got copied instead of zeroed; fixed by explicitly zeroing
+  the whole score pathway in both builds — CI **green** (tests run 40).
+- **Three trainer defects the pilots exposed, fixed**:
+  1. `steps_trained_this_run`/`steps_final` reported the SCHEDULE ceiling
+     (e.g. 2880) instead of the ACTUAL last step under early stop — now
+     tracked from the loop (`last_step`); summaries add `steps_target`.
+  2. The final CSV row was written 5-columns-wide into a 12-column file
+     (malformed row) — now full width at the real last step.
+  3. The best-point full-val re-score used the FINAL tau (0.2) instead of the
+     tau annealed to the BEST step — E1 pilots' best points read ~4.45/4.69
+     instead of ~3.21/3.49 on full val, purely from the tau change. The
+     re-score now uses `temperature_at(best_step, ...)`.
+- **Pilot CSVs recovered to `results/` and committed** (runs 72/73's results-bot
+  push had 500'd; artifacts were intact) — commit 525669b.
+- **`eval.yml` workflow + `scripts/eval_checkpoint.py`**: runner-side
+  checkpoint re-scoring (download artifact by name → fingerprint check →
+  re-score best point on FULL validation at the best-step tau → per-pass bpc +
+  weight entropy + hard mode → commit JSON to `results/`). Dispatched for both
+  E1 pilots to get honest best_full_val_bpc numbers.
+
 ## 2026-11-04 — Tolu's A/B/C decisions executed; 4 pilots dispatched
 
 - **Decisions in**: (A) early-stop adopted with edits — eval sample raised to
