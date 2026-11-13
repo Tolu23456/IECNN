@@ -217,16 +217,20 @@ def main() -> None:
     print("(d) fast_math True vs False (live + reloaded):", flush=True)
     fast_math_flags(live, False)
     R["probes"]["D1_live_fastOFF_head100k"] = score(
-        live, ubm, head, prepared_head, seq_len=seq_train, max_chars=eval_chars)
+        live, ubm, head, prepared_head, tau0=tau0, seq_len=seq_train,
+        max_chars=eval_chars)
     fast_math_flags(live, True)
     R["probes"]["D2_live_fastON_head100k"] = score(
-        live, ubm, head, prepared_head, seq_len=seq_train, max_chars=eval_chars)
+        live, ubm, head, prepared_head, tau0=tau0, seq_len=seq_train,
+        max_chars=eval_chars)
     fast_math_flags(rt, False)
     R["probes"]["D3_rt_fastOFF_head100k"] = score(
-        rt, ubm, head, prepared_head, seq_len=seq_train, max_chars=eval_chars)
+        rt, ubm, head, prepared_head, tau0=tau0, seq_len=seq_train,
+        max_chars=eval_chars)
     fast_math_flags(rt, True)
     R["probes"]["D4_rt_fastON_head100k"] = score(
-        rt, ubm, head, prepared_head, seq_len=seq_train, max_chars=eval_chars)
+        rt, ubm, head, prepared_head, tau0=tau0, seq_len=seq_train,
+        max_chars=eval_chars)
     for k in ("D1_live_fastOFF_head100k", "D2_live_fastON_head100k",
               "D3_rt_fastOFF_head100k", "D4_rt_fastON_head100k"):
         print(f"  {k:34} bpc={R['probes'][k]['bpc']:.5f}", flush=True)
