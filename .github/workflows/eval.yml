@@ -143,7 +143,10 @@ jobs:
         run: |
           git config user.name "results-bot"
           git config user.email "results-bot@users.noreply.github.com"
-          git pull --rebase origin main
+          # commit FIRST, then rebase onto latest (the re-score overwrites a
+          # tracked results file; pulling before committing would refuse on
+          # the dirty worktree)
           git add results/eval_*.json
           git commit -m "results: checkpoint re-score [artifact ${{ github.event.inputs.artifact }}] (corpus-verified)" || echo "nothing to commit"
+          git pull --rebase origin main
           git push

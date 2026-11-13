@@ -2,15 +2,15 @@
  "ckpt_dir": "checkpoints/e1_weights_passes_pilot_seed0",
  "best_step": 540,
  "tau0_used": 0.95426,
- "best_full_val_bpc_at_best_tau": 3.77721,
+ "best_full_val_bpc_at_best_tau": 3.20294,
  "per_pass_bpc": [
-  4.22628,
-  4.11179,
-  3.77721
+  3.5845,
+  3.48395,
+  3.20294
  ],
- "weight_entropy": 0.87044,
- "hard_bpc_at_best_tau": 3.777581593398507,
- "mode_gap": 0.00037,
- "bpc_train_slice": 3.7378,
+ "weight_entropy": 0.96106,
+ "hard_bpc_at_best_tau": 3.202763805709636,
+ "mode_gap": -0.00018,
+ "bpc_train_slice": 3.28431,
  "vocab_sha256": "3abea29efde983cadbdea7386b1d842e8e94dabb5e39812ff34be5915697e8c0"
 }

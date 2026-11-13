@@ -123,7 +123,7 @@ jobs:
         run: |
           git config user.name "results-bot"
           git config user.email "results-bot@users.noreply.github.com"
-          git pull --rebase origin main
           git add results/diagnosis/
           git commit -m "results: reload diagnosis [artifact ${{ github.event.inputs.artifact }}] (corpus-verified)" || echo "nothing to commit"
+          git pull --rebase origin main
           git push
