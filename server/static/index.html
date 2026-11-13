@@ -3,27 +3,42 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
 <title>IECNN Explorer</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-<nav id="sidebar">
-  <div class="brand">IECNN<span>explorer</span></div>
-  <a href="#/dashboard"   class="nav">Dashboard</a>
-  <a href="#/architecture" class="nav">How it works</a>
-  <a href="#/runs"        class="nav">Training runs</a>
-  <a href="#/checkpoints" class="nav">Weights &amp; dots</a>
-  <a href="#/vocab"       class="nav">Vocab (UBM)</a>
-  <a href="#/corpus"      class="nav">Corpus &amp; evals</a>
-  <div class="foot">
-    <div id="git-head"></div>
-    <div class="muted">no training here — read-only views;
-    all compute on GitHub Actions</div>
-  </div>
-</nav>
-<main id="main">
-  <section id="page"></section>
-</main>
+<header id="topbar">
+  <button id="navtoggle" title="toggle sidebar">☰</button>
+  <div class="crumb">IECNN<span class="sep">/</span><span id="pgtitle">Dashboard</span></div>
+  <div id="headmeta"></div>
+  <a id="repolink" href="https://github.com/Tolu23456/IECNN" target="_blank" rel="noopener">repo ↗</a>
+</header>
+<div id="shell">
+  <nav id="sidebar">
+    <div class="brand">IECNN<span>explorer</span></div>
+    <div class="navgrp">Overview</div>
+    <a href="#/dashboard"  class="nav" data-page="dashboard">Dashboard</a>
+    <div class="navgrp">Experiments</div>
+    <a href="#/runs"        class="nav" data-page="runs">Training runs</a>
+    <a href="#/scores"      class="nav" data-page="scores">Re-score reports</a>
+    <div class="navgrp">Model</div>
+    <a href="#/architecture" class="nav" data-page="architecture">Architecture</a>
+    <a href="#/checkpoints" class="nav" data-page="checkpoints">Weights &amp; dots</a>
+    <a href="#/diagnosis"   class="nav" data-page="diagnosis">Diagnosis</a>
+    <div class="navgrp">Data</div>
+    <a href="#/vocab"       class="nav" data-page="vocab">Vocab (UBM)</a>
+    <a href="#/corpus"      class="nav" data-page="corpus">Corpus &amp; split</a>
+    <div class="foot">
+      <div id="git-head"></div>
+      <div class="muted">read-only views — no training here;
+      all compute on GitHub Actions</div>
+    </div>
+  </nav>
+  <main id="main">
+    <section id="page"></section>
+  </main>
+</div>
 <script src="/chart.umd.js"></script>
 <script src="/app.js"></script>
 </body>
