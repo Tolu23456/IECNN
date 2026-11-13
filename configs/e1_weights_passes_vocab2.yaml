@@ -1,0 +1,16 @@
+# E1 vocab pilot (Tolu, 2026-11-13: "can't we increase the vocab?").
+# Identical to e1_weights_passes_pilot except the vocabulary: vocab_v2 @ 2048
+# bases (256 byte-fallback + 1784 merges; fertility 2.86 chars/token vs v1's
+# 2.00). Answers: does a bigger vocab improve bits-per-character at equal
+# wall/compute class?
+#
+# batch_size 16 (NOT batch — train.py reads batch_size; an earlier ignored
+# `batch:` key cost us three runner kills on E2): the per-pass per-dot
+# log-prob block [B,T,N,V] quadruples with V (805 MB retained at batch 16 vs
+# 3.2 GB at batch 64), so batch 16 keeps the E1@512/batch-64 memory class.
+base: e1_weights_passes_pilot.yaml
+name: e1_weights_passes_vocab2
+ubm:
+  vocab_file: UBM/vocab_v2.json
+training:
+  batch_size: 16
