@@ -85,7 +85,7 @@ jobs:
           curl -sfL -H "Authorization: Bearer $GH_TOKEN" \
             "https://api.github.com/repos/${{ github.repository }}/actions/artifacts/$ART_ID/zip" \
             -o /tmp/artifact.zip
-          unzip -q /tmp/artifact.zip -d .
+          unzip -qo /tmp/artifact.zip "checkpoints/*" -d .
 
       - name: Re-score best point (full val, best-step tau)
         run: |
