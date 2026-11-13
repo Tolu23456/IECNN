@@ -2,15 +2,15 @@
  "ckpt_dir": "checkpoints/e1_weights_passes_nolambda_pilot_seed0",
  "best_step": 360,
  "tau0_used": 0.9846,
- "best_full_val_bpc_at_best_tau": 3.9669,
+ "best_full_val_bpc_at_best_tau": 3.47421,
  "per_pass_bpc": [
-  4.30848,
-  4.11113,
-  3.9669
+  3.66157,
+  3.5649,
+  3.47421
  ],
- "weight_entropy": 0.53319,
- "hard_bpc_at_best_tau": 3.9669009124598915,
+ "weight_entropy": 0.43813,
+ "hard_bpc_at_best_tau": 3.474214616226321,
  "mode_gap": 0.0,
- "bpc_train_slice": 3.96102,
+ "bpc_train_slice": 3.55903,
  "vocab_sha256": "3abea29efde983cadbdea7386b1d842e8e94dabb5e39812ff34be5915697e8c0"
 }
