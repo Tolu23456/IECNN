@@ -1,10 +1,16 @@
 # Pilot (Tolu's pilot-first policy, 2026-11-13): ONE E2 run, seed 0, 2 h wall
 # cap, corpus v1.
 #
-# E2 = 4 regions as stages + cross-region competition (spec rung table). At 4
-# regions x 3 passes the step cost is ~4x E1 (~66 s/step), so the pilot gets a
-# dense eval cadence (every 30 steps) — 2 h still yields only ~100 steps of
-# signal; treat as a smoke/trend check, not a verdict.
+# E2 = 4 regions as stages + cross-region competition (spec rung table).
+#
+# MEMORY (learned the hard way, 2026-11-13): the hosted runner has ~7 GB
+# usable RAM. At batch 64 the 4 regions' windowed memory (spans 32+64+128+256
+# = 480 slots, ~3 GB live + autograd retention) exhausted the runner and the
+# job was killed with a "runner shutdown signal" ~80 s in — twice. batch 16
+# divides window memory by 4 (same footprint class as E1 at batch 64) and
+# yields ~400-700 steps in the 2 h cap, comparable signal to E1's pilot.
+# Honest caveat: optimization noise differs from batch 64; per-token compute
+# is ~4x E1's, so equal-wall comparison vs E1's pilot is ~equal-tokens.
 base: e2_regions.yaml
 name: e2_regions_pilot
 data:
@@ -12,6 +18,7 @@ data:
 ubm:
   vocab_file: UBM/vocab_v1.json
 training:
+  batch: 16
   eval_chars: 100000
   eval_every: 30
   checkpoint_every: 30
