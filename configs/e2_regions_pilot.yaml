@@ -1,0 +1,21 @@
+# Pilot (Tolu's pilot-first policy, 2026-11-13): ONE E2 run, seed 0, 2 h wall
+# cap, corpus v1.
+#
+# E2 = 4 regions as stages + cross-region competition (spec rung table). At 4
+# regions x 3 passes the step cost is ~4x E1 (~66 s/step), so the pilot gets a
+# dense eval cadence (every 30 steps) — 2 h still yields only ~100 steps of
+# signal; treat as a smoke/trend check, not a verdict.
+base: e2_regions.yaml
+name: e2_regions_pilot
+data:
+  corpus: big
+ubm:
+  vocab_file: UBM/vocab_v1.json
+training:
+  eval_chars: 100000
+  eval_every: 30
+  checkpoint_every: 30
+  early_stop:
+    patience_evals: 6
+    min_improvement: 0.005
+    wall_hours: 2.0
