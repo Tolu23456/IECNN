@@ -1,0 +1,98 @@
+# Reload diagnosis (Tolu, 2026-11-13): E1's in-loop numbers vs runner re-score
+# disagree by ~0.56 bpc. Runs scripts/diagnose_reload.py ON THE RUNNER (all
+# compute on GitHub; inference only) on a checkpoint artifact and commits the
+# full probe table to results/diagnosis/.
+name: diagnose
+on:
+  workflow_dispatch:
+    inputs:
+      artifact:
+        description: "Checkpoint artifact name (e.g. e1_weights_passes_pilot.yaml-seeds-0-pilot)"
+        required: true
+      vocab:
+        default: "UBM/vocab_v1.json"
+      corpus_config:
+        default: "e1_weights_passes.yaml"
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install PyTorch (CPU) + requirements
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-torch.txt
+          python -m pip install -r requirements.txt
+
+      - name: Prepare corpus
+        env:
+          CONFIG: ${{ github.event.inputs.corpus_config }}
+        run: |
+          set -euo pipefail
+          if [ -f data/train.txt ] && [ -f data/val.txt ]; then echo "present"; exit 0; fi
+          python - << 'PYEOF'
+          import os
+          from config import load_config
+          from data.prepare import prepare_all
+          cfg = load_config("configs/" + os.environ["CONFIG"])
+          info = prepare_all(cfg)
+          for name, d in info["parts"].items():
+              print(name, d["chars"], d["sha256"][:16])
+          PYEOF
+
+      - name: Download checkpoint artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT: ${{ github.event.inputs.artifact }}
+        run: |
+          set -euo pipefail
+          curl -sf -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/artifacts?per_page=100" \
+            -o /tmp/artifacts.json
+          python - << 'PYEOF'
+          import json, os, sys
+          d = json.load(open("/tmp/artifacts.json"))
+          name = os.environ["ARTIFACT"]
+          cands = [a for a in d.get("artifacts", []) if a["name"] == name and not a["expired"]]
+          if not cands:
+              print("ARTIFACT_NOT_FOUND:" + name, file=sys.stderr)
+              sys.exit(1)
+          newest = max(cands, key=lambda a: (a["created_at"], a["id"]))
+          open("/tmp/art_id", "w").write(str(newest["id"]))
+          print("found artifact", newest["id"])
+          PYEOF
+          ART_ID=$(cat /tmp/art_id)
+          curl -sfL -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/artifacts/$ART_ID/zip" \
+            -o /tmp/artifact.zip
+          unzip -qo /tmp/artifact.zip "checkpoints/*" -d .
+
+      - name: Run reload diagnosis
+        run: |
+          set -euo pipefail
+          CKPT_DIR=$(find checkpoints -mindepth 1 -maxdepth 1 -type d | head -1)
+          RUN=$(basename "$CKPT_DIR")
+          python scripts/diagnose_reload.py --ckpt-dir "$CKPT_DIR" \
+            --vocab "${{ github.event.inputs.vocab }}" \
+            --out "results/diagnosis/${RUN}_reload.json"
+
+      - name: Commit diagnosis
+        run: |
+          git config user.name "results-bot"
+          git config user.email "results-bot@users.noreply.github.com"
+          git pull --rebase origin main
+          git add results/diagnosis/
+          git commit -m "results: reload diagnosis [artifact ${{ github.event.inputs.artifact }}]" || echo "nothing to commit"
+          git push
