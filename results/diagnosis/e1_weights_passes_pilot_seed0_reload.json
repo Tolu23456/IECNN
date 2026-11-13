@@ -1,0 +1,125 @@
+{
+ "meta": {
+  "run": "e1_weights_passes_pilot_seed0",
+  "best_step": 540,
+  "tau0": 0.95426,
+  "seq_len_trained": 256,
+  "eval_chars": 100000,
+  "vocab_sha256": "3abea29efde983cadbdea7386b1d842e8e94dabb5e39812ff34be5915697e8c0"
+ },
+ "probes": {
+  "A1_live_trainmode_seq128_head100k": {
+   "bpc": 3.21328,
+   "passes": [
+    3.60097,
+    3.49581,
+    3.21328
+   ]
+  },
+  "A2_live_evalmode_seq128_head100k": {
+   "bpc": 3.21328,
+   "passes": [
+    3.60097,
+    3.49581,
+    3.21328
+   ]
+  },
+  "A3_live_evalmode_seq256_head100k": {
+   "bpc": 3.21328,
+   "passes": [
+    3.60097,
+    3.49581,
+    3.21328
+   ]
+  },
+  "A4_live_evalmode_seq128_after100k": {
+   "bpc": 3.1946772550402764
+  },
+  "A5_live_evalmode_seq256_after100k": {
+   "bpc": 3.1946772550402764
+  },
+  "A1_in_loop_reference": {
+   "bpc": 3.21328,
+   "passes": [
+    3.60097,
+    3.49581,
+    3.21328
+   ],
+   "note": "in-loop at step 540 (train-mode, seq128, head-100k)"
+  },
+  "rescore_reference": {
+   "bpc": 3.77721,
+   "passes": [
+    4.22628,
+    4.11179,
+    3.77721
+   ],
+   "note": "runner re-score (eval-mode, seq256 default, FULL val)"
+  },
+  "T1_live_trainmode_seq128_train100k": {
+   "bpc": 3.28431,
+   "passes": [
+    3.73774,
+    3.63683,
+    3.28431
+   ]
+  },
+  "T2_live_evalmode_seq256_train100k": {
+   "bpc": 3.28431,
+   "passes": [
+    3.73774,
+    3.63683,
+    3.28431
+   ]
+  },
+  "B1_max_param_diff": 0.0,
+  "B2_fresh_full_val": {
+   "bpc": 3.20294,
+   "passes": [
+    3.5845,
+    3.48395,
+    3.20294
+   ]
+  },
+  "C1_max_param_diff_roundtrip": 0.0,
+  "C2_roundtrip_full_val": {
+   "bpc": 3.20294,
+   "passes": [
+    3.5845,
+    3.48395,
+    3.20294
+   ]
+  },
+  "A6_live_full_val_canonical": {
+   "bpc": 3.20294,
+   "passes": [
+    3.5845,
+    3.48395,
+    3.20294
+   ]
+  },
+  "D1_live_fastOFF_head100k": {
+   "bpc": 3.2132750901275
+  },
+  "D2_live_fastON_head100k": {
+   "bpc": 3.2132750887121113
+  },
+  "D3_rt_fastOFF_head100k": {
+   "bpc": 3.2132750901275
+  },
+  "D4_rt_fastON_head100k": {
+   "bpc": 3.2132750887121113
+  },
+  "E1_forward_max_abs_diff_live_vs_roundtrip": 0.0
+ },
+ "causality": {
+  "live": {
+   "max_abs_diff_leq_t0": 0.0,
+   "bit_identical": true
+  },
+  "reloaded": {
+   "max_abs_diff_leq_t0": 0.0,
+   "bit_identical": true
+  }
+ }
+}
