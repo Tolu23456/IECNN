@@ -4,6 +4,12 @@
 # at the tau annealed to that step, records per-pass bpc + weight entropy,
 # and commits the JSON to results/. Also exercises the vocab fingerprint
 # guard (loud failure on vocab/model mismatch).
+#
+# 2026-11-13 lesson baked in: the corpus is VERIFIED against the training
+# run's own split_info.json (sha256 of val) before any scoring. The original
+# re-scores silently used the v0 Shakespeare split (55,769-char val) because
+# the default corpus_config was a base rung config without data.corpus: big —
+# which is why E1's re-scored numbers were garbage.
 name: eval
 on:
   workflow_dispatch:
@@ -15,8 +21,8 @@ on:
         description: "Vocab file the checkpoint was trained with"
         default: "UBM/vocab_v1.json"
       corpus_config:
-        description: "Config for rebuilding data/*.txt (split must match training)"
-        default: "e1_weights_passes.yaml"
+        description: "Config for rebuilding data/*.txt — MUST be a *_pilot.yaml (corpus: big)"
+        default: "e1_weights_passes_pilot.yaml"
 
 permissions:
   contents: write
@@ -39,23 +45,6 @@ jobs:
           python -m pip install -r requirements-torch.txt
           python -m pip install -r requirements.txt
 
-      # ---- corpus: rebuild data/*.txt (same deterministic split as training) --
-      - name: Prepare corpus
-        env:
-          CONFIG: ${{ github.event.inputs.corpus_config }}
-        run: |
-          set -euo pipefail
-          if [ -f data/train.txt ] && [ -f data/val.txt ]; then echo "present"; exit 0; fi
-          python - << 'PYEOF'
-          from config import load_config
-          from data.prepare import prepare_all
-          cfg = load_config("configs/" + __import__("os").environ["CONFIG"])
-          info = prepare_all(cfg)
-          for name, d in info["parts"].items():
-              print(name, d["chars"], d["sha256"][:16])
-          PYEOF
-
-      # ---- download + extract the checkpoint artifact ------------------------
       - name: Download checkpoint artifact
         env:
           GH_TOKEN: ${{ github.token }}
@@ -70,22 +59,67 @@ jobs:
           d = json.load(open("/tmp/artifacts.json"))
           name = os.environ["ARTIFACT"]
           arts = d.get("artifacts", [])
-          print("total artifacts listed:", len(arts))
-          for a in arts[:5]:
-              print("  sample:", a["name"], "expired" if a["expired"] else "ok", a["created_at"])
           cands = [a for a in arts if a["name"] == name and not a["expired"]]
           if not cands:
               print("ARTIFACT_NOT_FOUND:" + name, file=sys.stderr)
               sys.exit(1)
           newest = max(cands, key=lambda a: (a["created_at"], a["id"]))
           open("/tmp/art_id", "w").write(str(newest["id"]))
-          print("found artifact", newest["id"], "created", newest["created_at"])
+          print("found artifact", newest["id"])
           PYEOF
           ART_ID=$(cat /tmp/art_id)
           curl -sfL -H "Authorization: Bearer $GH_TOKEN" \
             "https://api.github.com/repos/${{ github.repository }}/actions/artifacts/$ART_ID/zip" \
             -o /tmp/artifact.zip
-          unzip -qo /tmp/artifact.zip "checkpoints/*" -d .
+
+      # ---- corpus: rebuild only when missing; corpus_config MUST carry
+      # data.corpus: big (the *_pilot.yaml files do).
+      - name: Prepare corpus
+        if: ${{ !hashFiles('data/val.txt') }}
+        env:
+          CONFIG: ${{ github.event.inputs.corpus_config }}
+        run: |
+          set -euo pipefail
+          python - << 'PYEOF'
+          import os
+          from config import load_config
+          from data.prepare import prepare_all
+          cfg = load_config("configs/" + os.environ["CONFIG"])
+          info = prepare_all(cfg)
+          for name, d in info["parts"].items():
+              print(name, d["chars"], d["sha256"][:16])
+          PYEOF
+
+      # ---- corpus sanity: val is a whole held-out book AND hashes to the
+      # same split the training run used (recorded in its artifact) ----------
+      - name: Verify corpus matches the training run
+        run: |
+          set -euo pipefail
+          python - << 'PYEOF'
+          import hashlib, io, json, sys, zipfile
+          val = open("data/val.txt", encoding="utf-8").read()
+          if len(val) < 150_000:
+              sys.exit(f"CORPUS GUARD FAILED: val.txt has {len(val)} chars — "
+                       "this is the v0 Shakespeare split, not corpus v1. Pass a "
+                       "*_pilot.yaml (data.corpus: big) as corpus_config.")
+          have = hashlib.sha256(val.encode("utf-8")).hexdigest()
+          ref = None
+          with zipfile.ZipFile("/tmp/artifact.zip") as z:
+              if "data/split_info.json" in z.namelist():
+                  ref = json.loads(z.read("data/split_info.json")) \
+                        ["parts"]["val"]["sha256"]
+          if ref is None:
+              print("artifact carries no split_info.json — size guard only")
+          else:
+              print(f"val chars={len(val)} sha={have[:16]} expected={ref[:16]}")
+              if have != ref:
+                  sys.exit("CORPUS MISMATCH: data/val.txt does not hash to the "
+                           "split the training run used (artifact split_info).")
+          print("corpus verified")
+          PYEOF
+
+      - name: Extract checkpoint
+        run: unzip -qo /tmp/artifact.zip "checkpoints/*" -d .
 
       - name: Re-score best point (full val, best-step tau)
         run: |
@@ -111,5 +145,5 @@ jobs:
           git config user.email "results-bot@users.noreply.github.com"
           git pull --rebase origin main
           git add results/eval_*.json
-          git commit -m "results: checkpoint re-score [artifact ${{ github.event.inputs.artifact }}]" || echo "nothing to commit"
+          git commit -m "results: checkpoint re-score [artifact ${{ github.event.inputs.artifact }}] (corpus-verified)" || echo "nothing to commit"
           git push

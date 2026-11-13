@@ -2,6 +2,11 @@
 # disagree by ~0.56 bpc. Runs scripts/diagnose_reload.py ON THE RUNNER (all
 # compute on GitHub; inference only) on a checkpoint artifact and commits the
 # full probe table to results/diagnosis/.
+#
+# 2026-11-13 ROOT CAUSE (found mid-probe): the original re-scores rebuilt the
+# corpus with a base rung config (no data.corpus: big) and silently scored the
+# v0 Shakespeare val (55,769 chars) instead of corpus v1's Oz book. The corpus
+# below is verified against the training run's own split_info.json.
 name: diagnose
 on:
   workflow_dispatch:
@@ -12,7 +17,8 @@ on:
       vocab:
         default: "UBM/vocab_v1.json"
       corpus_config:
-        default: "e1_weights_passes.yaml"
+        description: "MUST be a *_pilot.yaml (data.corpus: big)"
+        default: "e1_weights_passes_pilot.yaml"
 
 permissions:
   contents: write
@@ -36,22 +42,6 @@ jobs:
           python -m pip install -r requirements-torch.txt
           python -m pip install -r requirements.txt
 
-      - name: Prepare corpus
-        env:
-          CONFIG: ${{ github.event.inputs.corpus_config }}
-        run: |
-          set -euo pipefail
-          if [ -f data/train.txt ] && [ -f data/val.txt ]; then echo "present"; exit 0; fi
-          python - << 'PYEOF'
-          import os
-          from config import load_config
-          from data.prepare import prepare_all
-          cfg = load_config("configs/" + os.environ["CONFIG"])
-          info = prepare_all(cfg)
-          for name, d in info["parts"].items():
-              print(name, d["chars"], d["sha256"][:16])
-          PYEOF
-
       - name: Download checkpoint artifact
         env:
           GH_TOKEN: ${{ github.token }}
@@ -65,7 +55,8 @@ jobs:
           import json, os, sys
           d = json.load(open("/tmp/artifacts.json"))
           name = os.environ["ARTIFACT"]
-          cands = [a for a in d.get("artifacts", []) if a["name"] == name and not a["expired"]]
+          arts = d.get("artifacts", [])
+          cands = [a for a in arts if a["name"] == name and not a["expired"]]
           if not cands:
               print("ARTIFACT_NOT_FOUND:" + name, file=sys.stderr)
               sys.exit(1)
@@ -77,7 +68,47 @@ jobs:
           curl -sfL -H "Authorization: Bearer $GH_TOKEN" \
             "https://api.github.com/repos/${{ github.repository }}/actions/artifacts/$ART_ID/zip" \
             -o /tmp/artifact.zip
-          unzip -qo /tmp/artifact.zip "checkpoints/*" -d .
+
+      - name: Prepare corpus
+        if: ${{ !hashFiles('data/val.txt') }}
+        env:
+          CONFIG: ${{ github.event.inputs.corpus_config }}
+        run: |
+          set -euo pipefail
+          python - << 'PYEOF'
+          import os
+          from config import load_config
+          from data.prepare import prepare_all
+          cfg = load_config("configs/" + os.environ["CONFIG"])
+          info = prepare_all(cfg)
+          for name, d in info["parts"].items():
+              print(name, d["chars"], d["sha256"][:16])
+          PYEOF
+
+      - name: Verify corpus matches the training run
+        run: |
+          set -euo pipefail
+          python - << 'PYEOF'
+          import hashlib, json, sys, zipfile
+          val = open("data/val.txt", encoding="utf-8").read()
+          if len(val) < 150_000:
+              sys.exit(f"CORPUS GUARD FAILED: val.txt has {len(val)} chars — "
+                       "this is the v0 Shakespeare split, not corpus v1. Pass a "
+                       "*_pilot.yaml (data.corpus: big) as corpus_config.")
+          have = hashlib.sha256(val.encode("utf-8")).hexdigest()
+          with zipfile.ZipFile("/tmp/artifact.zip") as z:
+            names = z.namelist()
+            ref = json.loads(z.read("data/split_info.json")) \
+                  ["parts"]["val"]["sha256"] if "data/split_info.json" in names else None
+          if ref is not None:
+              print(f"val chars={len(val)} sha={have[:16]} expected={ref[:16]}")
+              if have != ref:
+                  sys.exit("CORPUS MISMATCH vs the training run's split_info.")
+          print("corpus verified")
+          PYEOF
+
+      - name: Extract checkpoint
+        run: unzip -qo /tmp/artifact.zip "checkpoints/*" -d .
 
       - name: Run reload diagnosis
         run: |
@@ -94,5 +125,5 @@ jobs:
           git config user.email "results-bot@users.noreply.github.com"
           git pull --rebase origin main
           git add results/diagnosis/
-          git commit -m "results: reload diagnosis [artifact ${{ github.event.inputs.artifact }}]" || echo "nothing to commit"
+          git commit -m "results: reload diagnosis [artifact ${{ github.event.inputs.artifact }}] (corpus-verified)" || echo "nothing to commit"
           git push

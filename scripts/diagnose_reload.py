@@ -86,6 +86,16 @@ def main() -> None:
     seq_train = int(config.get("data", {}).get("seq_len", 256))
     eval_chars = int(config.get("training", {}).get("eval_chars", 100_000))
 
+    # Corpus v1 guard (2026-11-13): the original re-scores silently used the
+    # v0 Shakespeare val (55,769 chars) because the workflow's corpus_config
+    # was a base rung config without data.corpus: big. Refuse to diagnose on
+    # a corpus that cannot be corpus v1.
+    if len(val_text) < 150_000:
+        raise RuntimeError(
+            f"CORPUS GUARD: val.txt has only {len(val_text)} chars — this is "
+            "the v0 Shakespeare split, not corpus v1 (val = a whole held-out "
+            "book, >200k chars). Re-run with a *_pilot.yaml corpus_config.")
+
     # trained weights = best_state (what the re-score used)
     ck = torch.load(d / "checkpoint.pt", weights_only=False)
     state = ck.get("best_state") or ck["model"]

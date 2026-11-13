@@ -4,6 +4,8 @@
 # embeddings projection, per-dot weights/gamma/predictions, pooled answers,
 # and learned score-pathway scalars. The viz server serves it at
 # #/checkpoints — no torch is ever needed (or installed) on the dev box.
+#
+# Corpus verified against the training run's split_info (2026-11-13 lesson).
 name: viz
 on:
   workflow_dispatch:
@@ -14,8 +16,8 @@ on:
       vocab:
         default: "UBM/vocab_v1.json"
       corpus_config:
-        description: "Config for rebuilding data/*.txt (split must match training)"
-        default: "e1_weights_passes.yaml"
+        description: "MUST be a *_pilot.yaml (data.corpus: big)"
+        default: "e1_weights_passes_pilot.yaml"
 
 permissions:
   contents: write
@@ -37,22 +39,6 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements-torch.txt
           python -m pip install -r requirements.txt
-
-      - name: Prepare corpus
-        env:
-          CONFIG: ${{ github.event.inputs.corpus_config }}
-        run: |
-          set -euo pipefail
-          if [ -f data/train.txt ] && [ -f data/val.txt ]; then echo "present"; exit 0; fi
-          python - << 'PYEOF'
-          import os
-          from config import load_config
-          from data.prepare import prepare_all
-          cfg = load_config("configs/" + os.environ["CONFIG"])
-          info = prepare_all(cfg)
-          for name, d in info["parts"].items():
-              print(name, d["chars"], d["sha256"][:16])
-          PYEOF
 
       - name: Download checkpoint artifact
         env:
@@ -80,7 +66,47 @@ jobs:
           curl -sfL -H "Authorization: Bearer $GH_TOKEN" \
             "https://api.github.com/repos/${{ github.repository }}/actions/artifacts/$ART_ID/zip" \
             -o /tmp/artifact.zip
-          unzip -qo /tmp/artifact.zip "checkpoints/*" -d .
+
+      - name: Prepare corpus
+        if: ${{ !hashFiles('data/val.txt') }}
+        env:
+          CONFIG: ${{ github.event.inputs.corpus_config }}
+        run: |
+          set -euo pipefail
+          python - << 'PYEOF'
+          import os
+          from config import load_config
+          from data.prepare import prepare_all
+          cfg = load_config("configs/" + os.environ["CONFIG"])
+          info = prepare_all(cfg)
+          for name, d in info["parts"].items():
+              print(name, d["chars"], d["sha256"][:16])
+          PYEOF
+
+      - name: Verify corpus matches the training run
+        run: |
+          set -euo pipefail
+          python - << 'PYEOF'
+          import hashlib, json, sys, zipfile
+          val = open("data/val.txt", encoding="utf-8").read()
+          if len(val) < 150_000:
+              sys.exit(f"CORPUS GUARD FAILED: val.txt has {len(val)} chars — "
+                       "this is the v0 Shakespeare split, not corpus v1. Pass a "
+                       "*_pilot.yaml (data.corpus: big) as corpus_config.")
+          have = hashlib.sha256(val.encode("utf-8")).hexdigest()
+          with zipfile.ZipFile("/tmp/artifact.zip") as z:
+              names = z.namelist()
+              ref = json.loads(z.read("data/split_info.json")) \
+                    ["parts"]["val"]["sha256"] if "data/split_info.json" in names else None
+          if ref is not None:
+              print(f"val chars={len(val)} sha={have[:16]} expected={ref[:16]}")
+              if have != ref:
+                  sys.exit("CORPUS MISMATCH vs the training run's split_info.")
+          print("corpus verified")
+          PYEOF
+
+      - name: Extract checkpoint
+        run: unzip -qo /tmp/artifact.zip "checkpoints/*" -d .
 
       - name: Export weights/dots JSON
         run: |
