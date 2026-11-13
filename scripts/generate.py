@@ -29,10 +29,14 @@ from train.train import build_model                    # noqa: E402
 
 
 def _next_log_probs(model, out: dict, kind: str) -> torch.Tensor:
-    """Last-position next-token log-probs for either model family."""
-    if kind == "iecnn":
-        return out["log_b"][0, -1]                     # region consensus
-    return out["final_log_probs"][0, -1]               # GRU / transformer
+    """Last-position next-token log-probs for either model family.
+
+    Both return dicts expose `final_log_probs` [B, T, V] at the top level
+    (for the IECNN that is the pooled region consensus; `log_b` lives only
+    inside each region_outputs[r] — a KeyError otherwise, found by the
+    first e2e generation runs).
+    """
+    return out["final_log_probs"][0, -1]
 
 
 def main() -> None:
