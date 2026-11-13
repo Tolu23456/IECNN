@@ -1,0 +1,6 @@
+# CPU-only torch: the "+cpu" local version tag is ONLY published on PyTorch's
+# wheel index, so this file pins the index. The vocab.yml workflow needs no
+# torch at all; train/tests workflows and any local development install it.
+--index-url https://download.pytorch.org/whl/cpu
+--extra-index-url https://pypi.org/simple
+torch==2.15.0+cpu

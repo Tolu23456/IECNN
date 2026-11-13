@@ -1,0 +1,26 @@
+# Warm-start anchor (Tolu, 2026-11-13, item 6): train E0 to a REAL plateau —
+# the patience rule decides the stop, NO wall cap (wall_hours 0.0). The
+# resulting checkpoint is the warm-start point for the next wave.
+#
+# One identical LR schedule for all rungs (Tolu item 3): linear warmup 500
+# steps then CONSTANT 1e-3. Chained chunks (320 min each) continue until the
+# patience rule fires, so this run may take many hours of runner time.
+base: e0_plain_ensemble.yaml
+name: e0_plain_ensemble_warmstart
+data:
+  corpus: big
+ubm:
+  vocab_file: UBM/vocab_v1.json
+consensus:
+  tau_warmup: 480
+training:
+  lr_schedule: constant
+  warmup_steps: 500
+  steps: 50000                 # ceiling only; patience governs the stop
+  eval_chars: 100000
+  eval_every: 240
+  checkpoint_every: 240
+  early_stop:
+    patience_evals: 6
+    min_improvement: 0.005
+    wall_hours: 0.0            # NO wall cap: train to a true plateau

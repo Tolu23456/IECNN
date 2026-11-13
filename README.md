@@ -139,9 +139,17 @@ Requires Python 3.10 or newer. A GPU is helpful but not required; `configs/tiny.
 ```bash
 python -m venv .venv
 source .venv/bin/activate          # on Windows: .venv\Scripts\activate
+pip install -r requirements-torch.txt   # torch: the +cpu build lives on PyTorch's own index only
 pip install -r requirements.txt
 pytest                             # works today: config, utils, data split, UBM tokenizer suite
 ```
+
+`requirements.txt` deliberately does NOT pin torch: `torch==X+cpu` is only
+resolvable from `https://download.pytorch.org/whl/cpu`, so a plain
+`pip install -r requirements.txt` would fail on a fresh clone. The two-file
+split is also exactly what the GitHub Actions workflows install. Real
+training runs on GitHub Actions (never on a dev box); the `vocab.yml`
+workflow needs no torch at all.
 
 Training commands (**planned**; they work once the training phases are built):
 

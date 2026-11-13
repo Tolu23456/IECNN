@@ -13,6 +13,15 @@ def lr_at(step: int, total_steps: int, warmup: int, peak_lr: float) -> float:
     return peak_lr * 0.5 * (1.0 + math.cos(math.pi * min(1.0, progress)))
 
 
+def lr_at_constant(step: int, total_steps: int, warmup: int, peak_lr: float) -> float:
+    """Linear warmup then CONSTANT peak (Tolu, 2026-11-13: one identical LR
+    schedule for every rung so per-step comparisons are clean; with early
+    stopping the cosine's anneal-to-zero tail never runs anyway)."""
+    if step < warmup:
+        return peak_lr * (step + 1) / max(1, warmup)
+    return peak_lr
+
+
 def temperature_at(step: int, total_steps: int, warmup: int,
                    tau_max: float, tau_min: float) -> float:
     """Cosine anneal of tau_0 from tau_max to tau_min (spec 04, section 6)."""

@@ -209,3 +209,12 @@ class UBM:
             if b.parts is not None:
                 ubm._pair_to_merged[b.parts] = b.id
         return ubm
+
+
+def fingerprint(path) -> str:
+    """sha256 of a vocabulary FILE's bytes (Tolu, 2026-11-13: stored in every
+    checkpoint/summary so a vocab/model mismatch fails loudly instead of
+    silently evaluating garbage ids)."""
+    import hashlib
+    with open(path, "rb") as f:
+        return hashlib.sha256(f.read()).hexdigest()
