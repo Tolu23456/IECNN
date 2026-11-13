@@ -2,6 +2,31 @@
 
 Newest entry at the top.
 
+## 2026-11-13 (later) — IECNN Explorer: viz server for everything
+
+- **`server/server.py` + `server/static/`**: a zero-dependency (stdlib-only,
+  no torch) read-only dashboard, `python3 server/server.py` →
+  http://127.0.0.1:8765. Pages: Dashboard (ladder + runs + re-score reports),
+  How-it-works (11 clickable stages with shapes/formulas, numbers pulled live
+  from `configs/e1_weights_passes.yaml` so they can't drift), Training runs
+  (overlay val/train bpc, per-pass, tau + weight entropy, per-component grad
+  norms, matched-step table computed from CSVs), Weights & dots (checkpoint
+  inspector), Vocab explorer, Corpus & evals. Chart.js vendored locally
+  (MIT, offline-safe). Malformed trailing CSV rows (the old 5-column bug) are
+  filtered server-side so old runs plot honestly.
+- **`scripts/export_viz.py` + `viz.yml`**: the inspector's data source.
+  Real weights/dots live only in torch checkpoints (CI artifacts), so the
+  export runs ON THE RUNNER: download artifact → vocab fingerprint check →
+  one sample forward → commit `results/viz/<run>.json` with a 2-D embedding
+  projection (SVD), per-position × per-pass × per-dot weights, gamma, top-5
+  predictions per dot, pooled answers, weight entropy, learned
+  alpha/beta scalars. No torch on the dev box, ever.
+- **`tests/test_server.py`**: server endpoints, CSV parsing (incl. the
+  malformed-row filter and a clean 404), and static files — stdlib-only,
+  runs in CI.
+- Nothing dispatched yet: viz.yml exports await Tolu picking a checkpoint
+  artifact (the E1 pilots are the interesting ones).
+
 ## 2026-11-13 — Tolu's six items implemented; trainer defects found by pilots fixed; CI green
 
 - **Item 1 — fresh-clone pip fix**: `requirements.txt` no longer pins torch

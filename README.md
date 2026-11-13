@@ -110,6 +110,30 @@ Rules: a rung that fails after a fixed tuning budget is **cut**. If E1 fails, th
 | Confidence calibration | Does a dot's confidence mean anything? |
 | Message influence | Do receivers actually use messages? |
 
+## Visualizing everything (the explorer server)
+
+```bash
+python3 server/server.py            # http://127.0.0.1:8765  (stdlib only, no pip installs)
+```
+
+A read-only dashboard over the repository's results:
+
+- **Dashboard** — ladder chart, all runs, checkpoint re-score reports.
+- **How it works** — interactive, click-through explainer of all 11 stages
+  (tokens → embedding → regions/dots → consensus weights → passes → messages
+  → chain → gates → loss → training loop), with tensor shapes and the exact
+  config numbers from `configs/e1_weights_passes.yaml`.
+- **Training runs** — overlay any runs' val/train bpc, per-pass curves, tau +
+  weight entropy, per-component gradient norms, plus a matched-step E0-vs-E1
+  table computed live from the CSVs.
+- **Weights & dots** — checkpoint inspector fed by runner-side exports:
+  dispatch `viz.yml` with a checkpoint artifact and it commits
+  `results/viz/<run>.json` (embedding 2-D map, per-pass/per-dot weights,
+  gamma, each dot's top predictions, pooled answers, weight entropy). Torch
+  runs ONLY on GitHub Actions; the server itself needs no torch.
+- **Vocab (UBM)** — compression report, merge list, searchable base table.
+- **Corpus & evals** — split info (whole-book holdout) and eval reports.
+
 ## Repository layout
 
 ```
@@ -122,6 +146,7 @@ IECNN/  (the repository root)
   RUNBOOK.md         exact commands to set up, run, resume
   spec/              full specification (IECNN_FULL_SPEC.md; git-ignored for now)
   configs/           base.yaml, tiny.yaml, one file per experiment rung
+  server/            zero-dependency viz server + static dashboard (server/server.py)
   UBM/               tokenizer, merge training, promotion, fertility
   data/              corpus preparation, packing, dataloaders
   models/            baselines, dot, memory, region, consensus, messages, iecnn
