@@ -30,14 +30,25 @@ def test_e1_zero_init_output_equals_e0_at_step0():
     e1 = _build(use_weights=True)
     e0.eval(); e1.eval()
 
-    # make the dots identical: copy every shared parameter from the E0 build,
-    # and ZERO every E1-only parameter (the learned-weight score pathway).
+    # zero the ENTIRE score pathway in both builds (dot confidence/trust
+    # heads + region alpha/beta scalars): scores = alpha*(-JS) + beta*gamma
+    # + trust == 0 identically, so softmax gives exactly uniform weights.
+    # The remaining (shared) params are copied from the E0 build so the dots
+    # are bit-identical on both sides.
+    def _is_score_path(name: str) -> bool:
+        return (any(k in name for k in ("c_w", "c_b", "g_w", "g_b"))
+                or name.endswith(".alpha") or name.endswith(".beta")
+                or name == "alpha_region")
+
     e0_state = e0.state_dict()
     for name, p in e1.named_parameters():
-        if name in e0_state:
-            p.data.copy_(e0_state[name].data)
+        if _is_score_path(name) or name not in e0_state:
+            p.data.zero_()
         else:
-            p.data.zero_()          # score pathway -> trust == 0 -> uniform w
+            p.data.copy_(e0_state[name].data)
+    for name, p in e0.named_parameters():
+        if _is_score_path(name):
+            p.data.zero_()
 
     x = torch.randint(0, 512, (2, 40))
     with torch.no_grad():
@@ -48,7 +59,7 @@ def test_e1_zero_init_output_equals_e0_at_step0():
     pp = out1["per_pass_last_region"][0]
     n = e1.regions[0].n_dots
     assert torch.allclose(pp["weights"],
-                          torch.full_like(pp["weights"], 1.0 / n), atol=1e-6)
+                          torch.full_like(pp["weights"], 1.0 / n), atol=1e-7)
     # and the outputs match E0's plain-ensemble output exactly
     diff = (out1["final_log_probs"] - out0["final_log_probs"]).abs().max().item()
     assert diff < 1e-5, f"E1(zero-init) vs E0 mismatch: {diff}"
