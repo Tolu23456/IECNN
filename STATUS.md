@@ -2,6 +2,36 @@
 
 Newest entry at the top.
 
+## 2026-11-14 (early morning) — Playground: send prompts, get model output
+
+- **Tolu asked for "a space for sending prompts and receiving outputs from
+  the model."** Shipped as the Explorer's **Playground page** (subagent,
+  commit 3d794c6) + runner-side backend (agent, commits 771fcf1/e33e2ea):
+  `scripts/generate.py` + `.github/workflows/generate.yml` — downloads a
+  checkpoint artifact, verifies the corpus (same guard as eval/viz), encodes
+  the prompt with the run's own UBM vocabulary (NFC + merges by birth order),
+  samples a continuation from `final_log_probs` (temperature 0.8, top-k 40,
+  seed 0; all configurable), commits `results/generation/gen-<ts>.json`.
+- Server endpoints: `POST /api/generate` (dispatch; ambient credential from
+  git config, token only ever in the Authorization header — never logged/
+  stored/returned), `GET /api/generate/runs`, `GET /api/generate/result`
+  (run's head_sha commit → the generation file; honest pending/failed
+  states), `GET /api/generations` (local history). Tests 29/29; GitHub layer
+  mocked so no test can dispatch a real run; CI green.
+- **Bugs hunted and fixed (Tolu's rule):** workflow YAML broke on an inline
+  `python -c` (heredoc now); hardcoded checkpoint dir would have generated
+  from the wrong run (now derived from the artifact's contents); generate.py
+  used `out["log_b"]` which only exists inside `region_outputs[r]` — top-level
+  forward returns `final_log_probs` — KeyError killed the first two e2e runs
+  (caught by the subagent's endpoint verification, fixed, re-run green).
+- **E2E verified twice** (runs 43526108853, 43526557467): real 120-token
+  generations committed. Quality is gibberish at E1@step-540 (undertrained,
+  3.20 bpc) — expected; the page says so. Re-run the Playground against the
+  plateau checkpoints when they land. Noted: two different prompts with the
+  same seed produced near-identical text — consistent with an undertrained
+  model dominated by unigram frequencies; re-check with the plateau
+  checkpoint.
+
 ## 2026-11-13 (late evening) — E2 memory lesson, vocab pilots, consensus audit
 
 - **E2 pilot killed 3× by runner RAM (~7 GB usable, not the nominal 16 GB).**
