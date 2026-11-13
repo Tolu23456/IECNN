@@ -365,3 +365,98 @@ def test_static_assets_are_offline_safe():
     for tag in ('<link rel="stylesheet" href="/style.css">',
                 '<script src="/chart.umd.js">', '<script src="/app.js">'):
         assert tag in html, tag
+
+
+# ------------------------------------------------------ consensus audit ----
+def _pos(next_tok, pooled, dots):
+    """Shorthand for a sample-forward position as the viz export stores it."""
+    return {"token": "t", "next": next_tok, "next_id": 7,
+            "pooled_top": pooled,
+            "dots": [{"weights": d["w"], "gamma": d.get("g", [0] * 3),
+                      "top": d["top"]} for d in dots]}
+
+
+def test_consensus_audit_flags_outvoted_top1():
+    """A dot's TOP-1 is correct, pooled consensus picks something else."""
+    P = _pos(
+        "z",                                # true next token
+        [["x", .6], ["y", .2], ["q", .1]],  # pooled answer misses
+        [{"w": [5.9e-7, 0.0, 0.0],          # dot 0: muted, but top-1 == z
+          "top": [[["z", .9], ["x", .05]], [["x", .5]], [["x", .5]]]},
+         {"w": [0.9, 0.8, 0.7],             # sharp wrong dot wins the pool
+          "top": [[["x", .9], ["y", .05]], [["x", .9]], [["x", .9]]]}])
+    a = server_mod.consensus_audit([P])
+    assert a["sampled"] == 1
+    assert a["pooled_top1"] == 0 and a["pooled_top1_acc"] == 0.0
+    assert a["oracle_top1"] == 1 and a["oracle_top1_acc"] == 1.0
+    assert a["oracle_top5"] == 1
+    assert a["outvoted_top1"] == 1 and a["outvoted_top5"] == 0
+    assert a["outvoted"] == 1
+    assert a["per_position"] == [{"i": 0, "level": "top1",
+        "held": [{"dot": 0, "pass": 0, "weight": 5.9e-7, "level": "top1"}]}]
+
+
+def test_consensus_audit_levels_and_pooled_hits():
+    """Level top5 vs top1; pooled hits are never outvoted; multi-holder."""
+    # top-5 only: target present at slot 3 of dot 1, pass 2
+    P5 = _pos("z", [["x", .6]],
+              [{"w": [0.5, 0.5, 0.5], "top": [[["x", .9]]] * 3},
+               {"w": [0.1, 0.1, 0.2], "top": [[["x", .9]]] * 2 +
+                 [[["x", .9], ["y", .1], ["w", .1], ["z", .05]]]}])
+    a = server_mod.consensus_audit([P5])
+    assert a["outvoted_top5"] == 1 and a["outvoted_top1"] == 0
+    assert a["oracle_top1"] == 0 and a["oracle_top5"] == 1
+    assert a["per_position"][0]["level"] == "top5"
+    assert a["per_position"][0]["held"] == [
+        {"dot": 1, "pass": 2, "weight": 0.2, "level": "top5"}]
+    # pooled hit: even when dots hold the target, nothing is outvoted
+    Ph = _pos("z", [["z", .6]], [{"w": [1.0], "top": [[["z", .9]]]}])
+    a = server_mod.consensus_audit([Ph])
+    assert a["pooled_top1"] == 1 and a["outvoted"] == 0
+    assert a["per_position"] == [] and a["oracle_top1"] == 1
+    # missing pooled/dots/next are skipped, garbage input tolerated
+    a = server_mod.consensus_audit(
+        [{"next": "z"}, {"pooled_top": [["z", 1]]}, "junk", None, {}])
+    assert a["sampled"] == 0 and a["per_position"] == []
+    assert server_mod.consensus_audit([])["sampled"] == 0
+    assert server_mod.consensus_audit(None)["sampled"] == 0
+
+
+def test_viz_endpoint_carries_consensus_audit():
+    """The live endpoint computes the audit from the committed export."""
+    srv, base = _start()
+    try:
+        st, body = _get(base + "/api/viz/e1_weights_passes_pilot_seed0")
+        assert st == 200
+        d = json.loads(body)
+        a = d.get("audit")
+        assert isinstance(a, dict), "audit missing from /api/viz payload"
+        # independently recompute from the same positions (truth, not trust)
+        pos = d["sample"]["positions"]
+        pooled = or1 = 0
+        scored = sum(1 for P in pos if P.get("next") is not None
+                     and P.get("pooled_top"))
+        for P in pos:
+            tgt = P.get("next")
+            if tgt is None or not P.get("pooled_top"):
+                continue
+            pooled += P["pooled_top"][0][0] == tgt
+            or1 += any(d["top"][pi][0][0] == tgt
+                       for d in P["dots"] for pi in range(len(d["top"])))
+        assert a["sampled"] == scored
+        assert a["pooled_top1"] == pooled
+        assert a["oracle_top1"] == or1
+        # per_position holds exactly the outvoted positions, with valid dots
+        held_idx = [e["i"] for e in a["per_position"]]
+        assert held_idx == sorted(held_idx)
+        assert len(held_idx) == a["outvoted"]
+        for e in a["per_position"]:
+            P = pos[e["i"]]
+            assert P["pooled_top"][0][0] != P["next"]        # pooled missed
+            assert all(h["dot"] < len(P["dots"]) for h in e["held"])
+        # the headline facts for this export (committed artifact, 256-token
+        # sample: the pooled consensus is much worse than the best dot)
+        assert a["sampled"] == 255
+        assert a["outvoted_top1"] == 30 and a["outvoted_top5"] == 50
+    finally:
+        srv.shutdown()

@@ -239,3 +239,11 @@ input:focus-visible, select:focus-visible, button:focus-visible {
 .loading { color: var(--muted); padding: 60px; text-align: center; letter-spacing: 2px; }
 details.rawjson summary { cursor: pointer; color: var(--muted); font-size: 12px; margin: 8px 0; }
 details.rawjson summary:hover { color: var(--text); }
+
+/* consensus audit (weights & dots page) */
+.pill.warn { color: var(--accent2); border-color: var(--accent2); }
+.outvoted { display: flex; align-items: center; gap: 10px; margin: 6px 0 2px; flex-wrap: wrap; }
+.explain.audit { border-left-color: var(--accent2); }
+button.chip { font-family: inherit; color: var(--text); }
+button.chip:hover { border-color: var(--accent2); }
+.heat .cell.heldc { box-shadow: 0 0 0 2px var(--accent2); border-radius: 4px; }

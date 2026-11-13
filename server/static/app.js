@@ -859,6 +859,54 @@ async function renderViz(root, v) {
       h("span", { class: "pill " + (hits / Math.max(1, scored) >= .5 ? "ok" : "") },
         `pooled top-1 correct on ${hits}/${scored} positions (${fmt(100 * hits / Math.max(1, scored), 1)}%)`)));
 
+  // ---- consensus audit: when a dot held the right answer but the pooled
+  // consensus overruled it. Stats computed server-side from this exact
+  // payload (v.audit); the panel is skipped entirely if absent.
+  const A = v.audit;
+  const heldMap = new Map();
+  if (A && Array.isArray(A.per_position))
+    for (const e of A.per_position) if (e && Number.isInteger(e.i)) heldMap.set(e.i, e);
+  if (A && A.sampled > 0) {
+    const panel = h("div", { class: "explain audit" },
+      h("b", {}, `Consensus audit — ${A.sampled}-position sample. `),
+      "Sometimes a dot holds the right answer but doesn't get chosen: ",
+      "a correct dot was outvoted here — the learned weights muted it (see its weight row) or a sharper wrong dot won. ",
+      "Definitions: oracle best-dot = at least one dot predicted the target (any pass); ",
+      "outvoted = a dot held it (", h("b", {}, "top-1", ), " stronger, or in its ",
+      h("b", {}, "top-5"), ") while the pooled answer missed.");
+    panel.append(h("div", { class: "cards" },
+      card(`${A.pooled_top1}/${A.sampled} · ${fmt(100 * A.pooled_top1_acc, 1)}%`,
+        "pooled top-1 accuracy"),
+      card(`${A.oracle_top1}/${A.sampled} · ${fmt(100 * A.oracle_top1_acc, 1)}%`,
+        "oracle best-dot top-1"),
+      card(`${A.oracle_top5}/${A.sampled} · ${fmt(100 * A.oracle_top5_acc, 1)}%`,
+        "oracle best-dot top-5"),
+      card(`${A.outvoted ?? (A.outvoted_top1 + A.outvoted_top5)}`,
+        "outvoted positions",
+        (A.outvoted || (A.outvoted_top1 + A.outvoted_top5)) ? "warn" : "")));
+    if (A.outvoted) {
+      const chips = h("div", { class: "chips" });
+      for (const e of A.per_position) {
+        const w = e.held?.[0]?.weight;
+        const btn = h("button", { class: "chip", title:
+            `dot ${e.held?.map(x => x.dot).join(", ")} held the target ` +
+            `${e.level === "top1" ? "as top-1" : "in top-5"}${w != null ? ` at w=${fmt(w, 4)}` : ""} — pooled answer missed` },
+          `pos ${e.i} · ${e.level === "top1" ? "held top-1" : "held top-5"}`);
+        // bar is declared below; safe because this only runs on click
+        btn.addEventListener("click", () => {
+          bar.value = String(e.i);
+          bar.dispatchEvent(new Event("input"));
+          window.scrollTo({ top: bar.getBoundingClientRect().top + window.scrollY - 80, behavior: "smooth" });
+        });
+        chips.append(btn);
+      }
+      panel.append(h("div", { class: "muted", style: "margin:4px 0 2px" },
+        `outvoted positions (click to inspect): ${A.outvoted_top1} held top-1, ${A.outvoted_top5} held top-5 only`), chips);
+    }
+    // inserted below the intro so it reads as the section summary
+    root.append(panel);
+  }
+
   const bar = h("input", { type: "range", class: "posbar", min: "0",
     max: String(nPos - 1), value: "0", "aria-label": "token position" });
   const posLabel = h("div", { class: "muted" });
@@ -870,6 +918,21 @@ async function renderViz(root, v) {
     if (!P) return;
     posLabel.textContent = `position ${i} / ${nPos - 1} · token “${tokDisp(P.token)}” → target next “${tokDisp(P.next)}” (id ${P.next_id ?? "?"}${P.next_id !== undefined && P.next_id < 256 ? ` = byte ${byteDisp(P.next_id)}` : ""})`;
     zone.innerHTML = "";
+    // outvoted badge: a dot here held the true next token but the pooled
+    // consensus picked something else
+    const he = heldMap.get(i);
+    if (he) {
+      const first = (he.held || [])[0] || {};
+      zone.append(h("div", { class: "outvoted" },
+        h("span", { class: "pill warn" },
+          `⚠ outvoted · dot ${he.held?.map(x => x.dot).join(", ")} held ` +
+          (he.level === "top1" ? "top-1" : "top-5") +
+          (first.weight != null ? ` at w=${fmt(first.weight, 4)}` : "")),
+        h("span", { class: "muted" },
+          he.level === "top1"
+            ? " — the correct dot was muted by the learned weights (see its near-zero weight below) or beaten by a sharper wrong dot"
+            : " — a dot had the answer in its top-5 but the pooled consensus missed")));
+    }
     // token context strip — one token per chunk, · separators make the
     // chunking visible; byte-fallback tokens render as hex escapes
     const toks = Array.isArray(S.tokens) ? S.tokens : null;
@@ -896,18 +959,22 @@ async function renderViz(root, v) {
     tbl.append(head);
     const rowMax = passes.map((_, pi) =>
       Math.max(1e-9, ...dots.map(d => d.weights?.[pi] ?? 0)));
+    // cells belonging to the outvoted holder dot(s) get an amber outline
+    const heldCells = new Set((he?.held || []).map(x => `${x.dot}:${x.pass}`));
     passes.forEach((pname, pi) => {
       const tr = h("tr", {}, h("td", { class: "rowh" }, esc(pname)));
       dots.forEach((d, k) => {
         const w = d.weights?.[pi] ?? 0, g = d.gamma?.[pi] ?? 0;
-        tr.append(h("td", {}, h("div", { class: "cell",
+        const held = heldCells.has(`${k}:${pi}`);
+        tr.append(h("td", {}, h("div", { class: "cell" + (held ? " heldc" : ""),
           style: `background:${HEAT(w / rowMax[pi])}`,
-          title: `w=${fmt(w, 4)} γ=${fmt(g, 3)} (row-normalised ${fmt(w / rowMax[pi], 2)})`
+          title: `w=${fmt(w, 4)} γ=${fmt(g, 3)} (row-normalised ${fmt(w / rowMax[pi], 2)})` +
+            (held ? " ← this dot held the correct next token" : "")
         }, fmt(w, 2))));
       });
       tbl.append(tr);
     });
-    zone.append(h("h3", {}, "dot weights per pass (brighter = more weight; hover for γ)"), tbl);
+    zone.append(h("h3", {}, "dot weights per pass (brighter = more weight; hover for γ; amber outline = held the correct answer)"), tbl);
 
     // pooled answer
     const pool = P.pooled_top || [];

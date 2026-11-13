@@ -406,6 +406,77 @@ def api_viz_list():
     return {"exports": sorted(p.stem for p in VIZ.glob("*.json"))}
 
 
+def consensus_audit(positions):
+    """Pure audit of the pooled-vs-dots consensus over a viz export's sample.
+
+    For every scored position (target `next` known, pooled answer present):
+      - pooled_top1_hit: pooled_top[0] == next
+      - oracle_top1_hit: some dot's top prediction (any pass) == next
+      - oracle_top5_hit: some dot's top-5 (any pass) contains next
+      - outvoted: a dot held the answer but the pooled consensus picked
+        something else. level "top1" = a dot's TOP-1 was correct (stronger
+        signal), "top5" = the answer was merely in a dot's top-5.
+
+    Returns a summary plus a small per_position payload (outvoted positions
+    only) recording which dot(s) held the answer, at which pass, with what
+    weight — enough for the UI to highlight the muted dot's weight row.
+    Defensive against missing fields: anything absent just means the
+    position is not scored. All lists may be any length (the next export
+    has 256 positions and possibly more dots/passes).
+    """
+    n = pooled = or1 = or5 = out1 = out5 = 0
+    per_position = []
+    for i, P in enumerate(positions if isinstance(positions, list) else []):
+        if not isinstance(P, dict):
+            continue
+        tgt = P.get("next")
+        pool = P.get("pooled_top") if isinstance(P.get("pooled_top"), list) else []
+        if tgt is None or not pool:
+            continue
+        n += 1
+        pooled_hit = bool(pool) and pool[0] and pool[0][0] == tgt
+        pooled += pooled_hit
+        held1 = held5 = None          # first (dot, pass, weight) sighting
+        holders = []
+        dots = P.get("dots") if isinstance(P.get("dots"), list) else []
+        for k, d in enumerate(dots):
+            if not isinstance(d, dict):
+                continue
+            tops = d.get("top") if isinstance(d.get("top"), list) else []
+            w = d.get("weights") if isinstance(d.get("weights"), list) else []
+            for pi, top in enumerate(tops):
+                toks = [t[0] for t in top] if isinstance(top, list) else []
+                if toks and toks[0] == tgt and held1 is None:
+                    held1 = {"dot": k, "pass": pi, "weight": w[pi] if pi < len(w) else None}
+                if tgt in toks and held5 is None:
+                    held5 = {"dot": k, "pass": pi, "weight": w[pi] if pi < len(w) else None}
+            if held1 and held1["dot"] == k and not any(x["dot"] == k for x in holders):
+                holders.append({**held1, "level": "top1"})
+            elif held5 and held5["dot"] == k and not any(x["dot"] == k for x in holders):
+                holders.append({**held5, "level": "top5"})
+        if held1:
+            or1 += 1
+        if held5 or held1:
+            or5 += 1
+        if not pooled_hit and (held1 or held5):
+            level = "top1" if held1 else "top5"
+            if level == "top1":
+                out1 += 1
+            else:
+                out5 += 1
+            per_position.append({"i": i, "level": level,
+                                 "held": holders or [held1 or held5]})
+    def _acc(k):
+        return round(k / n, 4) if n else None
+    return {"sampled": n,
+            "pooled_top1": pooled, "pooled_top1_acc": _acc(pooled),
+            "oracle_top1": or1, "oracle_top1_acc": _acc(or1),
+            "oracle_top5": or5, "oracle_top5_acc": _acc(or5),
+            "outvoted_top1": out1, "outvoted_top5": out5,
+            "outvoted": out1 + out5,
+            "per_position": per_position}
+
+
 def api_viz(name: str):
     p = VIZ / f"{name}.json"
     if not p.exists() or not p.is_file():
@@ -414,6 +485,11 @@ def api_viz(name: str):
     d = _read_json(p)
     if d is None:
         return {"error": f"viz export {name} is not valid JSON", "status": 500}
+    # consensus audit: computed server-side from exactly the payload the
+    # page renders, so the UI can never disagree with the numbers
+    sample = d.get("sample") if isinstance(d.get("sample"), dict) else {}
+    if isinstance(sample.get("positions"), list):
+        d["audit"] = consensus_audit(sample["positions"])
     return d
 
 
