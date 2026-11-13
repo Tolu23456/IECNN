@@ -18,8 +18,12 @@ import server as server_mod                            # noqa: E402
 
 
 def _get(url: str):
-    with urllib.request.urlopen(url, timeout=10) as r:
-        return r.status, r.read()
+    import urllib.error
+    try:
+        with urllib.request.urlopen(url, timeout=10) as r:
+            return r.status, r.read()
+    except urllib.error.HTTPError as e:          # 4xx/5xx: urlopen raises
+        return e.code, e.read()
 
 
 def _start():
