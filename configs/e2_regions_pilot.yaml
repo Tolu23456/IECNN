@@ -4,13 +4,15 @@
 # E2 = 4 regions as stages + cross-region competition (spec rung table).
 #
 # MEMORY (learned the hard way, 2026-11-13): the hosted runner has ~7 GB
-# usable RAM. At batch 64 the 4 regions' windowed memory (spans 32+64+128+256
-# = 480 slots, ~3 GB live + autograd retention) exhausted the runner and the
-# job was killed with a "runner shutdown signal" ~80 s in — twice. batch 16
-# divides window memory by 4 (same footprint class as E1 at batch 64) and
-# yields ~400-700 steps in the 2 h cap, comparable signal to E1's pilot.
-# Honest caveat: optimization noise differs from batch 64; per-token compute
-# is ~4x E1's, so equal-wall comparison vs E1's pilot is ~equal-tokens.
+# usable RAM. At batch_size 64 the 4 regions' windowed memory (spans
+# 32+64+128+256 = 480 slots, retained for backward across 12 region-passes,
+# ~4-7 GB) exhausted the runner and the job was killed with a "runner
+# shutdown signal" ~85 s in — three times. NOTE: an earlier "batch: 16" line
+# was an IGNORED key (train.py reads training.batch_size), so that attempt
+# still ran at 64. batch_size 8 halves retention again (~2 GB): same spans,
+# same seq 256, same protocol, ~700-900 steps in the 2 h cap.
+# Honest caveat: smaller batch = noisier gradients; per-token compute is ~4x
+# E1's, so equal-wall vs E1's pilot is ~equal-tokens.
 base: e2_regions.yaml
 name: e2_regions_pilot
 data:
@@ -18,7 +20,7 @@ data:
 ubm:
   vocab_file: UBM/vocab_v1.json
 training:
-  batch: 16
+  batch_size: 8
   eval_chars: 100000
   eval_every: 30
   checkpoint_every: 30
