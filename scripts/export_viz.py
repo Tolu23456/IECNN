@@ -60,9 +60,11 @@ def main() -> None:
     model.eval()
 
     # ---- sample text -> ids (truncate by tokens) --------------------------
-    text = Path(args.data).read_text(encoding="utf-8")[:4000]
-    from UBM.tokenizer import chunk_text
-    chunk = chunk_text(text)[0]
+    text = Path(args.data).read_text(encoding="utf-8")
+    # a real 4000-char slice of story text: chunk_text()[0] is a single
+    # pre-tokenizer chunk (often the book's leading blank line!) — the
+    # 2026-11-13 first export produced a one-token '\n' sample.
+    chunk = text.strip()[:4000]
     ids = ubm.encode(chunk)[: args.n_tokens]
     decode_bytes = _id_bytes(ubm)
     toks = [decode_bytes.get(int(i), b"?").decode("utf-8", "replace") for i in ids]
