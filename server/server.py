@@ -28,8 +28,11 @@ import json
 import re
 import subprocess
 import sys
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
 STATIC = Path(__file__).resolve().parent / "static"
@@ -46,6 +49,8 @@ UBM_DIR = ROOT / "UBM"
 DATA = ROOT / "data"
 
 DEFAULT_ARCH_CONFIG = "e1_weights_passes_pilot"
+DEFAULT_ARTIFACT = "e1_weights_passes_pilot.yaml-seeds-0-pilot"
+GENERATIONS = RESULTS / "generation"
 
 
 # ---------------------------------------------------------------- helpers --
@@ -493,6 +498,232 @@ def api_viz(name: str):
     return d
 
 
+# ------------------------------------------------- playground (generate) ---
+def _git_config_url() -> str:
+    try:
+        return subprocess.run(
+            ["git", "config", "--get", "remote.origin.url"],
+            capture_output=True, text=True, timeout=10, cwd=str(ROOT),
+        ).stdout.strip()
+    except Exception:
+        return ""
+
+
+_GH_REPO_CACHE: str | None = None
+
+
+def _gh_repo() -> str:
+    """owner/name from the ambient remote URL (cached)."""
+    global _GH_REPO_CACHE
+    if _GH_REPO_CACHE is None:
+        m = re.search(r"github\.com[/:]([\w.\-]+)/([\w.\-]+?)(?:\.git)?/?$",
+                      _git_config_url())
+        _GH_REPO_CACHE = f"{m.group(1)}/{m.group(2)}" if m \
+            else "Tolu23456/IECNN"
+    return _GH_REPO_CACHE
+
+
+def _gh_credential() -> str | None:
+    """Ambient GitHub credential, read exactly the way the project always
+    reads it: out of remote.origin.url (x-access-token:…@).
+
+    The token may ONLY travel in the Authorization header built by
+    _gh_request — never to disk, logs, responses, or error text.
+    """
+    m = re.search(r"(?<=x-access-token:)[^@]+", _git_config_url())
+    return m.group(0) if m else None
+
+
+def _gh_request(url, method="GET", body=None, token=None, timeout=30):
+    """One GitHub API call (stdlib urllib). Returns (http_status, parsed).
+
+    Test seam: tests monkeypatch this module global so no test ever hits
+    the network. Network-level failures raise; callers catch and convert
+    to clean {"error": ..., "status": 502} payloads. HTTP-level errors
+    (401/404/…) are returned as (code, None) for the caller to judge.
+    """
+    req = Request(url, method=method)
+    req.add_header("Accept", "application/vnd.github+json")
+    req.add_header("User-Agent", "IECNN-explorer")
+    data = None
+    if body is not None:
+        data = json.dumps(body).encode("utf-8")
+        req.add_header("Content-Type", "application/json")
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    try:
+        with urlopen(req, data=data, timeout=timeout) as r:
+            raw = r.read()
+    except HTTPError as e:                      # API answered with an error
+        return e.code, None
+    ctype = ""
+    try:
+        return r.status, (json.loads(raw) if raw else None)
+    except Exception:
+        return r.status, None
+
+
+def _clamp_playground(body):
+    """Validate a /api/generate request body -> (params, error)."""
+    if not isinstance(body, dict):
+        return None, "request body must be a JSON object"
+    prompt = body.get("prompt")
+    if not isinstance(prompt, str) or not prompt.strip():
+        return None, "prompt must be a non-empty string"
+    if len(prompt) > 4000:
+        return None, "prompt too long (max 4000 chars)"
+
+    def num(key, default, lo, hi):
+        v = body.get(key, default)
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            raise ValueError(f"{key} must be numeric")
+        if not (lo <= v <= hi):
+            raise ValueError(f"{key} must be in [{lo}, {hi}]")
+        return v
+
+    try:
+        params = {"prompt": prompt,
+                  "max_new_tokens": int(num("max_new_tokens", 200, 1, 800)),
+                  "temperature": num("temperature", 0.8, 0.1, 2.0),
+                  "top_k": int(num("top_k", 40, 0, 500)),
+                  "seed": int(num("seed", 0, -2 ** 31, 2 ** 31))}
+    except ValueError as e:
+        return None, str(e)
+    artifact = body.get("artifact") or DEFAULT_ARTIFACT
+    if not isinstance(artifact, str) or not re.fullmatch(r"[\w.\-]{1,120}", artifact):
+        return None, "artifact must be a plain name ([word chars . - ] only)"
+    params["artifact"] = artifact
+    return params, None
+
+
+def api_generate(body: dict):
+    """Dispatch the `generate` workflow (Playground backend).
+
+    Returns {ok, dispatched_at} on a 204. There is no run id in the
+    response — the client discovers the new run via /api/generate/runs.
+    """
+    params, err = _clamp_playground(body)
+    if err:
+        return {"error": err, "status": 400}
+    token = _gh_credential()
+    if not token:
+        return {"error": "no GitHub credential configured (remote.origin.url "
+                         "carries no x-access-token) — cannot dispatch the "
+                         "generate workflow", "status": 401}
+    url = (f"https://api.github.com/repos/{_gh_repo()}"
+           f"/actions/workflows/generate.yml/dispatches")
+    payload = {"ref": "main", "inputs": {
+        "prompt": params["prompt"], "artifact": params["artifact"],
+        "max_new_tokens": str(params["max_new_tokens"]),
+        "temperature": str(params["temperature"]),
+        "top_k": str(params["top_k"]), "seed": str(params["seed"])}}
+    try:
+        code, _ = _gh_request(url, method="POST", body=payload, token=token)
+    except Exception as e:                                   # noqa: BLE001
+        return {"error": f"GitHub unreachable: {e.__class__.__name__}",
+                "status": 502}
+    if code != 204:
+        return {"error": f"workflow dispatch rejected (HTTP {code})"
+                         + (" — credential rejected?" if code in (401, 403)
+                            else ""), "status": 502}
+    return {"ok": True,
+            "dispatched_at": datetime.now(timezone.utc)
+                             .isoformat(timespec="seconds").replace("+00:00", "Z")}
+
+
+def api_generate_runs():
+    """Most recent runs of the `generate` workflow (newest first)."""
+    token = _gh_credential()
+    url = (f"https://api.github.com/repos/{_gh_repo()}"
+           f"/actions/workflows/generate.yml/runs?per_page=8")
+    try:
+        code, d = _gh_request(url, token=token)
+    except Exception as e:                                   # noqa: BLE001
+        return {"error": f"GitHub unreachable: {e.__class__.__name__}",
+                "status": 502}
+    if code != 200 or not isinstance(d, dict):
+        return {"error": f"GitHub API returned HTTP {code}", "status": 502}
+    runs = [{"id": r.get("id"), "status": r.get("status"),
+             "conclusion": r.get("conclusion"),
+             "created_at": r.get("created_at")}
+            for r in d.get("workflow_runs", []) or []
+            if isinstance(r, dict) and isinstance(r.get("id"), int)]
+    return {"runs": runs}
+
+
+def api_generate_result(run_id: str):
+    """Fetch the generation file committed by a completed workflow run.
+
+    Statuses: pending (run still going / push not visible yet), failed
+    (run concluded failure, or succeeded without committing a generation
+    file), done (payload returned). Robust: the file is located via the
+    run's head_sha commit — no timestamp guessing.
+    """
+    if not re.fullmatch(r"\d{1,20}", str(run_id)):
+        return {"error": "run_id must be numeric", "status": 400}
+    repo, token = _gh_repo(), _gh_credential()
+    base = f"https://api.github.com/repos/{repo}"
+    try:
+        code, run = _gh_request(f"{base}/actions/runs/{run_id}", token=token)
+        if code != 200 or not isinstance(run, dict):
+            return {"error": f"run {run_id} not found (HTTP {code})",
+                    "status": 404}
+        if run.get("status") != "completed":
+            return {"status": "pending", "run_status": run.get("status"),
+                    "conclusion": run.get("conclusion")}
+        if run.get("conclusion") != "success":
+            return {"status": "failed", "conclusion": run.get("conclusion")}
+        # find the file this run committed (head_sha), via the commit API
+        head = run.get("head_sha") or ""
+        code, commit = _gh_request(f"{base}/commits/{head}", token=token)
+        names = []
+        if code == 200 and isinstance(commit, dict):
+            names = [f.get("filename", "")
+                     for f in commit.get("files", []) or [] if isinstance(f, dict)]
+        gens = sorted(n for n in names
+                      if re.match(r"results/generation/gen-[\w.\-]+\.json$", n))
+        if not gens:
+            return {"status": "failed",
+                    "conclusion": run.get("conclusion"),
+                    "note": "run succeeded but committed no generation file"}
+        fname = gens[-1]
+        code, blob = _gh_request(
+            f"{base}/contents/{fname}?ref={head}", token=token)
+        if code != 200 or not isinstance(blob, dict) or not blob.get("content"):
+            return {"error": f"could not fetch {fname} (HTTP {code})",
+                    "status": 502}
+        try:
+            payload = json.loads(base64.b64decode(blob["content"]))
+        except Exception:                                    # noqa: BLE001
+            return {"error": "generation file is not valid JSON", "status": 502}
+        return {"status": "done", "file": blob.get("name"), "result": payload}
+    except Exception as e:                                   # noqa: BLE001
+        return {"error": f"GitHub unreachable: {e.__class__.__name__}",
+                "status": 502}
+
+
+def api_generations(dir_path: Path | None = None):
+    """Locally committed generations (results/generation/*.json), newest
+    first. Never raises: a missing or empty dir is just an empty list.
+    """
+    d = dir_path or GENERATIONS
+    out = []
+    if d.is_dir():
+        for p in sorted(d.glob("gen-*.json"), reverse=True):
+            j = _read_json(p)
+            if not isinstance(j, dict):
+                continue                       # malformed file: skip, not 500
+            ids = j.get("generated_ids")
+            out.append({"file": p.name, "meta": j.get("meta") or {},
+                        "prompt": j.get("prompt", ""),
+                        "generated": j.get("generated", ""),
+                        "n_gen_tokens": len(ids) if isinstance(ids, list) else None,
+                        "elapsed_s": j.get("elapsed_s")})
+    return {"generations": out}
+
+
 def api_diagnosis():
     out = {}
     for p in sorted(DIAG.glob("*.json")):
@@ -571,6 +802,31 @@ class Handler(BaseHTTPRequestHandler):
     def _send_json(self, code: int, obj):
         self._send(code, _json_bytes(obj), "application/json; charset=utf-8")
 
+    # ---------------------------------------------------------------- POST --
+    def do_POST(self):
+        path = self.path.split("?")[0]
+        try:
+            if path == "/api/generate":
+                try:
+                    n = int(self.headers.get("Content-Length") or 0)
+                except ValueError:
+                    n = 0
+                if n > 20000:
+                    return self._send_json(400, {"error": "body too large"})
+                raw = self.rfile.read(n) if n else b""
+                try:
+                    body = json.loads(raw) if raw else {}
+                except Exception:                            # noqa: BLE001
+                    return self._send_json(400,
+                                           {"error": "body is not valid JSON"})
+                out = api_generate(body)
+                # "status" here is an HTTP code only on error payloads
+                code = out["status"] if isinstance(out.get("status"), int) else 200
+                return self._send_json(code, out)
+            return self._send_json(404, {"error": f"unknown endpoint {path}"})
+        except Exception as e:                                   # noqa: BLE001
+            return self._send_json(500, {"error": repr(e)})
+
     # ---------------------------------------------------------------- GET --
     def do_GET(self):
         path = self.path.split("?")[0]
@@ -605,6 +861,17 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send_json(out.get("status", 200), out)
             if path == "/api/viz":
                 return self._send_json(*ROUTES.get("viz_list", (200, api_viz_list())))
+            if path == "/api/generate/runs":
+                out = api_generate_runs()
+                return self._send_json(out["status"] if isinstance(out.get("status"), int) else 200, out)
+            if path == "/api/generate/result":
+                q = dict(pair.split("=", 1) for pair in query.split("&")
+                         if "=" in pair)
+                out = api_generate_result(q.get("run_id", ""))
+                # NB: payload "status" is pending/done/failed, never a code
+                return self._send_json(out["status"] if isinstance(out.get("status"), int) else 200, out)
+            if path == "/api/generations":
+                return self._send_json(200, api_generations())
 
             if path.startswith("/api/"):
                 return self._send_json(404, {"error": f"unknown endpoint {path}"})

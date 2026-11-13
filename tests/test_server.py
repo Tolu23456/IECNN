@@ -340,15 +340,20 @@ def test_dark_theme_is_the_default():
 def test_index_links_every_page():
     html = (STATIC / "index.html").read_text(encoding="utf-8")
     for page in ("dashboard", "runs", "scores", "architecture",
-                 "checkpoints", "diagnosis", "vocab", "corpus"):
+                 "checkpoints", "diagnosis", "vocab", "corpus", "playground"):
         assert f'data-page="{page}"' in html, page
 
 
 def test_app_js_has_a_page_function_for_every_nav_item():
     js = (STATIC / "app.js").read_text(encoding="utf-8")
     for fn in ("pageDashboard", "pageRuns", "pageScores", "pageArchitecture",
-               "pageCheckpoints", "pageDiagnosis", "pageVocab", "pageCorpus"):
+               "pageCheckpoints", "pageDiagnosis", "pageVocab", "pageCorpus",
+               "pagePlayground"):
         assert f"function {fn}" in js, fn
+    # playground talks to the generation endpoints
+    for ep in ("/api/generate", "/api/generate/runs",
+               "/api/generate/result", "/api/generations"):
+        assert ep in js, ep
 
 
 def test_static_assets_are_offline_safe():
@@ -458,5 +463,233 @@ def test_viz_endpoint_carries_consensus_audit():
         # sample: the pooled consensus is much worse than the best dot)
         assert a["sampled"] == 255
         assert a["outvoted_top1"] == 30 and a["outvoted_top5"] == 50
+    finally:
+        srv.shutdown()
+
+
+# ----------------------------------------------------------- playground ----
+def _post(base: str, path: str, body) -> tuple[int, bytes]:
+    req = urllib.request.Request(
+        base + path, method="POST",
+        data=json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            return r.status, r.read()
+    except urllib.error.HTTPError as e:              # noqa: F821
+        return e.code, e.read()
+
+
+class _FakeGH:
+    """Monkeypatches the GitHub seam; no test ever touches the network."""
+    def __init__(self, routes=None, token="fake-token-for-tests-only"):
+        self.routes = routes or {}   # url substring -> (code, parsed_json)
+        self.calls = []              # (url, method, body, token)
+        self.token = token
+
+    def __enter__(self):
+        self.orig_req = server_mod._gh_request
+        self.orig_cred = server_mod._gh_credential
+        server_mod._gh_credential = lambda: self.token
+        server_mod._gh_request = self._fake
+        return self
+
+    def __exit__(self, *exc):
+        server_mod._gh_request = self.orig_req
+        server_mod._gh_credential = self.orig_cred
+        return False
+
+    def _fake(self, url, method="GET", body=None, token=None, timeout=30):
+        self.calls.append((url, method, body, token))
+        for k, v in self.routes.items():
+            if k in url:
+                return v
+        return 404, None
+
+
+def test_playground_validation_clamps():
+    """Bad requests are rejected locally — the GitHub seam is never touched."""
+    with _FakeGH(routes={"dispatches": (204, None)}) as fake:
+        srv, base = _start()
+        try:
+            bad = [
+                ({"prompt": "   "}, "prompt"),
+                ({"prompt": ""}, "prompt"),
+                ({"prompt": "x" * 4001}, "too long"),
+                ({"prompt": "ok", "max_new_tokens": 801}, "max_new_tokens"),
+                ({"prompt": "ok", "max_new_tokens": 0}, "max_new_tokens"),
+                ({"prompt": "ok", "temperature": 2.5}, "temperature"),
+                ({"prompt": "ok", "temperature": 0.05}, "temperature"),
+                ({"prompt": "ok", "top_k": 501}, "top_k"),
+                ({"prompt": "ok", "artifact": "bad/artifact\nheader"}, "artifact"),
+                ("not-a-dict", "JSON object"),
+            ]
+            for body, frag in bad:
+                st, raw = _post(base, "/api/generate", body)
+                d = json.loads(raw)
+                assert st == 400, (body, st, d)
+                assert frag in d["error"], d
+            assert fake.calls == [], "invalid requests must not reach GitHub"
+            # edge values are accepted exactly, defaults applied
+            st, raw = _post(base, "/api/generate",
+                            {"prompt": "p", "max_new_tokens": 800,
+                             "temperature": 2.0, "top_k": 0, "seed": -5})
+            d = json.loads(raw)
+            assert st == 200 and d["ok"] is True
+            assert "dispatched_at" in d
+            call = fake.calls[-1]
+            assert call[1] == "POST" and "dispatches" in call[0]
+            assert call[2]["inputs"] == {
+                "prompt": "p", "artifact":
+                "e1_weights_passes_pilot.yaml-seeds-0-pilot",
+                "max_new_tokens": "800", "temperature": "2.0",
+                "top_k": "0", "seed": "-5"}
+            assert fake.token not in raw.decode()       # token never leaks
+        finally:
+            srv.shutdown()
+
+
+def test_playground_no_credential_and_github_errors():
+    """No credential -> clear error, zero network calls; upstream 401 -> 502."""
+    with _FakeGH(token=None) as fake:
+        srv, base = _start()
+        try:
+            st, raw = _post(base, "/api/generate", {"prompt": "hi"})
+            d = json.loads(raw)
+            assert st == 401 and "no GitHub credential" in d["error"]
+            assert fake.calls == [], "must not touch GitHub without a credential"
+        finally:
+            srv.shutdown()
+    with _FakeGH(routes={"dispatches": (401, None)}) as fake:
+        srv, base = _start()
+        try:
+            st, raw = _post(base, "/api/generate", {"prompt": "hi"})
+            d = json.loads(raw)
+            assert st == 502 and "401" in d["error"]
+            # the request DID go out with the ambient token in the header…
+            assert fake.calls[0][3] == fake.token
+            # …but the token never reaches any response body
+            assert fake.token not in raw.decode()
+        finally:
+            srv.shutdown()
+    runs_anon = {"workflow_runs": [
+        {"id": 5, "status": "queued", "conclusion": None,
+         "created_at": "2026-11-14T08:00:00Z"}]}
+    with _FakeGH(token=None,
+                 routes={"workflows/generate.yml/runs": (200, runs_anon)}) \
+            as fake:
+        srv, base = _start()
+        try:
+            # no ambient credential: runs/result fall back to anonymous
+            # (public repo) — still a clean payload, never a 500
+            st, raw = _get(base + "/api/generate/runs")
+            d = json.loads(raw)
+            assert st == 200 and d["runs"][0]["id"] == 5
+            assert fake.calls[0][3] is None          # no Authorization used
+        finally:
+            srv.shutdown()
+
+
+def test_generate_runs_and_result_paths():
+    """runs listing maps fields; result walks pending/failed/done states."""
+    runs_payload = {"workflow_runs": [
+        {"id": 222, "status": "completed", "conclusion": "success",
+         "created_at": "2026-11-14T10:00:00Z", "head_sha": "b" * 40},
+        {"id": 111, "status": "in_progress", "conclusion": None,
+         "created_at": "2026-11-14T09:00:00Z", "head_sha": "a" * 40},
+        {"junk": True},
+    ]}
+    gen_json = json.dumps({"meta": {"run": "r", "step": 540},
+                           "prompt": "hi", "generated": "there",
+                           "generated_ids": [1, 2, 3], "elapsed_s": 1.5})
+    import base64 as _b64
+    contents = {"name": "gen-20261114-100000.json",
+                "content": _b64.b64encode(gen_json.encode()).decode()}
+    routes = {
+        "workflows/generate.yml/runs": (200, runs_payload),
+        "actions/runs/222": (200, runs_payload["workflow_runs"][0]),
+        "actions/runs/111": (200, runs_payload["workflow_runs"][1]),
+        f"commits/{'b' * 40}": (200, {"files": [
+            {"filename": "scripts/x.py"},
+            {"filename": "results/generation/gen-20261114-100000.json"}]}),
+        "contents/results/generation/gen-20261114-100000.json": (200, contents),
+        "actions/runs/999": (200, {"status": "completed", "conclusion": "failure",
+                                   "head_sha": "c" * 40}),
+        "actions/runs/888": (200, {"status": "completed", "conclusion": "success",
+                                   "head_sha": "d" * 40}),
+        f"commits/{'d' * 40}": (200, {"files": [{"filename": "README.md"}]}),
+    }
+    with _FakeGH(routes=routes) as fake:
+        srv, base = _start()
+        try:
+            st, raw = _get(base + "/api/generate/runs")
+            d = json.loads(raw)
+            assert st == 200
+            assert d["runs"] == [
+                {"id": 222, "status": "completed", "conclusion": "success",
+                 "created_at": "2026-11-14T10:00:00Z"},
+                {"id": 111, "status": "in_progress", "conclusion": None,
+                 "created_at": "2026-11-14T09:00:00Z"}]
+            assert fake.token not in raw.decode()
+            # in-flight run -> pending (HTTP 200 so the client keeps polling)
+            st, raw = _get(base + "/api/generate/result?run_id=111")
+            d = json.loads(raw)
+            assert st == 200 and d["status"] == "pending"
+            # success with a committed gen file -> done, payload parsed
+            st, raw = _get(base + "/api/generate/result?run_id=222")
+            d = json.loads(raw)
+            assert st == 200 and d["status"] == "done"
+            assert d["file"] == "gen-20261114-100000.json"
+            assert d["result"]["generated"] == "there"
+            assert d["result"]["meta"]["step"] == 540
+            assert fake.token not in raw.decode()
+            # concluded failure -> failed
+            st, raw = _get(base + "/api/generate/result?run_id=999")
+            d = json.loads(raw)
+            assert st == 200 and d["status"] == "failed"
+            # succeeded but committed no generation file -> failed
+            st, raw = _get(base + "/api/generate/result?run_id=888")
+            d = json.loads(raw)
+            assert st == 200 and d["status"] == "failed"
+            assert "no generation file" in d["note"]
+            # malformed run_id -> 400
+            st, raw = _get(base + "/api/generate/result?run_id=../etc")
+            assert st == 400
+        finally:
+            srv.shutdown()
+
+
+def test_generations_local_listing():
+    """Local history: parses real files, skips junk, empty/missing dir OK."""
+    import tempfile
+    sample = {"meta": {"run": "e1_weights_passes_pilot_seed0", "step": 540,
+                       "stop_kind": "wall_cap", "tau0": 0.954,
+                       "temperature": 0.8, "top_k": 40, "seed": 0},
+              "prompt": "[ Illustration]", "generated": "hel lo wor ld",
+              "generated_ids": [1] * 11, "elapsed_s": 2.25}
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        (d / "gen-20261114-100000.json").write_text(json.dumps(sample))
+        (d / "gen-20261114-090000.json").write_text("{not json")
+        (d / "other.txt").write_text("ignore me")
+        out = server_mod.api_generations(d)
+        gens = out["generations"]
+        assert [g["file"] for g in gens] == ["gen-20261114-100000.json"]
+        g = gens[0]
+        assert g["prompt"] == "[ Illustration]"
+        assert g["generated"] == "hel lo wor ld"
+        assert g["n_gen_tokens"] == 11 and g["elapsed_s"] == 2.25
+        assert g["meta"]["step"] == 540
+        # missing dir -> empty, no exception
+        empty = server_mod.api_generations(d / "nope")
+        assert empty == {"generations": []}
+    # live endpoint serves the repo dir (possibly empty) without 500ing
+    srv, base = _start()
+    try:
+        st, raw = _get(base + "/api/generations")
+        d = json.loads(raw)
+        assert st == 200 and isinstance(d["generations"], list)
+        for g in d["generations"]:
+            assert "file" in g and "generated" in g
     finally:
         srv.shutdown()

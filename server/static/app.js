@@ -23,6 +23,14 @@ async function api(path) {
   if (!r.ok) throw new Error(`${path} → HTTP ${r.status}`);
   return r.json();
 }
+async function apiSend(path, body) {
+  const r = await fetch(path, { method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body) });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(d.error || `${path} → HTTP ${r.status}`);
+  return d;
+}
 const fmt = (x, d = 4) => (x === null || x === undefined ||
   (typeof x === "number" && !isFinite(x))) ? "—" : Number(x).toFixed(d);
 const esc = s => String(s ?? "");
@@ -177,6 +185,7 @@ const PAGES = {
   diagnosis:    { fn: pageDiagnosis,    title: "Diagnosis" },
   vocab:        { fn: pageVocab,        title: "Vocab (UBM)" },
   corpus:       { fn: pageCorpus,       title: "Corpus & split" },
+  playground:   { fn: pagePlayground,   title: "Playground" },
 };
 function route() {
   const parts = location.hash.replace(/^#\/?/, "").split("/").filter(Boolean);
@@ -1401,6 +1410,147 @@ async function pageCorpus(root) {
   } else if (ubm) {
     root.append(h("h2", {}, "UBM compression history"), h("pre", {}, JSON.stringify(ubm, null, 1)));
   }
+}
+
+/* ====================================================== PLAYGROUND ====== */
+/* Prompt the real checkpoint via the `generate` GitHub Actions workflow:
+   dispatch → the runner (torch lives there, never here) generates and
+   commits results/generation/gen-*.json → we poll until it lands. */
+function pagePlayground(root) {
+  root.innerHTML = "";
+  root.append(h("h1", {}, "Playground — prompt the real model"),
+    h("p", { class: "legend" },
+      "Generation runs on GitHub Actions (torch stays on the runner — never on this box). ",
+      "Dispatched → queued → torch install (~3–6 min) → generation (seconds) → the result is committed to ",
+      h("code", {}, "results/generation/"), " on main and shows up below. ",
+      h("b", {}, "Quality note: "),
+      "the current checkpoint is E1@step-540 — early training, so gibberish output is the model's real state until the plateau runs land."));
+
+  const ta = h("textarea", { rows: "4", id: "prompt",
+    placeholder: "Type a prompt… e.g. [ Illustration] or anything, really" });
+  const mk = (id, val, extra) => h("input",
+    Object.assign({ id, value: val, spellcheck: "false" }, extra || {}));
+  const inMax = mk("maxnew", "200", { type: "number", min: "1", max: "800" });
+  const inTemp = mk("temp", "0.8", { type: "number", min: "0.1", max: "2", step: "0.1" });
+  const inTopk = mk("topk", "40", { type: "number", min: "0", max: "500" });
+  const inSeed = mk("seed", "0", { type: "number" });
+  const inArt = mk("artifact", "e1_weights_passes_pilot.yaml-seeds-0-pilot");
+  const ctl = (lbl, el) => h("label", { class: "pctl" }, h("span", {}, lbl), el);
+  const btn = h("button", { class: "genbtn" }, "Generate");
+  const status = h("div", { class: "genstatus" });
+  const out = h("div", { class: "genout" });
+  root.append(ta,
+    h("div", { class: "toolbar" },
+      ctl("max new tokens", inMax), ctl("temperature", inTemp),
+      ctl("top-k", inTopk), ctl("seed", inSeed), ctl("checkpoint artifact", inArt),
+      btn),
+    status, out);
+
+  const showResult = (res) => {
+    out.innerHTML = "";
+    const meta = res.meta || {};
+    const nTok = Array.isArray(res.generated_ids) ? res.generated_ids.length : res.n_gen_tokens;
+    out.append(h("div", { class: "cards" },
+      card(`${meta.run || "—"}`, "run"),
+      card(`${meta.step ?? "—"} · ${meta.stop_kind ?? "—"}`, "checkpoint step"),
+      card(`${fmt(meta.tau0, 2)} τ0 · ${meta.temperature ?? "—"} T · top-k ${meta.top_k ?? "—"} · seed ${meta.seed ?? "—"}`,
+        "sampling"),
+      card(nTok != null ? String(nTok) : "—", "generated tokens"),
+      card(res.elapsed_s != null ? `${fmt(res.elapsed_s, 2)}s` : "—", "generation time")));
+    out.append(h("h3", {}, "prompt"),
+      h("pre", { class: "genprompt" }, esc(res.prompt ?? "")));
+    out.append(h("h3", {}, "generated continuation"),
+      h("pre", { class: "gentext" }, esc(res.generated ?? "(empty)")));
+  };
+
+  /* ---- history: locally committed generations ---- */
+  const hist = h("div", {});
+  root.append(h("h2", {}, "History — committed generations"),
+    h("p", { class: "legend" }, "results/generation/*.json as committed to main by past generate runs. Click to load."),
+    hist);
+  const loadHist = async () => {
+    hist.innerHTML = "";
+    try {
+      const g = await api("/api/generations");
+      const items = g.generations || [];
+      if (!items.length) {
+        hist.append(h("p", { class: "muted" },
+          "no committed generations yet — generate one, or git-pull if the workflow already committed"));
+        return;
+      }
+      for (const it of items) {
+        const m = it.meta || {};
+        const b = h("button", { class: "chip", title: `${it.prompt || ""}` },
+          `${it.file} · ${(m.run || "?").split("_seed")[0]} · step ${m.step ?? "?"} · ${fmt(it.elapsed_s, 1)}s`);
+        b.addEventListener("click", () => {
+          showResult(it);
+          window.scrollTo({ top: 0, behavior: "smooth" });
+        });
+        hist.append(b, " ");
+      }
+    } catch (e) {
+      hist.append(h("div", { class: "errbox" }, `history unavailable: ${e.message}`));
+    }
+  };
+  loadHist();
+
+  /* ---- dispatch + poll ---- */
+  const say = (t, cls) => { status.textContent = t; status.className = "genstatus" + (cls ? " " + cls : ""); };
+  btn.addEventListener("click", async () => {
+    btn.disabled = true;
+    out.innerHTML = "";
+    const body = { prompt: ta.value, max_new_tokens: inMax.value,
+      temperature: inTemp.value, top_k: inTopk.value, seed: inSeed.value,
+      artifact: inArt.value.trim() };
+    let resp;
+    try {
+      say("dispatching…");
+      resp = await apiSend("/api/generate", body);
+    } catch (e) {
+      say(`✗ ${e.message}`, "bad"); btn.disabled = false; return;
+    }
+    const t0 = Date.parse(resp.dispatched_at);
+    // find the run this dispatch created: created_at after our dispatch,
+    // within a 2-min window so an older in-flight run is never grabbed
+    let runId = null;
+    for (let tries = 0; tries < 25 && !runId; tries++) {
+      say("dispatched… looking for the workflow run…");
+      await new Promise(r => setTimeout(r, 8000));
+      if (!document.contains(status)) return;            // user navigated away
+      try {
+        const d = await api("/api/generate/runs");
+        for (const r of d.runs || []) {
+          const dt = Date.parse(r.created_at) - t0;
+          if (dt >= 0 && dt <= 120000) { runId = r.id; break; }
+        }
+      } catch (e) { say(`✗ ${e.message}`, "bad"); btn.disabled = false; return; }
+    }
+    if (!runId) { say("✗ no workflow run appeared within 3 min — check the Actions tab", "bad"); btn.disabled = false; return; }
+    say(`run ${runId} found — waiting for the runner (torch install dominates, ~3–6 min)…`);
+    // poll the result until done/failed
+    for (let tries = 0; tries < 120; tries++) {
+      await new Promise(r => setTimeout(r, 8000));
+      if (!document.contains(status)) return;
+      let d;
+      try { d = await api(`/api/generate/result?run_id=${runId}`); }
+      catch (e) { say(`✗ ${e.message}`, "bad"); btn.disabled = false; return; }
+      if (d.status === "done") {
+        say(`✓ done — ${d.file} committed${d.result?.elapsed_s != null ? ` · generated in ${fmt(d.result.elapsed_s, 2)}s` : ""}`, "ok");
+        showResult(d.result || {});
+        loadHist();
+        btn.disabled = false;
+        return;
+      }
+      if (d.status === "failed") {
+        say(`✗ run concluded ${d.conclusion || "unsuccessfully"}${d.note ? ` — ${d.note}` : ""} — check the Actions log`, "bad");
+        btn.disabled = false;
+        return;
+      }
+      say(`run ${runId}: ${d.run_status || "generating…"} — torch install dominates (~3–6 min), generation itself is seconds…`);
+    }
+    say("✗ still pending after ~16 min — check the Actions tab", "bad");
+    btn.disabled = false;
+  });
 }
 
 /* ---------------- boot ---------------- */
