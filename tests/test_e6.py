@@ -56,8 +56,8 @@ def test_verifier_zero_scale_is_bit_exact_to_e1():
     # and the head's output rides along in per_pass for the loss/metrics
     with torch.no_grad():
         out = e6(x)
-    assert out["per_pass_last_region"][-1]["verifier"] is not None
-    assert out["per_pass_last_region"][-1]["verifier"].shape[-1] == 9  # features
+    v = out["per_pass_last_region"][-1]["verifier"]
+    assert v is not None and v.shape == (2, 32, e6.regions[0].n_dots)
 
 
 def test_verifier_scale_changes_output_and_carries_gradient():
