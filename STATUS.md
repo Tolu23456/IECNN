@@ -579,3 +579,14 @@ All three 2h-wall pilots completed success and were re-scored corpus-verified
 - Found spec at `papers/00..08`; concatenated into `spec/IECNN_FULL_SPEC.md` (see DECISIONS.md).
 - Unzipped `iecnn_skeleton.zip`; the skeleton layout matches Section 5 of the agent prompt. Building on it.
 - Reading the full spec (done: 00–08) and the skeleton stubs before writing any code.
+
+## Model quality pivot (Tolu, 2026-11-14 13:10 UTC)
+**Why current generation is gibberish — measured, not guessed:** the best
+checkpoint (vocab3 warmstart, full-val 2.27183 bpc) has consumed **0.176
+epochs** of the 39.2 MB corpus (1680 steps x 4096 chars = 6.9M chars vs
+39.2M). No char model of any size is coherent at a fifth of one pass; 2.27 bpc
+at that exposure is healthy learning, not a defect. Generation samples from
+@1680 (committed gen-20261114-130532/130556.json, temp 0.8/0.6) remain
+word-salad as expected. **The coherence lever is more steps, and more steps
+per hour is exactly the speed goal** — every 1.84x from the fused consensus
+core directly doubles the epochs the plateau chains can burn per day.
