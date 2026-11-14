@@ -1,0 +1,158 @@
+# E5 / UBM v1 checkpoint promotion (spec 07 §6.2), wired 2026-11-14.
+# Runs scripts/promote_vocab.py on a trained checkpoint artifact:
+# harvests region-1 agreement candidates from the train corpus, promotes the
+# top-K as new bases (mean-of-parts embedding init), settles ONLY the new
+# embedding rows, and runs the held-out bpc rollback test (tombstones on
+# failure). Commits the promoted vocab + report; uploads the promoted
+# checkpoint as an artifact for continuation.
+name: promotion
+on:
+  workflow_dispatch:
+    inputs:
+      artifact:
+        description: "Checkpoint artifact name (e.g. <config>-seeds-0-warmstart)"
+        required: true
+      vocab:
+        description: "Vocab file the checkpoint was trained with"
+        required: true
+        default: "UBM/vocab_v3.json"
+      corpus_config:
+        description: "MUST carry data.corpus: big"
+        default: "e1_weights_passes_vocab3_warmstart.yaml"
+      top_k:
+        default: "16"
+      settle_steps:
+        default: "500"
+      rollback_epsilon:
+        default: "0.002"
+      candidate_chars:
+        description: "Train chars scanned for candidates"
+        default: "100000"
+      val_chars:
+        description: "Held-out chars for the rollback test"
+        default: "60000"
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  promotion:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install PyTorch (CPU) + requirements
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-torch.txt
+          python -m pip install -r requirements.txt
+
+      - name: Download checkpoint artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT: ${{ github.event.inputs.artifact }}
+        run: |
+          set -euo pipefail
+          curl -sf -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/artifacts?per_page=100" \
+            -o /tmp/artifacts.json
+          python - << 'PYEOF'
+          import json, os, sys
+          d = json.load(open("/tmp/artifacts.json"))
+          name = os.environ["ARTIFACT"]
+          cands = [a for a in d.get("artifacts", [])
+                   if a["name"] == name and not a["expired"]]
+          if not cands:
+              print("ARTIFACT_NOT_FOUND:" + name, file=sys.stderr)
+              sys.exit(1)
+          newest = max(cands, key=lambda a: (a["created_at"], a["id"]))
+          open("/tmp/art_id", "w").write(str(newest["id"]))
+          print("found artifact", newest["id"])
+          PYEOF
+          ART_ID=$(cat /tmp/art_id)
+          curl -sfL -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/artifacts/$ART_ID/zip" \
+            -o /tmp/artifact.zip
+
+      - name: Prepare corpus
+        if: ${{ !hashFiles('data/train.txt') }}
+        env:
+          CONFIG: ${{ github.event.inputs.corpus_config }}
+        run: |
+          set -euo pipefail
+          python - << 'PYEOF'
+          import os
+          from config import load_config
+          from data.prepare import prepare_all
+          cfg = load_config("configs/" + os.environ["CONFIG"])
+          info = prepare_all(cfg)
+          for name, d in info["parts"].items():
+              print(name, d["chars"], d["sha256"][:16])
+          PYEOF
+
+      - name: Verify corpus matches the training run
+        run: |
+          set -euo pipefail
+          python - << 'PYEOF'
+          import hashlib, json, sys, zipfile
+          val = open("data/val.txt", encoding="utf-8").read()
+          if len(val) < 150_000:
+              sys.exit("CORPUS GUARD FAILED: val.txt is the v0 Shakespeare "
+                       "split, not corpus v1.")
+          have = hashlib.sha256(val.encode("utf-8")).hexdigest()
+          with zipfile.ZipFile("/tmp/artifact.zip") as z:
+            names = z.namelist()
+            ref = json.loads(z.read("data/split_info.json")) \
+                  ["parts"]["val"]["sha256"] if "data/split_info.json" in names else None
+          if ref is not None and have != ref:
+              sys.exit("CORPUS MISMATCH vs the training run's split_info.")
+          print("corpus verified")
+          PYEOF
+
+      - name: Extract checkpoint
+        run: unzip -qo /tmp/artifact.zip "checkpoints/*" -d .
+
+      - name: Run the promotion loop
+        run: |
+          set -euo pipefail
+          CKPT_DIR=$(find checkpoints -mindepth 1 -maxdepth 1 -type d | head -1)
+          RUN=$(basename "$CKPT_DIR")
+          OUTV="UBM/vocab_promoted_${RUN%%_seed*}.json"
+          python scripts/promote_vocab.py --ckpt-dir "$CKPT_DIR" \
+            --vocab "${{ github.event.inputs.vocab }}" \
+            --out-vocab "$OUTV" \
+            --out-report "results/promotion_${RUN}.json" \
+            --top-k "${{ github.event.inputs.top_k }}" \
+            --settle-steps "${{ github.event.inputs.settle_steps }}" \
+            --rollback-epsilon "${{ github.event.inputs.rollback_epsilon }}" \
+            --candidate-chars "${{ github.event.inputs.candidate_chars }}" \
+            --val-chars "${{ github.event.inputs.val_chars }}"
+          echo "PROMOTED_VOCAB=$OUTV" >> "$GITHUB_ENV"
+
+      - name: Upload promoted checkpoint
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: promoted-${{ github.event.inputs.artifact }}
+          path: |
+            checkpoints/*/checkpoint_promoted.pt
+            results/promotion_*.json
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Commit promoted vocab + report
+        run: |
+          set -euo pipefail
+          git config user.name "results-bot"
+          git config user.email "results-bot@users.noreply.github.com"
+          git add "${PROMOTED_VOCAB:-}" results/promotion_*.json
+          git commit -m "results: UBM v1 promotion [artifact ${{ github.event.inputs.artifact }}] (corpus-verified, rollback-tested)" || echo "nothing to commit"
+          git pull --rebase origin main
+          git push
