@@ -1,0 +1,14 @@
+# E1 vocab4 pilot: vocab_v4 @ 8192 — the last point on the bpc-vs-vocab
+# curve. Fertility gains are flattening (2.00 / 2.86 / 3.20 chars/token at
+# 512/2048/4096) while V-scaling costs grow linearly (output layer, softmax,
+# per-pass log_pi memory) and rare tokens get under-trained — 8192 is where
+# the knee should show if it exists.
+#
+# batch_size 8: per-pass log_pi block [B,T,N,V] at V=8192 doubles vocab3's
+# footprint — still in the runner's ~7 GB class.
+base: e1_weights_passes_pilot.yaml
+name: e1_weights_passes_vocab4
+ubm:
+  vocab_file: UBM/vocab_v4.json
+training:
+  batch_size: 8
