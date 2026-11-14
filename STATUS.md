@@ -2,6 +2,22 @@
 
 Newest entry at the top.
 
+## 2026-11-14 (~09:30) — vocab4 pilot trained OK (commit step died on pre-fix bug); results recovered from artifact
+
+- **vocab4 @8192 pilot**: wall cap at 360 steps, best full-val **2.6568 @300**
+  (tau0 0.991), 2.24M params. Commit step failed on the pre-fix heredoc bug —
+  rows + summary recovered manually from the artifact and committed
+  (fd93da5). Eval re-score dispatched (vocab_v4, corpus pilot config).
+- **Equal-STEP comparison at step 300 (the fair one here, since vocab4's
+  wall cap truncated it before its payoff phase): vocab2 2.968 → vocab3
+  2.789 → vocab4 2.660 — vocab4 is the fastest learner per step.**
+  Equal-WALL bests still favor vocab3 (2.44863 @900). The vocab4 curve is
+  flat through 360 then vocab2/vocab3 both broke downward after ~600 —
+  vocab4's pilot never reached that phase. Decision for Tolu: a vocab4
+  warmstart/plateau run is needed to place 8192 on the bpc-vs-vocab curve;
+  the knee decision stays open until vocab3's plateau (in flight) lands.
+- E6 pilot v2 (0a985b4) still in flight, ~10:15 UTC expected.
+
 ## 2026-11-14 (~08:10) — E6 first dispatch failed (latent loss bug), fixed, re-dispatched
 
 - **E6 pilot crash on step 1**: `decorrelation_penalty` — a loss never
