@@ -796,6 +796,10 @@ def api_generations(dir_path: Path | None = None):
                         "prompt": j.get("prompt", ""),
                         "generated": j.get("generated", ""),
                         "generated_ids": ids if isinstance(ids, list) else None,
+                        "token_logprobs": j.get("token_logprobs")
+                        if isinstance(j.get("token_logprobs"), list) else None,
+                        "token_top1_prob": j.get("token_top1_prob")
+                        if isinstance(j.get("token_top1_prob"), list) else None,
                         "expert_dots": ed if isinstance(ed, list) else None,
                         "n_gen_tokens": len(ids) if isinstance(ids, list) else None,
                         "elapsed_s": j.get("elapsed_s")})

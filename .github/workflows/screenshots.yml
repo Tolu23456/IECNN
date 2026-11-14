@@ -13,7 +13,7 @@ on:
     inputs:
       pages:
         description: "Comma-separated URL paths to screenshot"
-        default: "/,/curves,/dots,/architecture,/compare,/playground"
+        default: "/#/dashboard,/#/runs,/#/compare,/#/scores,/#/architecture,/#/checkpoints,/#/diagnosis,/#/vocab,/#/corpus,/#/playground"
 
 permissions:
   contents: write

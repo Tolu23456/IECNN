@@ -105,6 +105,12 @@ def main() -> None:
     ids = list(prompt_ids)
     gen_ids: list[int] = []
     expert_dots: list[int] = []
+    # per-token confidence for the Playground timeline (Explorer step 3 stub
+    # resolved): the model's own log-prob of the SAMPLED token (un-tempered,
+    # un-top-k — the distribution's honest self-assessment) plus the top-1
+    # probability of the distribution it sampled from.
+    token_logprobs: list[float] = []
+    token_top1_prob: list[float] = []
     t0 = time.time()
     with torch.no_grad():
         for _ in range(args.max_new_tokens):
@@ -121,15 +127,18 @@ def main() -> None:
                 w = pp["weights"][0, -1]                   # [N]
                 dot = int(torch.multinomial(w ** 2, 1))
                 expert_dots.append(dot)
-                lp = pp["log_pi"][0, -1, dot] / args.temperature
+                lp0 = pp["log_pi"][0, -1, dot]
             else:
-                lp = _next_log_probs(model, out, kind) / args.temperature
+                lp0 = _next_log_probs(model, out, kind)
+            lp = lp0 / args.temperature
             if args.top_k > 0:
                 k = min(args.top_k, lp.shape[-1])
                 kth = lp.topk(k).values[-1]
                 lp = lp.clamp_max(kth)
             probs = lp.softmax(-1)
             nxt = int(torch.multinomial(probs, 1))
+            token_logprobs.append(float(lp0[nxt].item()))
+            token_top1_prob.append(float(lp0.softmax(-1).max().item()))
             ids.append(nxt)
             gen_ids.append(nxt)
     elapsed = time.time() - t0
@@ -156,6 +165,8 @@ def main() -> None:
         "prompt_tokens": len(prompt_ids),
         "generated": generated,
         "generated_ids": gen_ids,
+        "token_logprobs": token_logprobs,
+        "token_top1_prob": token_top1_prob,
         "expert_dots": expert_dots if args.expert_sampling else None,
         "elapsed_s": round(elapsed, 2),
     }

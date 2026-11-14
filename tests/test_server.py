@@ -734,6 +734,26 @@ def test_generations_carry_timeline_fields():
         assert [x["expert_dots"] for x in gens] == [None, [3, None]]
 
 
+def test_generations_carry_per_token_confidence():
+    """token_logprobs / token_top1_prob (generate.py per-token confidence)
+    pass through when present and stay None on legacy exports without them."""
+    import tempfile
+    sample = {"meta": {}, "generated_ids": [7, 8],
+              "token_logprobs": [-1.5, -0.4],
+              "token_top1_prob": [0.21, 0.67], "elapsed_s": 1.0}
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        (d / "gen-x.json").write_text(json.dumps(sample))
+        # legacy export: no confidence keys, and a wrong-typed key must not crash
+        (d / "gen-y.json").write_text(json.dumps(
+            {"meta": {}, "generated_ids": [1], "token_logprobs": "oops"}))
+        gens = server_mod.api_generations(d)["generations"]
+        assert gens[0]["token_logprobs"] is None
+        assert gens[0]["token_top1_prob"] is None
+        assert gens[1]["token_logprobs"] == [-1.5, -0.4]
+        assert gens[1]["token_top1_prob"] == [0.21, 0.67]
+
+
 # -------------------------------------- accessibility & responsive (step 4) --
 def test_a11y_keyboard_charts_and_button_chips():
     js = (STATIC / "app.js").read_text(encoding="utf-8")
