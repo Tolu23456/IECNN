@@ -172,7 +172,7 @@ def test_consensus_core_matches_eager_composite():
      v_scale, v_out, rho, tau, floor) = _core_inputs(g)
     trust, w, log_b, err = consensus.consensus_core(
         log_pi, gamma, trust_term, trust_prev, alpha, beta,
-        v_scale, v_out, rho, torch.tensor(tau), torch.tensor(floor), n=4)
+        v_scale, v_out, rho, torch.tensor(tau), torch.tensor(floor), n_dots=4)
 
     pi = log_pi.exp()
     scores, loo, js = consensus.compute_scores_fast(
@@ -200,7 +200,7 @@ def test_consensus_core_floor_zero_and_verifier_fold():
     _, w0, _, _ = consensus.consensus_core(
         log_pi, gamma, trust_term, trust_prev, alpha, beta,
         torch.tensor(0.0), torch.zeros(4), rho,
-        torch.tensor(tau), torch.tensor(0.0), n=4)
+        torch.tensor(tau), torch.tensor(0.0), n_dots=4)
     scores0, _, _ = consensus.compute_scores_fast(
         log_pi.exp(), log_pi, gamma, trust_term, alpha, beta, return_parts=True)
     trust0 = consensus.update_trust(trust_prev, scores0, rho)
@@ -210,14 +210,14 @@ def test_consensus_core_floor_zero_and_verifier_fold():
     _, wz, _, _ = consensus.consensus_core(
         log_pi, gamma, trust_term, trust_prev, alpha, beta,
         torch.tensor(0.0), torch.zeros(4), rho,
-        torch.tensor(tau), torch.tensor(0.0), n=4)
+        torch.tensor(tau), torch.tensor(0.0), n_dots=4)
     assert torch.equal(w0, wz)
     # real verifier verdict
     v_out = torch.randn(4, generator=g)
     vs = torch.tensor(0.3)
     trust_v, wv, _, _ = consensus.consensus_core(
         log_pi, gamma, trust_term, trust_prev, alpha, beta, vs, v_out, rho,
-        torch.tensor(tau), torch.tensor(0.05), n=4)
+        torch.tensor(tau), torch.tensor(0.05), n_dots=4)
     scores_v = scores0 + vs * v_out
     trust_v_ref = consensus.update_trust(trust_prev, scores_v, rho)
     assert torch.allclose(trust_v, trust_v_ref, atol=1e-6)
