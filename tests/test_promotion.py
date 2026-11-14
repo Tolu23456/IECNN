@@ -124,7 +124,7 @@ def test_promote_calls_settle_fn_with_new_ids():
     promote(ubm, model, _candidates(ubm, [(a, b)]), settle_steps=7,
             rollback_epsilon=1e9, val_text="nothing", eval_bpc=lambda t: 1.0,
             settle_fn=settle_fn)
-    assert calls == [[len(ubm.bases) - 1], 7]
+    assert calls == [([len(ubm.bases) - 1], 7)]
 
 
 def test_promote_with_real_model_and_bpc_end_to_end():
@@ -154,7 +154,7 @@ def test_promote_with_real_model_and_bpc_end_to_end():
     report = promote(ubm, model, cands, settle_steps=0,
                      rollback_epsilon=1e9, val_text=val_text,
                      eval_bpc=lambda t: evaluate_bpc(model, ubm, t, seq_len=8))
-    assert abs(report["bpc_before"] - before) < 1e-9
+    assert abs(report["bpc_before"] - before) < 1e-5   # report rounds to 6 dp
     new_id = report["promoted_ids"][0]
     assert ubm.encode("th") == [new_id]
     after = evaluate_bpc(model, ubm, val_text, seq_len=8)

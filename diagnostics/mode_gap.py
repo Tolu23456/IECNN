@@ -17,6 +17,7 @@ def run(checkpoint_path, config_path=None, out_dir="results/diagnostics",
         txt = txt[:max_chars]
     mg = mode_gap(r["model"], r["ubm"], txt)
     summary = dict(mg)
+    summary["mode_gap"] = summary.pop("gap")     # spec vocabulary: "mode gap"
     summary["ckpt_dir"] = r["ckpt_dir"]
     summary["best_step"] = r["best_step"]
     summary["n_chars"] = len(txt)

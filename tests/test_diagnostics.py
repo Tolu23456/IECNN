@@ -132,7 +132,7 @@ def test_mode_gap_is_small_on_a_soft_trained_model():
     m = _tiny_iecnn(len(ubm.bases), seed=2)
     text = "alpha beta gamma delta"
     mg = mode_gap(m, ubm, text)
-    assert abs(mg["mode_gap"]) <= 0.5
+    assert abs(mg["gap"]) <= 0.5
 
 
 def test_mode_gap_module_on_saved_checkpoint(tmp_path):

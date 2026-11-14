@@ -118,6 +118,7 @@ jobs:
           RUN=$(basename "$CKPT_DIR")
           python scripts/diagnose_all.py --ckpt-dir "$CKPT_DIR" \
             --vocab "${{ github.event.inputs.vocab }}" \
+            --config-fallback "${{ github.event.inputs.corpus_config }}" \
             --out "results/diagnostics/$RUN" \
             --max-chars "${{ github.event.inputs.max_chars }}"
 

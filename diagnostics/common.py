@@ -151,7 +151,8 @@ def collect(model, ubm, text, *, region="last", passes="last", need=(),
             for k in need:
                 if k in ("final", "omega"):
                     continue
-                st[k].append(pp[pi_][k].reshape(ntok, -1).cpu())
+                t = pp[pi_][k]                       # e.g. log_pi [K, T, N, V]
+                st[k].append(t.reshape(ntok, *t.shape[2:]).cpu())
         for s in group:
             for i in range(L):
                 chars += expand_len[s + 1 + i]
