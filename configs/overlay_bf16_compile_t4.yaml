@@ -1,0 +1,8 @@
+# A/B overlay: compiled consensus + 4 torch threads (Tolu's cores hint,
+# 2026-11-14). Threads-4 on EAGER code measured 4.99 vs 5.43 once but was
+# retracted as unproven (fleet spread); this settles it PAIRED on the fused
+# path, where the compute/bandwidth mix and inductor's parallel loops differ.
+base: overlay_bf16_compile.yaml
+model: {}
+training:
+  torch_threads: 4
