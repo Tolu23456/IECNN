@@ -1,0 +1,101 @@
+# Explorer screenshots (Tolu, 2026-11-14: "a workflow that screenshots every
+# page at 1440px and 390px and commits the PNGs, so I can review them").
+#
+# Headless Chromium via Playwright on the runner; the server itself is
+# stdlib-only (no torch). Screenshots overwrite the same filename per
+# page+viewport so the repo doesn't accumulate history of PNGs.
+#
+# Pages to shoot are a workflow input (comma-separated paths). Update the
+# default when pages are added or renamed.
+name: screenshots
+on:
+  workflow_dispatch:
+    inputs:
+      pages:
+        description: "Comma-separated URL paths to screenshot"
+        default: "/,/curves,/dots,/architecture,/compare,/playground"
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  shots:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install Playwright + Chromium
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install playwright
+          python -m playwright install --with-deps chromium
+
+      - name: Start the Explorer
+        run: |
+          set -euo pipefail
+          nohup python3 server/server.py --port 8765 > /tmp/server.log 2>&1 &
+          echo $! > /tmp/server.pid
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:8765/ > /dev/null; then
+              echo "server up"; break
+            fi
+            sleep 1
+          done
+          curl -sf http://127.0.0.1:8765/ > /dev/null || {
+            echo "SERVER FAILED TO START"; cat /tmp/server.log; exit 1; }
+
+      - name: Screenshot every page at 1440px and 390px
+        env:
+          PAGES: ${{ github.event.inputs.pages }}
+        run: |
+          set -euo pipefail
+          python - << 'PYEOF'
+          import os
+          from playwright.sync_api import sync_playwright
+
+          pages = [p.strip() for p in os.environ["PAGES"].split(",") if p.strip()]
+          sizes = [("1440", 1440, 900), ("390", 390, 844)]
+          with sync_playwright() as pw:
+              browser = pw.chromium.launch()
+              for size_name, w, h in sizes:
+                  ctx = browser.new_context(viewport={"width": w, "height": h},
+                                            device_scale_factor=2 if size_name == "390" else 1)
+                  page = ctx.new_page()
+                  for p in pages:
+                      slug = (p.strip("/").replace("/", "-") or "home")
+                      out = f"results/screenshots/{size_name}-{slug}.png"
+                      os.makedirs(os.path.dirname(out), exist_ok=True)
+                      url = f"http://127.0.0.1:8765{p}"
+                      page.goto(url, wait_until="networkidle", timeout=30000)
+                      page.wait_for_timeout(1500)   # let charts settle
+                      page.screenshot(path=out, full_page=True)
+                      print("shot", out)
+                  ctx.close()
+              browser.close()
+          PYEOF
+
+      - name: Commit screenshots
+        run: |
+          set -euo pipefail
+          git config user.name "results-bot"
+          git config user.email "results-bot@users.noreply.github.com"
+          git add results/screenshots/
+          if git diff --cached --quiet; then echo "nothing to commit"; exit 0; fi
+          git commit -m "screenshots: explorer pages at 1440px + 390px [run ${{ github.run_id }}]"
+          git -c rebase.autoStash=true pull --rebase origin main || true
+          git push
+
+      - name: Upload screenshots artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: explorer-screenshots-${{ github.run_id }}
+          path: results/screenshots/
+          retention-days: 14

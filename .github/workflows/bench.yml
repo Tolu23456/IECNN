@@ -1,0 +1,101 @@
+# Speed benchmark (speed goal C1, 2026-11-14): times N real training steps of
+# a config on the Actions runner and commits results/bench_<tag>.json with
+# s/step, tok/s, projected wall-to-600-steps, and eval overhead.
+#
+# Use it to A/B a speed optimization: dispatch twice, once with the baseline
+# config/overlay and once with the variant, and compare
+# `s_per_step_median` + `projected_wall_600_steps_min`.
+name: bench
+on:
+  workflow_dispatch:
+    inputs:
+      config:
+        description: "Config file under configs/ to benchmark"
+        default: "e1_weights_passes_vocab2.yaml"
+      overlay:
+        description: "Optional overlay config for the variant under test"
+        default: ""
+      tag:
+        description: "Short label for the variant (results/bench_<tag>.json)"
+        default: "baseline"
+      steps:
+        description: "Timed steps (after warmup)"
+        default: "40"
+      warmup:
+        description: "Untimed warmup steps"
+        default: "5"
+      seed:
+        description: "Seed"
+        default: "0"
+
+permissions:
+  contents: write
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install PyTorch (CPU) + requirements
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-torch.txt
+          python -m pip install -r requirements.txt
+
+      # ---- corpus: rebuild data/*.txt on the runner (same as train.yml) ----
+      - name: Prepare corpus
+        env:
+          CONFIG: ${{ github.event.inputs.config }}
+          OVERLAY: ${{ github.event.inputs.overlay }}
+        run: |
+          set -euo pipefail
+          if [ -f data/train.txt ] && [ -f data/val.txt ]; then echo "present"; exit 0; fi
+          python - << 'PYEOF'
+          import os
+          from config import load_config
+          from data.prepare import prepare_all
+          overlays = [os.environ["OVERLAY"]] if os.environ["OVERLAY"] else []
+          cfg = load_config("configs/" + os.environ["CONFIG"], *overlays)
+          info = prepare_all(cfg)
+          for name, d in info["parts"].items():
+              print(name, d["chars"], d["sha256"][:16])
+          PYEOF
+
+      - name: Run benchmark
+        env:
+          CONFIG: ${{ github.event.inputs.config }}
+          OVERLAY: ${{ github.event.inputs.overlay }}
+          TAG: ${{ github.event.inputs.tag }}
+          STEPS: ${{ github.event.inputs.steps }}
+          WARMUP: ${{ github.event.inputs.warmup }}
+          SEED: ${{ github.event.inputs.seed }}
+        run: |
+          set -euo pipefail
+          OVERLAY_ARG=""
+          if [ -n "$OVERLAY" ]; then OVERLAY_ARG="--overlay $OVERLAY"; fi
+          python scripts/bench.py --config "configs/$CONFIG" $OVERLAY_ARG \
+            --tag "$TAG" --steps "$STEPS" --warmup "$WARMUP" --seed "$SEED"
+
+      - name: Commit bench result
+        run: |
+          set -euo pipefail
+          git config user.name "results-bot"
+          git config user.email "results-bot@users.noreply.github.com"
+          git add results/bench_*.json
+          if git diff --cached --quiet; then echo "nothing to commit"; exit 0; fi
+          git commit -m "bench: ${{ github.event.inputs.tag }} (${{ github.event.inputs.config }}) [run ${{ github.run_id }}]"
+          git -c rebase.autoStash=true pull --rebase origin main || true
+          git push
+
+      - name: Upload bench artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-${{ github.event.inputs.tag }}-${{ github.run_id }}
+          path: results/bench_*.json
+          retention-days: 14
