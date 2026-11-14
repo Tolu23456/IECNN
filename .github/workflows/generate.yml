@@ -144,7 +144,7 @@ jobs:
           printf '%s' "$PROMPT" > /tmp/prompt.txt
           EXPERT_FLAG=""
           if [ "$EXPERT" = "true" ]; then EXPERT_FLAG="--expert-sampling"; fi
-          CFG="${ARTIFACT%%-seeds-*}.yaml"   # fallback for timeout-killed chunks
+          CFG="${ARTIFACT%%-seeds-*}"   # already ends in .yaml; fallback for killed chunks
           python scripts/generate.py \
             --ckpt-dir "$CKPT_DIR" \
             --vocab "$VOCAB" \

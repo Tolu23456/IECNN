@@ -130,8 +130,9 @@ jobs:
           echo "ckpt dir: $CKPT_DIR"
           RUN=$(basename "$CKPT_DIR")
           # config fallback for timeout-killed chunks (no config_used.json):
-          # the artifact name embeds the config file ("cfg.yaml-seeds-0-sfx")
-          CFG="${ARTIFACT%%-seeds-*}.yaml"
+          # the artifact name embeds the config file ("cfg.yaml-seeds-0-sfx");
+          # the config part already ends in ".yaml" — do NOT append another
+          CFG="${ARTIFACT%%-seeds-*}"
           echo "config fallback: configs/$CFG"
           python scripts/eval_checkpoint.py \
             --ckpt-dir "$CKPT_DIR" \
