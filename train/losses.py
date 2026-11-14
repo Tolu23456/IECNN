@@ -65,7 +65,7 @@ def decorrelation_penalty(dot_log_probs: torch.Tensor, final_log_probs: torch.Te
                           centered * nu[..., None]) / denom      # [N, N]
     var = cov_ij.diagonal().clamp(min=1e-12)
     std = var.sqrt()
-    rho = cov_ij / (std[None, :] * std[:, :] + 1e-12)
+    rho = cov_ij / (std[None, :] * std[:, None] + 1e-12)
     mask = torch.triu(torch.ones(dots, dots), diagonal=1).bool()
     penalty = torch.relu(rho[mask]).mean()
     if not torch.isfinite(penalty):
