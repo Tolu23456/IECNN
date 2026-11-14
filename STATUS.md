@@ -2,6 +2,49 @@
 
 Newest entry at the top.
 
+## 2026-11-14 (~11:45) — Speed goal: 2.36× landed (bf16 + consensus fast paths); E6 like-for-like audit
+
+**Goal context**: "20× faster and 20× better" mapped (DECISIONS.md C6) — 20× bpc is
+physically impossible (best 2.27685; 20× = 0.11, below English entropy floor), so the
+work is: (C1–C3) benchmark harness + ≥3 merged optimizations ✅, (C4) minutes-scale
+600-step runs, (C5) corpus-verified full-val bpc ≤ 2.15.
+
+**Bench harness** (`scripts/bench.py` + `bench.yml` dispatch, results/bench_*.json
+committed, vocab2-class / batch 16 / seq 256 / V=2048, same config throughout):
+
+| bench | s/step | tok/s | proj. 600-step wall | vs baseline |
+|---|---|---|---|---|
+| baseline (8ed2490) | 12.81 | 319 | 131.8 min | 1.00× |
+| opt1 fp32: consensus fast paths (9c0e077) | 12.33 | 332 | 127.6 min | 1.04× |
+| opt1+2+3 bf16 autocast + batched eval (9c0e077) | **5.43** | **756** | **58.3 min** | **2.36×** |
+| opt4 chunked consensus (in flight) | — | — | — | — |
+
+Merged optimizations (all bit-guarded by tests, defaults unchanged → results identical):
+1. Consensus fast paths — JS identity `JS = H(m) − ½(H(p)+H(q))` reusing log_pi, matmul
+   pooling (−3.7% alone in fp32).
+2. `training.precision: bf16` — CPU autocast around forward+loss; default fp32 stays
+   bit-identical; evals always fp32.
+3. Batched eval forwards (`IECNN_EVAL_BATCH`, default 4).
+4. Cache-hot chunked consensus (`IECNN_CONS_CHUNK`, default 64) — big `[B,T,N,V]`
+   temporaries per-chunk only; under bf16 the step is memory-bound, so this is the next
+   lever. (First version had a real bug — `log_final` grabbed the chunk-layout `[f,V]`
+   tensor instead of `[B,T,V]`; caught by CI shape tests, fixed in e1e0ad7.)
+
+Eval-pair timing is noisy across runner instances (34.5 vs 43.6 s) — `bench.yml` now
+takes `env_extra` (31952fd) for same-runner A/Bs: EVAL_BATCH=1 vs 4 and CONS_CHUNK
+16/32/128 sweeps are queued.
+
+**E6 like-for-like audit (identical 255 positions, E6@600 vs E1@540)**: the verifier
+extracts far more of the base's knowledge (extraction 16.7→36.8%, pooled top-1
+2.35→2.75%, outvote 31.4→16.9%) BUT the committee has collapsed — oracle top-1
+14.1→7.5%, oracle top-5 33.7→19.6% (overlap5 0.58→0.74: bases agree too much).
+λ_c diversity is the E6-iteration priority. Prior verdict stands: consensus-v2 bpc tie
+at 600 steps (2.84467 vs 2.84406) for 43% more wall/step.
+
+E6 pilot v2 corpus-verified: **2.83524 @600** (best step 600, tau0 0.941). The
+11:30 generation run on the pilot model (commit 1c56262) was a legitimate generate.yml
+dispatch — output still near-gibberish at step 540, as expected.
+
 ## 2026-11-14 (~09:30) — vocab4 pilot trained OK (commit step died on pre-fix bug); results recovered from artifact
 
 - **vocab4 @8192 pilot**: wall cap at 360 steps, best full-val **2.6568 @300**
