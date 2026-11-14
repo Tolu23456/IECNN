@@ -67,6 +67,7 @@ class Region(nn.Module):
             share_pass_params=self.share_pass_params,
             seed=1000 + region_index,
             fast_math=bool(m.get("fast_dot_math", True)))
+        self.dots.head_layout = str(m.get("head_layout", "shared_gemm"))
         self.w_k = nn.Linear(d, d_q, bias=False)
         self.w_v = nn.Linear(d, d_v, bias=False)
         self.rel_emb = nn.Embedding(self.span, d_q)

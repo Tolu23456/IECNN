@@ -1,0 +1,6 @@
+# A/B overlay: legacy head layout ([N, f, V] GEMM + permute copy) for pairing
+# against the opt-6 shared-GEMM head ([f, N, V] written directly, no copy).
+# Both sides run compiled consensus; only the head layout differs.
+base: overlay_bf16_compile.yaml
+model:
+  head_layout: legacy

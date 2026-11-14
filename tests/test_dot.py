@@ -145,3 +145,40 @@ def test_label_free_signals_identical_with_labels_hidden():
                     out2["region_outputs"][0]["per_pass"]):
         assert torch.equal(a["weights"], b["weights"]), "weights used the label"
     assert torch.equal(out1["final_log_probs"], out2["final_log_probs"])
+
+
+def test_head_layouts_agree_and_default_is_shared_gemm():
+    """opt-6 head layouts: 'shared_gemm' (tied-head GEMM writes [f, N, V]
+    directly — no permute copy of the [., N, V] head output) and 'legacy'
+    ([N, f, V] + permute) must produce the same log_pi / gamma / trust to
+    fp32 GEMM-reassociation tolerance, and shared_gemm must be the default."""
+    from models.dot import DotPopulation
+
+    g = torch.Generator().manual_seed(7)
+    common = dict(n_dots=4, d=20, d_q=10, d_v=16, d_s=14, vocab_size=48,
+                  message_dim=0, n_passes=2, share_pass_params=True)
+
+    new = DotPopulation(seed=9, fast_math=True, **common)
+    old = DotPopulation(seed=9, fast_math=True, **common)
+    old.head_layout = "legacy"
+    old.load_state_dict(new.state_dict())
+    new.eval(); old.eval()
+
+    b, t, w = 2, 6, 4
+    wind_k = torch.randn(b, t, w, 10, generator=g)
+    wind_v = torch.randn(b, t, w, 16, generator=g)
+    valid = torch.ones(t, w, dtype=torch.bool)
+    h_pool = torch.randn(b, t, 4, 14, generator=g)
+    err = torch.randn(b, t, 4, 3, generator=g)
+    state = torch.randn(b, t, 4, 14, generator=g)
+    emb = torch.randn(48, 20, generator=g)
+
+    o_new = new(wind_k, wind_v, valid, h_pool, err, 0, None, state, emb)
+    o_old = old(wind_k, wind_v, valid, h_pool, err, 0, None, state, emb)
+    assert new.head_layout == "shared_gemm"
+    for a, b_ in ((o_new.log_pi, o_old.log_pi),
+                  (o_new.gamma, o_old.gamma),
+                  (o_new.trust_term, o_old.trust_term),
+                  (o_new.state, o_old.state)):
+        assert torch.allclose(a, b_, atol=1e-5, rtol=1e-5), \
+            (a - b_).abs().max().item()

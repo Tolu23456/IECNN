@@ -89,6 +89,11 @@ class DotPopulation(nn.Module):
         self.dynamic_query = dynamic_query
         self.shared = share_pass_params
         self.fast_math = fast_math
+        # speed opt 6: "shared_gemm" (default) = tied-head GEMM writes the
+        # [f, N, V] layout directly (no permute copy of the [., N, V] head
+        # output); "legacy" = the pre-opt-6 [N, f, V] + permute path, kept
+        # for the paired A/B bench and as a fallback.
+        self.head_layout = "shared_gemm"
         self.in_dim = gru_input_dim(d_v, d_s, message_dim)
 
         p_layers = 1 if share_pass_params else n_passes   # stacked per-pass depth
@@ -259,11 +264,24 @@ class DotPopulation(nn.Module):
         s_new = (1.0 - z) * n_t + z * s_f                               # [f, N, d_s]
 
         # ---- heads --------------------------------------------------------
-        e_state = torch.bmm(s_new.transpose(0, 1),                      # [N, f, d_s]
-                            self._sel(round_idx, self.p_out))           # [N, d_s, d]
-        logits = torch.matmul(e_state, emb_table.t())                   # [N, f, V]
-        log_pi = F.log_softmax(logits, dim=-1).permute(1, 0, 2)         # [f, N, V]
-        log_pi = log_pi.reshape(b, t, n, -1)                            # [B, T, N, V]
+        # speed opt 6 (Tolu's "don't move data around" hint): with
+        # head_layout="shared_gemm" the tied-head GEMM writes the [f, N, V]
+        # layout directly — the legacy path wrote [N, f, V] and then paid a
+        # FULL permute+reshape copy of the [B, T, N, V] log-probs (~134 MB in
+        # bf16 at the bench shape) on every region-pass, forward AND
+        # backward. The small [., ., d_s]-scale transpose stays; the big
+        # tensor is only ever written once, by the GEMM, in final layout.
+        # Same math; only GEMM reassociation differs (last bits).
+        e_state = torch.bmm(s_new.transpose(0, 1),                     # [N, f, d_s]
+                            self._sel(round_idx, self.p_out))          # [N, d_s, d]
+        if self.head_layout == "shared_gemm":
+            e_state = e_state.transpose(0, 1).reshape(f * n, self.d)   # small copy
+            logits = e_state.matmul(emb_table.t())                     # [f*N, V]
+            log_pi = F.log_softmax(logits, dim=-1).reshape(b, t, n, -1)  # view only
+        else:
+            logits = torch.matmul(e_state, emb_table.t())              # [N, f, V]
+            log_pi = F.log_softmax(logits, dim=-1).permute(1, 0, 2)    # [f, N, V]
+            log_pi = log_pi.reshape(b, t, n, -1)                       # [B, T, N, V]
         gamma = torch.einsum("fnd,nd->fn", s_new, self._sel(round_idx, self.c_w)) \
             + self._sel(round_idx, self.c_b).unsqueeze(0)
         trust = torch.einsum("fnd,nd->fn", s_new, self._sel(round_idx, self.g_w)) \
