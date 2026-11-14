@@ -17,7 +17,7 @@ committed, vocab2-class / batch 16 / seq 256 / V=2048, same config throughout):
 | baseline (8ed2490) | 12.81 | 319 | 131.8 min | 1.00× |
 | opt1 fp32: consensus fast paths (9c0e077) | 12.33 | 332 | 127.6 min | 1.04× |
 | opt1+2+3 bf16 autocast + batched eval (9c0e077) | **5.43** | **756** | **58.3 min** | **2.36×** |
-| opt4 chunked consensus (in flight) | — | — | — | — |
+| opt4 chunked consensus (default 64) | 10.13 | 406 | 102.7 min | 0.79× — SLOWDOWN, default now off (40d029e) |
 
 Merged optimizations (all bit-guarded by tests, defaults unchanged → results identical):
 1. Consensus fast paths — JS identity `JS = H(m) − ½(H(p)+H(q))` reusing log_pi, matmul
@@ -25,14 +25,23 @@ Merged optimizations (all bit-guarded by tests, defaults unchanged → results i
 2. `training.precision: bf16` — CPU autocast around forward+loss; default fp32 stays
    bit-identical; evals always fp32.
 3. Batched eval forwards (`IECNN_EVAL_BATCH`, default 4).
-4. Cache-hot chunked consensus (`IECNN_CONS_CHUNK`, default 64) — big `[B,T,N,V]`
-   temporaries per-chunk only; under bf16 the step is memory-bound, so this is the next
-   lever. (First version had a real bug — `log_final` grabbed the chunk-layout `[f,V]`
+4. Chunked consensus (`IECNN_CONS_CHUNK`, default **0 = off**) — landed, then
+   measured a 1.9× SLOWDOWN at chunk 64 (10.13 vs 5.43 s/step: the 268 MB
+   temporaries fit RAM, so slicing only breaks GEMM batching); default
+   flipped to off in 40d029e, knob kept for GB-scale blocks. Thread-count
+   A/B (bf16 + threads 4) is the next cheap lever being measured. (First version had a real bug — `log_final` grabbed the chunk-layout `[f,V]`
    tensor instead of `[B,T,V]`; caught by CI shape tests, fixed in e1e0ad7.)
 
-Eval-pair timing is noisy across runner instances (34.5 vs 43.6 s) — `bench.yml` now
-takes `env_extra` (31952fd) for same-runner A/Bs: EVAL_BATCH=1 vs 4 and CONS_CHUNK
-16/32/128 sweeps are queued.
+Eval-pair timing is noisy across runner instances (19.3 vs 43.6 s for identical
+code) — `bench.yml` takes `env_extra` (31952fd) for same-runner A/Bs: CONS_CHUNK
+16/32/128 and EVAL_BATCH=1 benches dispatched; bf16+threads-4 overlay queued.
+
+**Provenance note (judge, Round 1)**: the 2.27685 bpc "vocab3 plateau" figure and
+the other vocab-curve numbers (3.20294 / 2.59667 / 2.44863) are the training
+runs' in-loop eval values over `training.eval_chars` = 100,000 chars, NOT
+full-validation scores. A full-val re-score of the vocab3 warmstart checkpoint
+(best step 1680) has been dispatched (eval.yml, val sha verified against the
+run's split_info) — its JSON will be the corpus-verified anchor for C5.
 
 **E6 like-for-like audit (identical 255 positions, E6@600 vs E1@540)**: the verifier
 extracts far more of the base's knowledge (extraction 16.7→36.8%, pooled top-1

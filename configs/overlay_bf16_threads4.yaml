@@ -1,0 +1,7 @@
+# A/B overlay: bf16 + 4 torch threads (the 2026-11-01 threads=2 optimum was
+# measured in the fp32 GEMM-bound world; under bf16 the step is bandwidth-
+# bound, so more workers may stream memory better — measured, not assumed).
+base: overlay_bf16.yaml
+model: {}
+training:
+  torch_threads: 4
