@@ -592,6 +592,7 @@ def _clamp_playground(body):
                   "max_new_tokens": int(num("max_new_tokens", 200, 1, 800)),
                   "temperature": num("temperature", 0.8, 0.1, 2.0),
                   "top_k": int(num("top_k", 40, 0, 500)),
+                  "top_p": num("top_p", 1.0, 0.05, 1.0),
                   "seed": int(num("seed", 0, -2 ** 31, 2 ** 31))}
     except ValueError as e:
         return None, str(e)
@@ -622,7 +623,8 @@ def api_generate(body: dict):
         "prompt": params["prompt"], "artifact": params["artifact"],
         "max_new_tokens": str(params["max_new_tokens"]),
         "temperature": str(params["temperature"]),
-        "top_k": str(params["top_k"]), "seed": str(params["seed"])}}
+        "top_k": str(params["top_k"]), "seed": str(params["seed"]),
+        "top_p": str(params["top_p"])}}
     try:
         code, _ = _gh_request(url, method="POST", body=payload, token=token)
     except Exception as e:                                   # noqa: BLE001

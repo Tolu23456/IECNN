@@ -26,6 +26,9 @@ on:
         default: "0.8"
       top_k:
         default: "40"
+      top_p:
+        description: "nucleus sampling mass threshold (1.0 = off)"
+        default: "1.0"
       seed:
         default: "0"
       expert_sampling:
@@ -128,6 +131,7 @@ jobs:
           MAXNEW: ${{ github.event.inputs.max_new_tokens }}
           TEMP: ${{ github.event.inputs.temperature }}
           TOPK: ${{ github.event.inputs.top_k }}
+          TOPP: ${{ github.event.inputs.top_p }}
           SEED: ${{ github.event.inputs.seed }}
           VOCAB: ${{ github.event.inputs.vocab }}
           EXPERT: ${{ github.event.inputs.expert_sampling }}
@@ -153,6 +157,7 @@ jobs:
             --max-new-tokens "$MAXNEW" \
             --temperature "$TEMP" \
             --top-k "$TOPK" \
+            --top-p "$TOPP" \
             --seed "$SEED" \
             $EXPERT_FLAG \
             --out "results/generation/$SLUG.json"

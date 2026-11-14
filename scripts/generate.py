@@ -29,6 +29,24 @@ from train.train import build_model                    # noqa: E402
 from utils import load_run_meta                        # noqa: E402
 
 
+def nucleus_mask(lp: torch.Tensor, top_p: float) -> torch.Tensor:
+    """Nucleus (top-p) filter on log-probs (Holtzman et al. 2019): keep the
+    smallest set of tokens whose cumulative probability reaches top_p, mask
+    the rest to -inf. Complementary to top-k (apply after it). Pure function
+    so tests pin the semantics."""
+    if top_p >= 1.0:
+        return lp
+    probs = lp.softmax(-1)
+    sorted_p, sorted_idx = probs.sort(descending=True)
+    cum = sorted_p.cumsum(-1)
+    # keep tokens up to AND INCLUDING the first that crosses top_p
+    keep = (cum - sorted_p) < top_p
+    keep[..., 0] = True                       # always keep the top-1
+    mask = torch.zeros_like(probs, dtype=torch.bool)
+    mask.scatter_(-1, sorted_idx, keep)
+    return lp.masked_fill(~mask, float("-inf"))
+
+
 def _next_log_probs(model, out: dict, kind: str) -> torch.Tensor:
     """Last-position next-token log-probs for either model family.
 
@@ -51,6 +69,9 @@ def main() -> None:
     ap.add_argument("--temperature", type=float, default=0.8)
     ap.add_argument("--top-k", type=int, default=40,
                     help="0 = sample from the full distribution")
+    ap.add_argument("--top-p", type=float, default=1.0,
+                    help="nucleus sampling: keep the smallest token set with "
+                         "cumulative probability mass >= top_p; 1.0 = off")
     ap.add_argument("--expert-sampling", action="store_true",
                     help="IECNN only: expert-of-the-moment decoding — sample "
                          "the dot by its consensus trust (squared weights, "
@@ -138,6 +159,9 @@ def main() -> None:
                 k = min(args.top_k, lp.shape[-1])
                 kth = lp.topk(k).values[-1]
                 lp = lp.clamp_max(kth)
+            if args.top_p < 1.0:
+                # nucleus: see nucleus_mask (applied after top-k)
+                lp = nucleus_mask(lp, args.top_p)
             probs = lp.softmax(-1)
             nxt = int(torch.multinomial(probs, 1))
             token_logprobs.append(float(lp0[nxt].item()))
@@ -160,6 +184,7 @@ def main() -> None:
                 prompt_text.encode("utf-8")).hexdigest(),
             "temperature": args.temperature,
             "top_k": args.top_k,
+            "top_p": args.top_p,
             "expert_sampling": bool(args.expert_sampling),
             "seed": args.seed,
             "seq_len": seq_len,

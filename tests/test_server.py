@@ -1152,6 +1152,8 @@ def test_playground_validation_clamps():
                 ({"prompt": "ok", "temperature": 2.5}, "temperature"),
                 ({"prompt": "ok", "temperature": 0.05}, "temperature"),
                 ({"prompt": "ok", "top_k": 501}, "top_k"),
+                ({"prompt": "ok", "top_p": 0.01}, "top_p"),
+                ({"prompt": "ok", "top_p": 1.5}, "top_p"),
                 ({"prompt": "ok", "artifact": "bad/artifact\nheader"}, "artifact"),
                 ("not-a-dict", "JSON object"),
             ]
@@ -1174,7 +1176,7 @@ def test_playground_validation_clamps():
                 "prompt": "p", "artifact":
                 "e1_weights_passes_pilot.yaml-seeds-0-pilot",
                 "max_new_tokens": "800", "temperature": "2.0",
-                "top_k": "0", "seed": "-5"}
+                "top_k": "0", "seed": "-5", "top_p": "1.0"}
             assert fake.token not in raw.decode()       # token never leaks
         finally:
             srv.shutdown()
