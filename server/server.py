@@ -380,7 +380,7 @@ def api_run(name: str):
     if not info:
         return {"error": f"could not parse {name}.csv", "status": 500}
     rung, seed = _run_name_meta(p)
-    info["rung"], info["seed"] = rung, seed
+    info["rung"], info["seed"], info["name"] = rung, seed, p.stem
     return info
 
 
@@ -1157,6 +1157,61 @@ def api_gates():
 _RAW_PREFIXES = ("results/", "configs/", "checkpoints/", "UBM/", "data/")
 
 
+# --------------------------------------------- chart URL state (step 2) -----
+# Canonical, executable spec for the runs-page chart state that travels in
+# the URL hash query (?s=..&y=..&x=..&r=..). server/static/app.js carries an
+# identical JS mirror (parseChartState / encodeChartState) — KEEP BOTH IN
+# SYNC; the round trip is asserted in tests/test_server.py.
+
+_CHART_Y = ("lin", "log")
+_CHART_X = ("steps", "tokens", "wall", "compute")
+_CHART_DEFAULTS = {"s": 0, "y": "lin", "x": "steps"}
+
+
+def chart_state_parse(qs: str):
+    """Parse a chart-state query string into a validated dict.
+
+    Keys: s (moving-average window, int 0..5000, 0 = off), y (lin|log),
+    x (steps|tokens|wall|compute), r (comma-separated run names).
+    Invalid or unknown values are dropped, never errors: chart state is a
+    preference, not an attack surface.
+    """
+    st = dict(_CHART_DEFAULTS)
+    runs = []
+    for pair in (qs or "").split("&"):
+        if "=" not in pair:
+            continue
+        k, v = pair.split("=", 1)
+        if k == "s":
+            try:
+                s = int(v)
+            except ValueError:
+                continue
+            if 0 <= s <= 5000:
+                st["s"] = s
+        elif k == "y" and v in _CHART_Y:
+            st["y"] = v
+        elif k == "x" and v in _CHART_X:
+            st["x"] = v
+        elif k == "r":
+            runs = [t for t in v.split(",")[:64]
+                    if re.fullmatch(r"[\w.\-]{1,120}", t)]
+    return {**st, "r": runs}
+
+
+def chart_state_encode(st: dict) -> str:
+    """Canonical encoding: s, y, x always, r only when non-empty."""
+    norm = chart_state_parse("&".join(
+        f"{k}={v}" for k, v in st.items()
+        if k != "r" and v is not None))
+    norm["r"] = [t for t in (st.get("r") or [])
+                 if re.fullmatch(r"[\w.\-]{1,120}", t)][:64]
+    out = [f"s={norm['s']}", f"y={norm['y']}", f"x={norm['x']}"]
+    if norm["r"]:
+        out.append("r=" + ",".join(norm["r"]))
+    return "&".join(out)
+
+
 def _raw_file(rel: str):
     """Read-only evidence endpoint: serve a committed text file by repo-
     relative path under an allow-listed prefix. Returns (status, text|err)."""
@@ -1274,6 +1329,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send_json(*ROUTES["profiles"]())
             if path == "/api/gates":
                 return self._send_json(200, api_gates())
+            if path == "/api/chart_state":
+                st = chart_state_parse(query)
+                return self._send_json(200, {
+                    "query": query, "state": st,
+                    "encoded": chart_state_encode(st)})
             if path == "/api/config_used":
                 return self._send_json(200, api_config_used())
             if path == "/api/raw":

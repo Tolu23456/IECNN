@@ -281,6 +281,14 @@ button.chip:hover { border-color: var(--accent2); }
 .card.mutedcard { opacity: .55; }
 .card.warncard { opacity: .8; border-color: var(--accent2); max-width: 460px; }
 
+/* chart toolbar (runs page) */
+.charttools { margin-left: auto; display: flex; gap: 6px; }
+button.mini { font-size: 11.5px; padding: 2px 9px; border-radius: 6px;
+  color: var(--muted); }
+button.mini:hover, button.mini.on { color: var(--text); border-color: var(--accent); }
+button.mini.on { background: #4fc3f71a; }
+.toolbar input[type="range"] { width: 130px; vertical-align: middle; }
+
 /* playground */
 textarea { display: block; width: 100%; max-width: 980px; box-sizing: border-box;
   background: var(--panel); color: var(--text); border: 1px solid var(--line);

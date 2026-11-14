@@ -578,6 +578,67 @@ def test_eval_val_sha_provenance_helpers():
     assert server_mod._eval_val_sha({}) is None
 
 
+# ------------------------------------------- chart URL state (step 2) -------
+def test_chart_state_round_trip():
+    """encode ∘ parse round-trips every valid state; parse validates inputs."""
+    P, E = server_mod.chart_state_parse, server_mod.chart_state_encode
+    cases = [
+        {"s": 0, "y": "lin", "x": "steps", "r": []},
+        {"s": 7, "y": "log", "x": "wall", "r": []},
+        {"s": 50, "y": "lin", "x": "tokens", "r": ["train_b0_gru_pilot_seed0"]},
+        {"s": 1, "y": "log", "x": "compute",
+         "r": ["train_a-b.c_1", "train_x_2"]},
+    ]
+    for st in cases:
+        assert P(E(st)) == st, st
+        assert E(P(E(st))) == E(st), st
+    # invalid values fall back to defaults instead of erroring
+    assert P("s=abc") == {"s": 0, "y": "lin", "x": "steps", "r": []}
+    assert P("s=-3")["s"] == 0
+    assert P("s=999999")["s"] == 0
+    assert P("y=hue")["y"] == "lin"
+    assert P("x=flops")["x"] == "steps"
+    assert P("r=bad/name,,ok_name")["r"] == ["ok_name"]
+    assert P("junk&y=log&s=3") == {"s": 3, "y": "log", "x": "steps", "r": []}
+    assert P("") == {"s": 0, "y": "lin", "x": "steps", "r": []}
+    # the endpoint exposes the same canonical round trip over HTTP
+    srv, base = _start()
+    try:
+        st_, body = _get(base + "/api/chart_state?s=12&y=log&x=wall"
+                         "&r=train_e1_weights_passes_eqc_seed0")
+        assert st_ == 200
+        d = json.loads(body)
+        assert d["state"] == P(d["encoded"])
+        assert d["encoded"] == E(P(d["query"]))
+    finally:
+        srv.shutdown()
+
+
+def test_chart_state_spec_mirrored_in_app_js():
+    """The JS mirror must implement the same validated keys."""
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    assert "function parseChartState" in js
+    assert "function encodeChartState" in js
+    assert '["steps", "tokens", "wall", "compute"]' in js
+    assert 'localStorage.setItem(CHART_STORE' in js
+    # canonical spec lives server-side
+    src = (ROOT / "server" / "server.py").read_text(encoding="utf-8")
+    for fn in ("def chart_state_parse", "def chart_state_encode"):
+        assert fn in src, fn
+
+
+def test_chart_plugin_vendored():
+    """zoom/pan plugin + hammer are vendored files, never CDN links."""
+    p = STATIC / "chartjs-plugin-zoom.min.js"
+    assert p.exists() and p.stat().st_size > 5000, "zoom plugin must be vendored"
+    h = STATIC / "hammer.min.js"
+    assert h.exists() and h.stat().st_size > 5000
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    assert '<script src="/chartjs-plugin-zoom.min.js">' in html
+    assert '<script src="/hammer.min.js">' in html
+    assert "cdn.jsdelivr" not in html and "unpkg" not in html
+
+
 # ------------------------------------------------------------- static ------
 def test_static_pages_served():
     srv, base = _start()
@@ -585,7 +646,9 @@ def test_static_pages_served():
         for name, marker in (("index.html", b"IECNN"),
                              ("app.js", b"pageDashboard"),
                              ("style.css", b"#sidebar"),
-                             ("chart.umd.js", b"Chart.js")):
+                             ("chart.umd.js", b"Chart.js"),
+                             ("chartjs-plugin-zoom.min.js", b"chartjs-plugin-zoom"),
+                             ("hammer.min.js", b"Hammer")):
             st, body = _get(f"{base}/{name}")
             assert st == 200 and marker in body, name
         st, _ = _get(base + "/nope.js")

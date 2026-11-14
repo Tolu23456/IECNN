@@ -104,10 +104,97 @@ if (HAS_CHART) {
 const AXIS_GRID = { color: "#1c2434", tickColor: "#5b657d" };
 const AXIS_TICK = { color: "#8a95ad" };
 
+/* crosshair: thin dashed vertical line at the hovered point */
+const crosshairPlugin = {
+  id: "iecnnCrosshair",
+  afterDatasetsDraw(chart) {
+    const act = chart.tooltip && chart.tooltip.getActiveElements &&
+                chart.tooltip.getActiveElements();
+    if (!act || !act.length) return;
+    const x = act[0].element.x, { ctx, chartArea: a } = chart;
+    if (!a) return;
+    ctx.save();
+    ctx.strokeStyle = "#4fc3f799"; ctx.lineWidth = 1;
+    ctx.setLineDash([4, 3]);
+    ctx.beginPath(); ctx.moveTo(x, a.top); ctx.lineTo(x, a.bottom); ctx.stroke();
+    ctx.restore();
+  },
+};
+
+const HAS_ZOOM = typeof Chart !== "undefined" && typeof Hammer !== "undefined"
+  && !!Chart.registry && !!(Chart.registry.getPlugin &&
+    Chart.registry.getPlugin("zoom"));
+const ZOOM_OPTS = HAS_ZOOM ? {
+  zoom: { zoom: { wheel: { enabled: true, mode: "x" },
+                  pinch: { enabled: true, mode: "x" }, mode: "x" },
+          pan: { enabled: true, mode: "x" },
+          limits: { x: { min: "original", max: "original" } } },
+} : {};
+
+/* ---------------- chart state (URL hash query + localStorage) -----------
+   Canonical spec: server.py chart_state_parse/encode (round-trip tested in
+   tests/test_server.py). KEEP THIS MIRROR IN SYNC. */
+const CHART_XS = ["steps", "tokens", "wall", "compute"];
+const CHART_STORE = "iecnn.chart";
+function parseChartState(qs) {
+  const st = { s: 0, y: "lin", x: "steps", r: [] };
+  for (const pair of String(qs || "").split("&")) {
+    const eq = pair.indexOf("=");
+    if (eq < 0) continue;
+    const k = pair.slice(0, eq), v = pair.slice(eq + 1);
+    if (k === "s") {
+      const n = parseInt(v, 10);
+      if (Number.isInteger(n) && n >= 0 && n <= 5000) st.s = n;
+    } else if (k === "y" && (v === "lin" || v === "log")) st.y = v;
+    else if (k === "x" && CHART_XS.includes(v)) st.x = v;
+    else if (k === "r")
+      st.r = v.split(",").filter(t => /^[\w.\-]{1,120}$/.test(t)).slice(0, 64);
+  }
+  return st;
+}
+function encodeChartState(st) {
+  const s = (Number.isInteger(st.s) && st.s >= 0 && st.s <= 5000) ? st.s : 0;
+  const out = [`s=${s}`, `y=${st.y === "log" ? "log" : "lin"}`,
+               `x=${CHART_XS.includes(st.x) ? st.x : "steps"}`];
+  const r = (st.r || []).filter(t => /^[\w.\-]{1,120}$/.test(t)).slice(0, 64);
+  if (r.length) out.push("r=" + r.join(","));
+  return out.join("&");
+}
+/* persist smoothing/log/axis prefs (never the run selection) */
+function saveChartPrefs(st) {
+  try { localStorage.setItem(CHART_STORE, JSON.stringify(
+        { s: st.s, y: st.y, x: st.x })); } catch { /* private mode */ }
+}
+/* trailing moving average over possibly-null series */
+function movingAvg(vals, w) {
+  if (!w || w < 2) return vals;
+  const out = new Array(vals.length).fill(null);
+  const q = [];
+  let sum = 0, cnt = 0;
+  for (let i = 0; i < vals.length; i++) {
+    const v = vals[i];
+    q.push(v);
+    if (v != null && isFinite(v)) { sum += v; cnt++; }
+    if (q.length > w) {
+      const old = q.shift();
+      if (old != null && isFinite(old)) { sum -= old; cnt--; }
+    }
+    out[i] = cnt ? sum / cnt : null;
+  }
+  return out;
+}
+
 function chartBox(title, data, type = "line", opts = {}) {
   const box = h("div", { class: "chartbox" },
     h("div", { class: "ct" }, h("h3", {}, title),
       opts.sub ? h("span", { class: "sub" }, opts.sub) : null));
+  if (opts.toolbar) {
+    const tb = h("div", { class: "charttools" });
+    for (const b of opts.toolbar)
+      tb.append(h("button", { class: "mini", title: b.title || "",
+                              onclick: b.onclick }, b.label));
+    box.querySelector(".ct").append(tb);
+  }
   if (!HAS_CHART) {
     box.append(h("p", { class: "warn" }, "chart.umd.js failed to load — raw data only."));
     if (data.datasets) box.append(h("pre", {}, JSON.stringify(
@@ -120,23 +207,29 @@ function chartBox(title, data, type = "line", opts = {}) {
     ticks: { ...AXIS_TICK }, ...extra });
   requestAnimationFrame(() => {
     try {
-      new Chart(cv, { type, data, options: {
+      const chart = new Chart(cv, { type, data,
+        plugins: [crosshairPlugin],
+        options: {
         responsive: true, maintainAspectRatio: false,
         interaction: { mode: "nearest", intersect: false },
         plugins: {
           legend: { display: opts.legend !== false,
                     position: opts.legendPos || "top" },
           tooltip: opts.tooltip || undefined,
+          ...(HAS_ZOOM ? { zoom: ZOOM_OPTS.zoom } : {}),
         },
         scales: opts.scales || {
           x: axis({ type: opts.xtype || "category",
                     title: { display: !!opts.xlabel, text: opts.xlabel || "",
                              color: "#8a95ad" } }),
-          y: axis({ type: "linear",
+          y: axis({ type: opts.ytype || "linear",
                     title: { display: !!opts.ylabel, text: opts.ylabel || "",
                              color: "#8a95ad" } }),
         },
       }});
+      box._chart = chart;
+      if (HAS_ZOOM) cv.addEventListener("dblclick", () => chart.resetZoom());
+      if (opts.after) opts.after(chart);
     } catch (e) { box.append(h("p", { class: "err" }, "chart error: " + e)); }
   });
   return box;
@@ -159,17 +252,6 @@ function sparkCanvas(series, color) {
     } catch (e) { /* sparkline is decorative */ }
   });
   return wrap;
-}
-
-/* Runs live on different step grids — align every series onto the sorted
-   union of steps so multi-run charts stay honest (missing points = null). */
-function alignSteps(datasets, key) {
-  const steps = uniq(datasets.flatMap(d => d.series.step)).sort((a, b) => a - b);
-  const series = datasets.map(d => {
-    const m = new Map(d.series.step.map((s, i) => [s, d.series[key]?.[i] ?? null]));
-    return steps.map(s => (m.has(s) ? m.get(s) : null));
-  });
-  return { steps, series };
 }
 
 /* ---------------- shared state ---------------- */
@@ -362,108 +444,310 @@ async function pageDashboard(root) {
 async function pageRuns(root, preselect) {
   if (!state.runsIndex) state.runsIndex = await api("/api/runs");
   const runs = state.runsIndex.runs;
-  if (!state.sel) {
-    state.sel = new Set(runs.filter(r => /pilot/.test(r.name)).map(r => r.name));
-    if (preselect && runs.some(r => r.name === preselect)) state.sel.add(preselect);
+
+  // ---- chart state: URL hash query wins, then saved prefs, then defaults
+  const hashBody = location.hash.replace(/^#\/runs\/?/, "");
+  const [deepRun, hashQ] = hashBody.split("?");
+  const st = parseChartState(hashQ || "");
+  if (!hashQ) {                       // nothing in the URL: saved prefs
+    try {
+      const saved = JSON.parse(localStorage.getItem(CHART_STORE) || "{}");
+      st.s = Number.isInteger(saved.s) ? saved.s : 0;
+      if (saved.y === "log") st.y = "log";
+      if (CHART_XS.includes(saved.x)) st.x = saved.x;
+    } catch { /* fresh browser */ }
   }
+  // run selection: r= in the URL wins; deep-linked run joins the default set
+  if (st.r.length) state.sel = new Set(st.r.filter(n => runs.some(r => r.name === n)));
+  else if (!state.sel) {
+    state.sel = new Set(runs.filter(r => /pilot/.test(r.name)).map(r => r.name));
+    if (deepRun && runs.some(r => r.name === deepRun)) state.sel.add(deepRun);
+  }
+  const syncState = () => {           // URL + localStorage, no page rebuild
+    st.r = [...state.sel];
+    saveChartPrefs(st);
+    history.replaceState(null, "", `#/runs?${encodeChartState(st)}`);
+  };
+
   root.innerHTML = "";
   root.append(h("h1", {}, "Training runs"),
     h("p", {}, "Curves come from the committed results/*.csv. Click chips to toggle runs. ",
-      "Grad-norm columns (gn_*) only exist on runs trained after 2026-11-13 — the chart appears automatically when the selected runs have them."));
+      "Scroll to zoom a chart's x-axis, drag to pan, double-click to reset. Grad-norm columns (gn_*) only exist on runs trained after 2026-11-13 — the chart appears automatically when the selected runs have them."));
 
   const chips = h("div", { class: "chips" });
   for (const r of runs) {
     const on = state.sel.has(r.name);
-    const chip = h("span", { class: "chip" + (on ? " on" : ""), onclick: () => {
+    const chip = h("button", { class: "chip" + (on ? " on" : ""), "aria-pressed": String(on), onclick: () => {
       state.sel.has(r.name) ? state.sel.delete(r.name) : state.sel.add(r.name);
       chip.classList.toggle("on");
+      chip.setAttribute("aria-pressed", chip.classList.contains("on"));
+      syncState();
       draw();
     }}, h("span", { class: "dot", style: `background:${rungColor(r.rung)}` }),
       `${r.rung} · s${r.seed}`, h("span", { class: "n" }, `best ${fmt(r.best_val)}`));
     chips.append(chip);
   }
   root.append(chips);
+
+  // ---- global chart toolbar: smoothing · log-y · x-axis · link · CSV
+  const smoothLbl = h("span", { class: "muted" }, st.s >= 2 ? `window ${st.s}` : "off");
+  const smooth = h("input", { type: "range", min: "0", max: "50", value: String(st.s),
+    "aria-label": "smoothing window (moving average over eval points)" });
+  const yBtn = h("button", { class: "mini" + (st.y === "log" ? " on" : ""),
+    "aria-pressed": String(st.y === "log"), title: "logarithmic y-axis on the bpc charts" }, "log y");
+  const xSel = h("select", { "aria-label": "x-axis mode" },
+    ...CHART_XS.map(m => h("option", { value: m, selected: m === st.x ? "" : null },
+      m === "steps" ? "steps" : m === "tokens" ? "tokens (step × batch × seq_len)"
+      : m === "wall" ? "wall time (elapsed_s)" : "est. compute (wall-normalized)")));
+  const copyBtn = h("button", { class: "mini", title: "copy a link to this exact chart state" }, "copy link");
+  const csvBtn = h("button", { class: "mini", title: "download the visible series as CSV" }, "export CSV");
+  const resetBtn = h("button", { class: "mini", title: "reset zoom on all charts" }, "reset zoom");
+  const xNote = h("span", { class: "muted" });
+  root.append(h("div", { class: "toolbar" },
+    h("label", { class: "muted" }, "smoothing ", smooth, smoothLbl),
+    yBtn, h("label", { class: "muted" }, "x-axis ", xSel, xNote),
+    copyBtn, csvBtn, resetBtn));
+
   const plots = h("div", {});
   root.append(plots);
+  const registry = [];                        // {chartBox, title, seriesPts}
   let lastReq = 0;
+
+  const applyStateToUi = () => {
+    smooth.value = String(st.s);
+    smoothLbl.textContent = st.s >= 2 ? `window ${st.s}` : "off";
+    yBtn.classList.toggle("on", st.y === "log");
+    yBtn.setAttribute("aria-pressed", String(st.y === "log"));
+    xSel.value = st.x;
+  };
+
+  smooth.addEventListener("input", () => {
+    st.s = +smooth.value; smoothLbl.textContent = st.s >= 2 ? `window ${st.s}` : "off";
+    saveChartPrefs(st); syncState(); draw();
+  });
+  yBtn.addEventListener("click", () => {
+    st.y = st.y === "log" ? "lin" : "log"; saveChartPrefs(st); syncState(); draw();
+  });
+  xSel.addEventListener("change", () => {
+    st.x = xSel.value; saveChartPrefs(st); syncState(); draw();
+  });
+  copyBtn.addEventListener("click", async () => {
+    const url = `${location.origin}${location.pathname}#/runs?${encodeChartState({ ...st, r: [...state.sel] })}`;
+    try { await navigator.clipboard.writeText(url); copyBtn.textContent = "copied ✓"; }
+    catch { copyBtn.textContent = "copy failed"; }
+    setTimeout(() => { copyBtn.textContent = "copy link"; }, 1600);
+  });
+  resetBtn.addEventListener("click", () => {
+    for (const r of registry) { const c = r.box._chart; if (c) c.resetZoom(); }
+  });
+  csvBtn.addEventListener("click", () => {
+    const rows = ["chart,series,x,y"];
+    for (const reg of registry) {
+      if (!reg.seriesPts) continue;
+      for (const s of reg.seriesPts)
+        for (const p of s.pts)
+          rows.push(`${JSON.stringify(reg.title)},${JSON.stringify(s.label)},${p.x},${p.y}`);
+    }
+    const blob = new Blob([rows.join("\n") + "\n"], { type: "text/csv" });
+    const a = h("a", { href: URL.createObjectURL(blob),
+      download: "iecnn-curves.csv" });
+    document.body.append(a); a.click(); a.remove();
+  });
+
+  // tokens/step needs batch_size × seq_len: checkpoint config_used.json
+  // first, then the rung config from /api/arch
+  const [cfgUsed, archIdx] = await Promise.all([
+    api("/api/config_used").catch(() => ({})),
+    api("/api/arch").catch(() => null),
+  ]);
+  const tokensPerStep = d => {
+    const cu = cfgUsed[d.name || ""];
+    if (cu && cu.training && cu.model &&
+        cu.training.batch_size && cu.model.seq_len)
+      return cu.training.batch_size * cu.model.seq_len;
+    const c = archIdx && archIdx.resolved && archIdx.resolved[d.rung];
+    if (c && c.config && c.config.training && c.config.model &&
+        c.config.training.batch_size && c.config.model.seq_len)
+      return c.config.training.batch_size * c.config.model.seq_len;
+    return null;
+  };
+
   async function draw() {
     const req = ++lastReq;
+    applyStateToUi();
     const names = runs.filter(r => state.sel.has(r.name)).map(r => r.name);
     plots.innerHTML = "";
+    registry.length = 0;
     if (!names.length) { plots.append(h("p", { class: "muted" }, "no runs selected")); return; }
-    let datasets;
-    try {
-      datasets = await Promise.all(names.map(n => api(`/api/run/${n}`)));
-    } catch (e) { errbox(plots, e); return; }
+    // fetch only runs not already cached
+    const missing = names.filter(n => !state.runData[n]);
+    if (missing.length) {
+      try {
+        const got = await Promise.all(missing.map(n => api(`/api/run/${n}`)));
+        missing.forEach((n, i) => { state.runData[n] = got[i]; });
+      } catch (e) { errbox(plots, e); return; }
+    }
+    const datasets = names.map(n => state.runData[n]).filter(Boolean);
     if (req !== lastReq) return;             // a newer selection superseded us
-    datasets.forEach((d, i) => state.runData[names[i]] = d);
-    const N = names.length;
-    // main: val vs train bpc (aligned on the union step grid)
-    const aV = alignSteps(datasets, "bpc_val"), aT = alignSteps(datasets, "bpc_train");
-    plots.append(chartBox("Validation bpc (solid) vs train bpc (dashed)", {
-      labels: aV.steps,
-      datasets: datasets.flatMap((d, i) => {
-        const c = rungColor(d.rung), lbl = `${d.rung}·s${d.seed}`;
-        return [
-          { label: `val ${lbl}`, data: aV.series[i], borderColor: c,
-            pointRadius: 0, tension: 0.15, spanGaps: true },
-          { label: `train ${lbl}`, data: aT.series[i], borderColor: c,
-            borderDash: [4, 4], pointRadius: 0, tension: 0.15, spanGaps: true,
-            hidden: N > 2 },
-        ];
-      }),
-    }, "line", { ylabel: "bpc", xlabel: "step" }));
+
+    const tpsOf = Object.fromEntries(datasets.map(d => [d.name, tokensPerStep(d)]));
+    const tpsKnown = Object.values(tpsOf).every(v => v);
+    xNote.textContent =
+      st.x === "tokens" && !tpsKnown ? " — batch/seq_len unknown for a selected run; falling back to steps" : "";
+    const useX = st.x === "tokens" && !tpsKnown ? "steps" : st.x;
+
+    // x value for point i of run d under the current axis mode
+    const normMax = Math.max(1e-9, ...datasets.map(d =>
+      Math.max(1e-9, ...(d.series.elapsed_s || []).filter(v => v != null))));
+    const xOf = (d, i) => {
+      const step = d.series.step[i];
+      if (useX === "steps") return step;
+      if (useX === "tokens") return step * (tpsOf[d.name] || 0);
+      const w = (d.series.elapsed_s || [])[i];
+      if (w == null) return null;
+      return useX === "wall" ? w : w / normMax;   // est. compute (normalized)
+    };
+    const points = (d, key) => {
+      const ys = movingAvg(d.series[key] || [], st.s);
+      const pts = [];
+      for (let i = 0; i < ys.length; i++) {
+        const x = xOf(d, i), y = ys[i];
+        if (x == null || y == null || !isFinite(x) || !isFinite(y)) continue;
+        pts.push({ x, y });
+      }
+      return pts;
+    };
+    const rawPoints = (d, key) => {
+      const pts = [];
+      for (let i = 0; i < (d.series[key] || []).length; i++) {
+        const x = xOf(d, i), y = d.series[key][i];
+        if (x == null || y == null || !isFinite(x)) continue;
+        pts.push({ x, y });
+      }
+      return pts;
+    };
+    const xlabel = useX === "steps" ? "step" : useX === "tokens"
+      ? "tokens (step × batch × seq_len)" : useX === "wall"
+      ? "wall time (elapsed_s)" : "est. compute (wall-normalized)";
+
+    const mkBox = (title, seriesSpecs, ylabel, extra = {}) => {
+      // seriesSpecs: [{label, pts, rawPts?, color, dash?, hidden?, yAxisID?}]
+      const box = h("div", { class: "chartbox" });
+      const ct = h("div", { class: "ct" }, h("h3", {}, title),
+        extra.sub ? h("span", { class: "sub" }, extra.sub) : null);
+      const tb = h("div", { class: "charttools" });
+      tb.append(h("button", { class: "mini", title: "download this chart as PNG",
+        onclick: () => {
+          const c = box._chart; if (!c) return;
+          c.canvas.toBlob(b => {
+            const a = h("a", { href: URL.createObjectURL(b),
+              download: title.replace(/[^\w\-]+/g, "_") + ".png" });
+            document.body.append(a); a.click(); a.remove();
+          });
+        } }, "PNG"));
+      if (HAS_ZOOM) tb.append(h("button", { class: "mini", title: "reset zoom (or double-click the chart)",
+        onclick: () => { const c = box._chart; if (c) c.resetZoom(); } }, "⟲"));
+      ct.append(tb);
+      box.append(ct);
+      if (!HAS_CHART) {
+        box.append(h("p", { class: "warn" }, "chart.umd.js failed to load — raw data only."));
+        plots.append(box); return;
+      }
+      const cv = h("canvas", {});
+      box.append(cv);
+      // log-y only when every series value is strictly positive
+      let yType = extra.yType || "linear";
+      if (st.y === "log" && !extra.forceLinear) {
+        const all = seriesSpecs.flatMap(s => s.pts.map(p => p.y));
+        yType = (all.length && all.every(v => v > 0)) ? "logarithmic"
+          : "linear";
+        if (yType !== "logarithmic" && st.y === "log" && !extra.noLogNote)
+          box.querySelector(".ct").append(h("span", { class: "sub warn" },
+            "log y unavailable — series contains zeros"));
+      }
+      const datasetsCh = seriesSpecs.flatMap(s => {
+        const ds = [{ label: s.label, data: s.pts,
+          borderColor: s.color, backgroundColor: s.color,
+          borderDash: s.dash || [], borderWidth: s.width || 1.8,
+          pointRadius: 0, tension: 0.15, spanGaps: true,
+          hidden: !!s.hidden, yAxisID: s.yAxisID || "y" }];
+        if (s.rawPts) ds.push({ label: s.label + " (raw)", data: s.rawPts,
+          borderColor: s.color + "44", borderWidth: 1, pointRadius: 0,
+          tension: 0.15, spanGaps: true, hidden: false,
+          yAxisID: s.yAxisID || "y" });
+        return ds;
+      });
+      const scales = {
+        x: { type: "linear", grid: AXIS_GRID, border: { color: "#26304a" },
+             ticks: { ...AXIS_TICK, maxTicksLimit: 10 },
+             title: { display: true, text: xlabel, color: "#8a95ad" } },
+        y: { type: yType, grid: AXIS_GRID, border: { color: "#26304a" },
+             ticks: AXIS_TICK,
+             title: { display: true, text: ylabel, color: "#8a95ad" } },
+      };
+      if (extra.rightAxis) scales.y1 = { position: "right", type: "linear",
+        grid: { drawOnChartArea: false }, ...AXIS_GRID,
+        title: { display: true, text: extra.rightAxis, color: "#8a95ad" } };
+      requestAnimationFrame(() => {
+        try {
+          const chart = new Chart(cv, { type: "line",
+            data: { datasets: datasetsCh },
+            plugins: [crosshairPlugin],
+            options: { responsive: true, maintainAspectRatio: false,
+              interaction: { mode: "nearest", intersect: false },
+              plugins: { legend: { display: extra.legend !== false,
+                                   labels: { usePointStyle: true, boxWidth: 10 } },
+                         tooltip: extra.tooltip || undefined,
+                         ...(HAS_ZOOM ? { zoom: ZOOM_OPTS.zoom } : {}) },
+              scales } });
+          box._chart = chart;
+          if (HAS_ZOOM) cv.addEventListener("dblclick", () => chart.resetZoom());
+        } catch (e) { box.append(h("p", { class: "err" }, "chart error: " + e)); }
+      });
+      registry.push({ box, title, seriesPts: seriesSpecs.map(
+        s => ({ label: s.label, pts: s.pts })) });
+      plots.append(box);
+    };
+
+    const N = datasets.length;
+    // main: validation vs train bpc
+    mkBox("Validation bpc (solid) vs train bpc (dashed)", datasets.flatMap((d, i) => {
+      const c = rungColor(d.rung), lbl = `${d.rung}·s${d.seed}`;
+      return [
+        { label: `val ${lbl}`, pts: points(d, "bpc_val"),
+          rawPts: st.s >= 2 ? rawPoints(d, "bpc_val") : null, color: c },
+        { label: `train ${lbl}`, pts: points(d, "bpc_train"),
+          rawPts: st.s >= 2 ? rawPoints(d, "bpc_train") : null, color: c,
+          dash: [4, 4], hidden: N > 2 },
+      ];
+    }), "bpc");
     // per-pass
     const has = (d, k) => Array.isArray(d.series?.[k]) && d.series[k].some(v => v !== null);
     const pp = datasets.filter(d => has(d, "bpc_p1"));
     if (pp.length) {
-      const aP1 = alignSteps(pp, "bpc_p1"), aP2 = alignSteps(pp, "bpc_p2"),
-            aP3 = alignSteps(pp, "bpc_p3");
-      plots.append(chartBox("Per-pass bpc (later passes should beat earlier ones)", {
-        labels: aP1.steps,
-        datasets: pp.flatMap((d, i) => [
-          { label: `p1 ${d.rung}`, data: aP1.series[i], borderColor: "#7986cb",
-            pointRadius: 0, tension: .15, spanGaps: true },
-          { label: `p2 ${d.rung}`, data: aP2.series[i], borderColor: "#4fc3f7",
-            pointRadius: 0, tension: .15, spanGaps: true },
-          { label: `p3 ${d.rung}`, data: aP3.series[i], borderColor: "#ffd54f",
-            pointRadius: 0, tension: .15, spanGaps: true },
-        ]),
-      }, "line", { ylabel: "bpc", xlabel: "step" }));
+      mkBox("Per-pass bpc (later passes should beat earlier ones)", pp.flatMap(d => [
+        { label: `p1 ${d.rung}`, pts: points(d, "bpc_p1"), color: "#7986cb" },
+        { label: `p2 ${d.rung}`, pts: points(d, "bpc_p2"), color: "#4fc3f7" },
+        { label: `p3 ${d.rung}`, pts: points(d, "bpc_p3"), color: "#ffd54f" },
+      ]), "bpc");
     }
     // tau0 + weight entropy
     const ie = datasets.filter(d => has(d, "tau0"));
     if (ie.length) {
-      const aTau = alignSteps(ie, "tau0"), aEnt = alignSteps(ie, "weight_entropy");
-      plots.append(chartBox("τ0 (left) and weight entropy (right axis)", {
-        labels: aTau.steps,
-        datasets: ie.flatMap((d, i) => [
-          { label: `tau0 ${d.rung}`, data: aTau.series[i], borderColor: rungColor(d.rung),
-            yAxisID: "y", pointRadius: 0, spanGaps: true },
-          { label: `w-entropy ${d.rung}`, data: aEnt.series[i],
-            borderColor: rungColor(d.rung), borderDash: [4, 4], yAxisID: "y1",
-            pointRadius: 0, spanGaps: true },
-        ]),
-    }, "line", { scales: {
-      x: AXIS_GRID,
-      y: { ...AXIS_GRID, title: { display: true, text: "tau0" } },
-      y1: { position: "right", ...AXIS_GRID,
-            title: { display: true, text: "entropy (nats)" }, grid: { drawOnChartArea: false } } } }));
+      mkBox("τ0 (left) and weight entropy (right axis)", ie.flatMap(d => [
+        { label: `tau0 ${d.rung}`, pts: points(d, "tau0"), color: rungColor(d.rung) },
+        { label: `w-entropy ${d.rung}`, pts: points(d, "weight_entropy"),
+          color: rungColor(d.rung), dash: [4, 4], yAxisID: "y1" },
+      ]), "tau0", { rightAxis: "entropy (nats)" });
     }
     // grad norms (only when the columns exist)
     const gn = datasets.filter(d => has(d, "gn_total"));
     if (gn.length) {
-      const aGn = alignSteps(gn, "gn_total");
-      plots.append(chartBox("Pre-clip gradient norms per component", {
-        labels: aGn.steps,
-        datasets: gn.flatMap((d, i) => ["gn_emb", "gn_regions", "gn_chain", "gn_gate",
-          "gn_messages", "gn_other"].filter(k => has(d, k)).map(k => {
-            const a = alignSteps(gn, k);
-            return {
-              label: `${d.rung} ${k.slice(3)}`, data: a.series[i],
-              borderColor: rungColor(d.rung), pointRadius: 0, spanGaps: true };
-          })),
-      }, "line", { ylabel: "L2 norm", xlabel: "step" }));
+      mkBox("Pre-clip gradient norms per component", gn.flatMap(d =>
+        ["gn_emb", "gn_regions", "gn_chain", "gn_gate", "gn_messages", "gn_other"]
+          .filter(k => has(d, k)).map(k => ({
+            label: `${d.rung} ${k.slice(3)}`, pts: points(d, k),
+            color: rungColor(d.rung) }))), "L2 norm");
     }
 
     // best-point table for the selection
@@ -503,6 +787,7 @@ async function pageRuns(root, preselect) {
           h("tbody", {}, rows)));
     }
   }
+  syncState();
   await draw();
 }
 
