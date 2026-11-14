@@ -1,4 +1,9 @@
 # Rung E5: UBM checkpoint promotion on top of E4.
+# The promotion loop runs as a STANDALONE checkpoint step (not inside the
+# training loop): dispatch the `promotion` workflow on a trained checkpoint
+# artifact — it harvests region-1 agreement candidates, promotes top-K with
+# mean-of-parts init, settles the new embedding rows only, and runs the
+# held-out bpc rollback test (tombstones + restores on failure).
 base: e4_decorrelation.yaml
 name: e5_ubm_promotion
 ubm:

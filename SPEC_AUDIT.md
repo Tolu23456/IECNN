@@ -37,7 +37,7 @@ Source: `spec/IECNN_FULL_SPEC.md` (files 00–08). Status marks: ✅ built + tes
 |---|---|
 | v0 byte-level BPE (pretokenizer, NFC, digit groups, max len 32, determinism, ID stability, tombstone rollback) | ✅ `UBM/` + `tests/test_ubm.py`; vocab_v1–v4 trained, compression JSONs committed |
 | bpc fair metric everywhere | ✅ all evals |
-| v1 checkpoint promotion (candidate log → rank → create → mean-of-parts init → settle → rollback test) | 🟡 `UBM/promotion.py` `promote()` + `CandidateLog` implemented and unit-tested, but NEVER wired into a training loop — E5 never executed |
+| v1 checkpoint promotion (candidate log → rank → create → mean-of-parts init → settle → rollback test) | ✅ built 2026-11-14: `UBM/promotion.py` (CandidateLog = agreement × confidence × log(1+count); promote() with mean-of-parts init, new-rows-only settle, batch rollback → tombstone+restore) + `scripts/promote_vocab.py` driver + `promotion.yml` workflow; first real run dispatched on the vocab3 warmstart checkpoint |
 | Fertility / fairness test (Yoruba, Igbo, Hausa) | 🟡 `UBM/fertility.py` exists; no language samples collected, never run |
 
 ### Evaluation (spec 08)
@@ -48,7 +48,7 @@ Source: `spec/IECNN_FULL_SPEC.md` (files 00–08). Status marks: ✅ built + tes
 | B1 transformer baseline | 🟡 implemented + tested (`models/baselines.py`) but never trained |
 | B2 = E0 plain ensemble | ✅ trained, multi-seed, equal-compute pair (`*_eqc` configs, seeds 0–2) |
 | Ladder rungs trained | E0 ✅, E1 ✅ (deep: vocab2/3/4, warmstart, λ ablation), E2 pilot only (180 steps), E3/E4/E5 configs ready but untrained, E6/E6b beyond-spec extensions |
-| Diagnostics suite §6 (ablation damage + Gini, win map, error correlation, dispersion AUROC, calibration, region-weights-by-token-type) | ⬜ ALL EIGHT `diagnostics/*.py` are 7-line NotImplementedError stubs. Partial substitute exists: `evaluate_consensus_metrics` (pooled/oracle top-1/5, outvote rate, per-dot acc, top-5 overlap) |
+| Diagnostics suite §6 (ablation damage + Gini, win map, error correlation, dispersion AUROC, calibration, region-weights-by-token-type) | ✅ built 2026-11-14: all 8 modules implemented (`diagnostics/*.py` + `common.py` collector pinned to evaluate_bpc's accounting) with `scripts/diagnose_all.py` + `diagnostics.yml` workflow; first real run dispatched on the vocab3 warmstart checkpoint |
 | Statistical protocol (mean±std over 3 seeds) | 🟡 infra exists, applied only to B0/E0/E1-eqc |
 | Reporting template | 🟡 eval JSONs carry bpc/mode-gap/vocab-sha; no params/FLOPs fields |
 
@@ -62,8 +62,8 @@ Source: `spec/IECNN_FULL_SPEC.md` (files 00–08). Status marks: ✅ built + tes
 ## 2. Gaps, ranked by value
 
 **P0 — cheap, high value**
-1. **Implement the 8 diagnostic modules** (currently stubs) + one "diagnose-all" workflow step on the best checkpoint. One CI run then answers spec-08 §6: ablation-damage Gini, win map, error correlation, dispersion-vs-loss AUROC (spec calls this the cheapest first experiment — it decides whether halting is ever worth it), calibration curve, region weights by token type.
-2. **Wire UBM v1 promotion into training** — `promote()` works, needs a driver that logs region-1 candidates during a chunk and runs the rollback test at checkpoint boundaries (E5 rung).
+1. ~~Implement the 8 diagnostic modules~~ **DONE 2026-11-14** (`diagnose-all` workflow dispatched on the vocab3 warmstart checkpoint).
+2. ~~Wire UBM v1 promotion~~ **DONE 2026-11-14** (`promotion.yml` driver workflow dispatched on the vocab3 warmstart checkpoint).
 3. **Train B1 transformer** at matched params/FLOPs — without it there is no honest "how good is this really" anchor.
 
 **P1 — completes the ladder**
