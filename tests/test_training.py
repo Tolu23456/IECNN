@@ -126,10 +126,11 @@ def test_ladder_rung_configs_all_load():
 
 # ---- speed goal opt 2: training.precision = bf16 (2026-11-14) -------------
 def test_bf16_autocast_step_finite_and_grads_flow():
-    """One bf16-autocast forward+backward on a tiny IECNN: finite loss, every
-    parameter gets a gradient, and bf16 output is close to fp32 (opt 2 guard;
-    train.py wraps forward+loss in exactly this context when
-    training.precision == 'bf16')."""
+    """One bf16-autocast forward+backward on a tiny IECNN: finite loss, and
+    every parameter that receives a gradient in fp32 also receives a finite
+    one in bf16 (opt 2 guard; train.py wraps forward+loss in exactly this
+    context when training.precision == 'bf16'). Cross-region params with one
+    region get no gradient in EITHER precision, so fp32 is the reference."""
     from config import load_config
     from train.train import build_model
 
@@ -139,14 +140,23 @@ def test_bf16_autocast_step_finite_and_grads_flow():
     x = torch.randint(0, 64, (2, 32))
     y = torch.randint(0, 64, (2, 32))
 
+    def nll():
+        return torch.nn.functional.nll_loss(
+            model(x)["final_log_probs"].reshape(-1, 64), y.reshape(-1))
+
+    loss_fp = nll()
+    loss_fp.backward()
+    fp_grads = {n for n, p in model.named_parameters()
+                if p.grad is not None and float(p.grad.abs().sum()) > 0}
+    model.zero_grad(set_to_none=True)
+
     with torch.autocast("cpu", dtype=torch.bfloat16, enabled=True):
         out_bf = model(x)
-        loss_bf = torch.nn.functional.nll_loss(
-            out_bf["final_log_probs"].reshape(-1, 64), y.reshape(-1))
+        loss_bf = nll()
     loss_bf.backward()
     assert torch.isfinite(loss_bf)
     for name, p in model.named_parameters():
-        if p.requires_grad:
+        if p.requires_grad and name in fp_grads:
             assert p.grad is not None and torch.isfinite(p.grad).all(), \
                 f"bf16 step left no/inf gradient on {name}"
 

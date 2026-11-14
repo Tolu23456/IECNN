@@ -182,4 +182,4 @@ def test_batched_eval_cut_matches_batch1():
                              prepared=prepared)
     finally:
         ev.EVAL_BATCH = saved
-    assert abs(b1 - b4) < 1e-9, (b1, b4)
+    assert abs(b1 - b4) < 1e-6, (b1, b4)

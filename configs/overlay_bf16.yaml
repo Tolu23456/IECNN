@@ -2,5 +2,9 @@
 # A/B it against the same base config in fp32 via the bench workflow
 # (dispatch bench.yml twice: overlay empty vs this file). Default is fp32 —
 # without this overlay nothing changes, bit for bit.
+# `model: {}` is a deliberate no-op: every committed config must carry a
+# model/name key (tests/test_server.py::test_all_committed_configs_parse);
+# a `name:` here would override the base run's name on merge.
+model: {}
 training:
   precision: bf16
