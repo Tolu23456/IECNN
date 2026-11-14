@@ -2,6 +2,30 @@
 
 Newest entry at the top.
 
+## 2026-11-14 (small hours) — bpc-vs-vocab curve complete: 4096 wins again; vocab3 to-plateau dispatched
+
+- **Full-val bpc vs vocab (corpus-verified, best-step tau), E1 pilot class:**
+  512 → **3.20294** @540 · 2048 → **2.59667** @780 · 4096 → **2.44863**
+  @900. Every curve was **still descending at its wall cap**, so these are
+  lower bounds; vocab scaling keeps paying past the fertility curve's
+  flattening (fertility 2.00/2.86/3.20 chars/token). Total vocab effect:
+  **−0.75 bpc** from 512 → 4096.
+- Honest caveats: steps at cap differ (540/780/900; batch 64/16/8), and
+  tau differs (0.954/0.891/0.851). Equal-wall class holds (all 2 h).
+- **Vocab3 viz export landed** (`results/viz/e1_weights_passes_vocab2_seed0.json`,
+  255 positions, 2048 embedding points, vocab sha verified): consensus audit
+  tells the same story as @512 — pooled top-1 5/255, oracle top-1 **45/255
+  (17.6%)**, oracle top-5 72/255.
+- **E1 warm chunk 1 done**: 1200 steps, bpc **2.83855 @1200, still
+  descending** (vs pilot's 3.21328 @540); auto-chained into chunk 2
+  (run 43547215906). E0 warm chunk 2 running (2.29172 @6240 end of chunk 1).
+- **Dispatched `e1_weights_passes_vocab3_warmstart.yaml`**: E1 + vocab 4096
+  to-plateau (patience-only, constant LR, batch 8, eval every 120) — the
+  question the pilot wall-caps left open: where does the best vocab's curve
+  actually plateau? This is now the headline candidate for the ladder
+  re-baseline (all E0–E4 comparisons may need a vocab-2048/4096 re-run if
+  the effect holds — Tolu to decide).
+
 ## 2026-11-14 (night) — Pilot wave 2 landed: vocab 2048 wins big, E2 fails at pilot scale
 
 All three 2h-wall pilots completed success and were re-scored corpus-verified
