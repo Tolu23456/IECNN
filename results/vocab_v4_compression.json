@@ -1,0 +1,45 @@
+{
+ "vocab_file": "UBM/vocab_v4.json",
+ "bases": 8192,
+ "merges": 7928,
+ "first_20_merges": [
+  " t",
+  "he",
+  " a",
+  "in",
+  " the",
+  " s",
+  " w",
+  "re",
+  "nd",
+  " o",
+  "ha",
+  "ou",
+  "er",
+  "\ufffd",
+  " m",
+  " b",
+  "is",
+  "it",
+  " and",
+  "ed"
+ ],
+ "stats": [
+  {
+   "split": "train",
+   "chars": 38620418,
+   "tokens": 11028244,
+   "chars_per_token": 3.502,
+   "bits_per_char_if_uniform": 3.7122,
+   "encode_seconds": 51.9
+  },
+  {
+   "split": "val",
+   "chars": 207823,
+   "tokens": 59280,
+   "chars_per_token": 3.5058,
+   "bits_per_char_if_uniform": 3.7082,
+   "encode_seconds": 0.3
+  }
+ ]
+}
