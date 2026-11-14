@@ -200,8 +200,10 @@ jobs:
           # checkout can predate the previous chunk's results commit, so a
           # pull-before-commit aborts on "untracked working tree files would
           # be overwritten". Commit locally, then rebase onto main; if both
-          # chunks added the same results CSV, union-merge (dedupe rows by
-          # step, sort ascending) so neither chunk's rows are lost.
+          # chunks added the same results CSV, union-merge it (dedupe rows
+          # by step, freshest wins) via scripts/union_merge_csv.py — an
+          # inline heredoc here broke the shell once already (indented
+          # terminator), so the merger lives in the repo.
           git add results/
           if ! git diff --cached --quiet; then
             git commit -m "results: ${{ github.event.inputs.config }} seed ${{ matrix.seed }} [run ${{ github.run_id }}]"
@@ -214,39 +216,12 @@ jobs:
             for f in $UNMERGED; do
               case "$f" in
                 results/*.csv)
-                  python3 - "$f" <<'PYEOF'
-                  import sys
-                  from pathlib import Path
-                  p = Path(sys.argv[1])
-                  lines = p.read_text().splitlines()
-                  header, rows, seen, order = None, {}, set(), []
-                  for ln in lines:
-                      s = ln.strip()
-                      if not s or s.startswith(("<<<<<<<", "=======", ">>>>>>>")):
-                          continue
-                      if header is None and s.startswith("step"):
-                          header = s
-                          continue
-                      if s.startswith("step"):
-                          continue
-                      step = s.split(",", 1)[0]
-                      if step in seen:
-                          order.remove(step)   # keep LAST occurrence (freshest chunk)
-                      seen.add(step)
-                      order.append(step)
-                      rows[step] = s
-                  try:
-                      order.sort(key=int)
-                  except ValueError:
-                      pass
-                  p.write_text("\n".join([header] + [rows[k] for k in order]) + "\n")
-                  print(f"union-merged {sys.argv[1]}: {len(order)} rows")
-                  PYEOF
+                  python3 scripts/union_merge_csv.py "$f"
+                  git add "$f"
                   ;;
                 *) echo "unexpected conflict: $f"; exit 1;;
               esac
             done
-            git add results/
             GIT_EDITOR=true git rebase --continue
           fi
           git push

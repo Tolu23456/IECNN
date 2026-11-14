@@ -59,13 +59,17 @@ def decorrelation_penalty(dot_log_probs: torch.Tensor, final_log_probs: torch.Te
     if denom.item() <= 0:
         return penalty
     mean_k = (err * nu[..., None]).sum(dim=(0, 1)) / denom       # [N]
-    centered = err - mean_k
-    cov_ij = (centered * (centered * nu[..., None])).sum(dim=(0, 1)) / denom
+    centered = err - mean_k                                      # [B, T, N]
+    # pairwise weighted covariance: cov_ij = sum_t nu_t * centered_i * centered_j
+    cov_ij = torch.einsum("btn,btm->nm", centered,
+                          centered * nu[..., None]) / denom      # [N, N]
     var = cov_ij.diagonal().clamp(min=1e-12)
     std = var.sqrt()
     rho = cov_ij / (std[None, :] * std[:, :] + 1e-12)
     mask = torch.triu(torch.ones(dots, dots), diagonal=1).bool()
     penalty = torch.relu(rho[mask]).mean()
+    if not torch.isfinite(penalty):
+        raise FloatingPointError("decorrelation_penalty produced non-finite values")
     return penalty
 
 
