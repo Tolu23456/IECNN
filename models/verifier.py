@@ -28,7 +28,7 @@ import math
 import torch
 import torch.nn as nn
 
-N_FEATURES = 8
+N_FEATURES = 9
 
 
 class VerifierHead(nn.Module):
@@ -59,12 +59,13 @@ def verifier_features(gamma: torch.Tensor, w_prev: torch.Tensor,
                       agree: torch.Tensor, state_norm: torch.Tensor,
                       err: torch.Tensor, region_entropy: torch.Tensor,
                       pass_frac: torch.Tensor) -> torch.Tensor:
-    """Stack the per-dot feature tensor [..., N, 8].
+    """Stack the per-dot feature tensor [..., N, 9].
 
     gamma [.., N]; w_prev [.., N]; agree [.., N]; state_norm [.., N];
-    err [.., N, 3]; region_entropy [..] broadcast over N; pass_frac scalar
-    tensor broadcast everywhere. All features are O(1)-ish scale so the MLP
-    needs no normalization layer.
+    err [.., N, 3] (its three components stack as three features);
+    region_entropy [..] broadcast over N; pass_frac scalar tensor broadcast
+    everywhere. All features are O(1)-ish scale so the MLP needs no
+    normalization layer.
     """
     parts = [gamma, w_prev, agree, state_norm,
              err[..., 0], err[..., 1], err[..., 2]]

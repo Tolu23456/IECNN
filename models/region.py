@@ -91,7 +91,7 @@ class Region(nn.Module):
                            w_prev: torch.Tensor | None,
                            log_b_prev: torch.Tensor | None,
                            p: int, device) -> torch.Tensor:
-        """Per-dot features for the verifier head: [..., N, 8].
+        """Per-dot features for the verifier head: [..., N, 9].
 
         All label-free and all already computed inside the pass loop (the
         oracle only ever TRAINS the head — see train/losses.py — it is not an
@@ -169,6 +169,7 @@ class Region(nn.Module):
                             emb_table=emb_table)
             state_prev = out.state
             pi = out.log_pi.exp()
+            v_out = None
 
             if self.use_weights:
                 # loo/JS are computed ONCE here and reused for the error

@@ -57,7 +57,7 @@ def test_verifier_zero_scale_is_bit_exact_to_e1():
     with torch.no_grad():
         out = e6(x)
     assert out["per_pass_last_region"][-1]["verifier"] is not None
-    assert out["per_pass_last_region"][-1]["verifier"].shape[-1] == 8  # dots
+    assert out["per_pass_last_region"][-1]["verifier"].shape[-1] == 9  # features
 
 
 def test_verifier_scale_changes_output_and_carries_gradient():
@@ -77,12 +77,14 @@ def test_oracle_dot_loss_reaches_a_muted_dot():
     """The muted-dot fix: dot weight ~1e-4 must still get full gradient.
 
     Mimic the measured failure (dot 6 at w=0.0001): gradient through the
-    POOLED loss at that weight is ~0; the oracle loss must be ~full.
+    POOLED loss at that weight is ~0; the oracle loss must be ~full. All
+    dots share one distribution, so a fair teacher gives IDENTICAL
+    gradients to the muted dot and the leader.
     """
     torch.manual_seed(0)
     b, t, n, v = 2, 3, 8, V
-    log_pi = torch.log_softmax(torch.randn(b, t, n, v, requires_grad=True),
-                               dim=-1)
+    base = torch.randn(b, t, 1, v).log_softmax(-1)
+    log_pi = base.expand(b, t, n, v).detach().clone().requires_grad_()
     targets = torch.randint(0, v, (b, t))
     weights = torch.full((b, t, n), 1e-4)
     weights[..., 0] = 1.0 - 7e-4                      # all trust on dot 0
@@ -92,7 +94,8 @@ def test_oracle_dot_loss_reaches_a_muted_dot():
     (oracle_dot_loss(log_pi, pooled, targets, outvote_weight=3.0)).backward()
     grad_muted = log_pi.grad[..., 6, :].abs().sum()    # w=1e-4 dot
     grad_leader = log_pi.grad[..., 0, :].abs().sum()   # w~1 dot
-    assert float(grad_muted) > 0.9 * float(grad_leader)
+    assert float(grad_muted) > 0.0
+    assert torch.allclose(grad_muted, grad_leader, rtol=1e-4)
 
 
 def test_verifier_truth_target_ranks():
