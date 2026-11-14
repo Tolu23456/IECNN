@@ -1,0 +1,16 @@
+{
+ "ckpt_dir": "checkpoints/e1_weights_passes_vocab3_seed0",
+ "best_step": 900,
+ "tau0_used": 0.85117,
+ "best_full_val_bpc_at_best_tau": 2.44863,
+ "per_pass_bpc": [
+  3.10167,
+  2.70187,
+  2.44863
+ ],
+ "weight_entropy": 0.41185,
+ "hard_bpc_at_best_tau": 2.4486383555173856,
+ "mode_gap": 1e-05,
+ "bpc_train_slice": 2.55573,
+ "vocab_sha256": "067fe1c268ae624f4c2b8f6e4d11b10fe43a0a7ba38ee40d0f4b28f83d4b27bd"
+}
