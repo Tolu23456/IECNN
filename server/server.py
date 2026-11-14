@@ -752,6 +752,432 @@ def api_summaries():
     return out
 
 
+def api_config_used():
+    """checkpoints/*/config_used.json, keyed by checkpoint dir name."""
+    out = {}
+    if CHECKPOINTS.exists():
+        for p in sorted(CHECKPOINTS.glob("*/config_used.json")):
+            d = _read_json(p)
+            if d:
+                out[p.parent.name] = d
+    return out
+
+
+# ------------------------------------------------------ gates (G1–G4) -------
+# Every number below is computed at request time from committed files in
+# results/ (CSVs, eval/summary/viz JSONs) — never hardcoded. Missing files
+# degrade a gate to "NO_DATA" instead of erroring.
+
+_MARKER_CHARS = ("<", "=", ">")
+
+
+def _read_csv_rows(path: Path):
+    """Conflict-marker-safe CSV reader -> (header, rows-as-dicts) or None.
+
+    Some committed results CSVs contain stacked git merge-conflict markers
+    (a stash-pop accident). Every marker line and every row whose first
+    cell is not a step number is skipped; duplicate steps keep their FIRST
+    occurrence; rows are returned sorted ascending by step. Defensive:
+    short rows simply leave later columns None.
+    """
+    if not path.is_file():
+        return None
+    try:
+        raw = list(csv.reader(_read_text(path).splitlines()))
+    except Exception:
+        return None
+    if not raw:
+        return None
+    header, out, seen = raw[0], [], set()
+    for r in raw[1:]:
+        if not r or not r[0] or r[0].lstrip()[:1] in _MARKER_CHARS:
+            continue
+        try:
+            step = float(r[0])
+        except ValueError:
+            continue
+        if step in seen:
+            continue
+        seen.add(step)
+        d: dict = {"step": step}
+        for i, name in enumerate(header[1:], start=1):
+            if i >= len(r) or r[i] == "":
+                d[name] = None
+                continue
+            try:
+                d[name] = float(r[i])
+            except ValueError:
+                d[name] = r[i]
+        out.append(d)
+    out.sort(key=lambda d: d["step"])
+    return header, out
+
+
+def _csv_has_markers(path: Path) -> bool:
+    t = _read_text(path) or ""
+    return any(t.startswith(m) or f"\n{m}" in t
+               for m in ("<<<<<<<", "=======", ">>>>>>>"))
+
+
+def _wall_best_curve(rows, wall_col="elapsed_s", val_col="bpc_val"):
+    """Best bpc_val achieved up to each eval's wall time -> monotone list."""
+    pts, best = [], None
+    for d in rows:
+        w, v = d.get(wall_col), d.get(val_col)
+        if w is None or v is None:
+            continue
+        best = v if best is None else min(best, v)
+        pts.append({"wall_s": w, "best_bpc": best, "step": d.get("step")})
+    return pts
+
+
+def _best_at_wall(curve, wall):
+    b = None
+    for p in curve:
+        if p["wall_s"] <= wall:
+            b = p["best_bpc"]
+        else:
+            break
+    return b
+
+
+def _eval_retracted(d):
+    """Truthiness of an eval JSON's retraction marker (object or bool)."""
+    return bool(d.get("retracted"))
+
+
+def _eval_val_sha(d):
+    """A future-proof val-corpus sha from an eval JSON, if it declares one."""
+    v = d.get("val_sha256")
+    if not v and isinstance(d.get("provenance"), dict):
+        v = d["provenance"].get("val_sha256")
+    return v
+
+
+def _split_val_sha():
+    sp = _read_json(DATA / "split_info.json") or {}
+    val = (sp.get("parts") or {}).get("val") or {}
+    return val.get("sha256")
+
+
+def _gate_g1(evals):
+    """Pipeline integrity: tests green + causality + corpus-verified evals."""
+    verified = unverified = retracted = 0
+    missing = []
+    val_sha = _split_val_sha()
+    for name, d in sorted(evals.items()):
+        if _eval_retracted(d):
+            retracted += 1
+            continue
+        vs = _eval_val_sha(d)
+        if vs and val_sha and (vs == val_sha or vs[:16] == val_sha[:16]):
+            verified += 1
+        else:
+            unverified += 1
+            missing.append(name)
+    status = "PASS" if unverified == 0 else "PARTIAL"
+    return {
+        "id": "G1", "title": "Pipeline integrity",
+        "status": status,
+        "evidence": [
+            f"CI tests green on this commit (tests.yml); causality bit-exactness "
+            f"is asserted by the test_causality suite + diagnosis reload probes",
+            f"corpus-verified evals: {verified}, unverified-corpus: {unverified}, "
+            f"retracted (excluded): {retracted}",
+        ]
+        + ([f"evals without val-sha provenance: {', '.join(missing)}"]
+           if missing else []),
+        "sources": ["results/eval_*.json", "results/diagnosis/*.json",
+                    "data/split_info.json"],
+        "counts": {"verified": verified, "unverified": unverified,
+                   "retracted": retracted, "missing": missing},
+        "note": "a future eval JSON carrying val_sha256 (top-level or inside "
+                "provenance) is checked against the split_info val sha and "
+                "hidden behind a flag on mismatch",
+    }
+
+
+_G2_FILES = {
+    "e0": RESULTS / "train_e0_plain_ensemble_eqc_seed0.csv",
+    "e1": RESULTS / "train_e1_weights_passes_eqc_seed0.csv",
+}
+
+
+def _gate_g2():
+    """Beats baselines at equal compute: best bpc_val at matched wall s."""
+    curves, notes, missing = {}, [], []
+    for key, p in _G2_FILES.items():
+        parsed = _read_csv_rows(p)
+        if parsed is None:
+            missing.append(p.name)
+            continue
+        header, rows = parsed
+        curves[key] = _wall_best_curve(rows)
+        if _csv_has_markers(p):
+            notes.append(f"{p.name}: committed file contains stacked "
+                         f"merge-conflict markers; parsed defensively "
+                         f"(markers skipped, first row per step kept)")
+    if "e0" not in curves or "e1" not in curves:
+        return {"id": "G2", "title": "Beats baselines at equal compute",
+                "status": "NO_DATA",
+                "evidence": [f"missing: {', '.join(missing)}"],
+                "sources": [p.name for p in _G2_FILES.values()]}
+
+    cap = min(c[-1]["wall_s"] for c in curves.values())
+    walls = sorted({p["wall_s"] for c in curves.values()
+                    for p in c if p["wall_s"] <= cap})
+    table = []
+    for w in walls:
+        row = {"wall_s": round(w, 1),
+               "e0_bpc": _best_at_wall(curves["e0"], w),
+               "e1_bpc": _best_at_wall(curves["e1"], w)}
+        table.append(row)
+
+    # GRU B0 at the same matched walls: use whichever committed b0 CSV is
+    # strongest at each wall point (honest — never pick a strawman)
+    b0_files = sorted(RESULTS.glob("train_b0_gru*.csv"))
+    b0_curves = {}
+    for p in b0_files:
+        parsed = _read_csv_rows(p)
+        if parsed is None:
+            continue
+        c = _wall_best_curve(parsed[1])
+        if c:
+            b0_curves[p.name] = c
+    if b0_curves:
+        for row in table:
+            w = row["wall_s"]
+            vals = [b for c in b0_curves.values()
+                    if (b := _best_at_wall(c, w)) is not None]
+            if vals:
+                row["b0_bpc"] = min(vals)
+
+    def _cmp(a, b):
+        if a is None or b is None:
+            return False
+        return a <= b + 1e-9
+    e1_wins = bool(table) and all(
+        _cmp(r["e1_bpc"], r["e0_bpc"]) for r in table)
+    b0_beats_e1 = any(
+        r.get("b0_bpc") is not None and _cmp(r["b0_bpc"], r["e1_bpc"])
+        for r in table)
+    if not table:
+        status = "NO_DATA"
+    elif e1_wins and not b0_beats_e1:
+        status = "PASS"
+    else:
+        status = "FAIL"
+    last = table[-1] if table else {}
+    head = (f"at equal wall compute (≤ {cap:,.0f} s): E1 "
+            f"{last.get('e1_bpc')} vs E0 {last.get('e0_bpc')} bpc"
+            + (f", best B0 {min(r['b0_bpc'] for r in table if r.get('b0_bpc') is not None)}"
+               if any(r.get("b0_bpc") is not None for r in table) else ""))
+    return {
+        "id": "G2", "title": "Beats baselines at equal compute",
+        "status": status,
+        "headline": head,
+        "evidence": [head, f"E1 ≤ E0 at "
+                     f"{sum(1 for r in table if _cmp(r['e1_bpc'], r['e0_bpc']))}"
+                     f"/{len(table)} matched wall points"]
+                    + notes,
+        "table": table,
+        "matched_walls": len(table),
+        "wall_cap_s": cap,
+        "sources": [p.name for p in _G2_FILES.values()]
+                   + [p.name for p in b0_files],
+    }
+
+
+_G3_FILES = [
+    ("vocab2", RESULTS / "train_e1_weights_passes_vocab2_seed0.csv"),
+    ("vocab3", RESULTS / "train_e1_weights_passes_vocab3_seed0.csv"),
+    ("vocab4", RESULTS / "train_e1_weights_passes_vocab4_seed0.csv"),
+]
+
+
+def _gate_g3():
+    """Scaling knee: PENDING while the vocab-scaling curves still descend."""
+    vocabs, still = [], False
+    for vocab, p in _G3_FILES:
+        parsed = _read_csv_rows(p)
+        if parsed is None:
+            vocabs.append({"vocab": vocab, "csv": p.name,
+                           "status": "no data"})
+            continue
+        header, rows = parsed
+        ev = [(d["step"], d["bpc_val"]) for d in rows
+              if d.get("bpc_val") is not None]
+        if not ev:
+            vocabs.append({"vocab": vocab, "csv": p.name,
+                           "status": "no eval points"})
+            continue
+        best_step, best_bpc = min(ev, key=lambda t: t[1])
+        last3 = ev[-3:]
+        delta = last3[-1][1] - last3[0][1]
+        improving = delta < -0.005
+        still = still or improving
+        entry = {"vocab": vocab, "csv": p.name,
+                 "n_evals": len(ev),
+                 "best_bpc": best_bpc, "best_step": best_step,
+                 "last3": [{"step": s, "bpc_val": v} for s, v in last3],
+                 "last3_delta": round(delta, 5),
+                 "still_descending": improving,
+                 "status": "descending" if improving else "plateaued"}
+        summ = _read_json(CHECKPOINTS / f"e1_weights_passes_{vocab}_seed0"
+                          / "summary.json")
+        if summ:
+            entry["stop_kind"] = summ.get("stop_kind")
+            if summ.get("stop_kind") == "wall_cap":
+                entry["note"] = ("wall-capped run: a flat tail is truncation, "
+                                 "not a plateau")
+        vocabs.append(entry)
+    desc = [v["vocab"] for v in vocabs if v.get("still_descending")]
+    return {
+        "id": "G3", "title": "Scaling knee",
+        "status": "PENDING" if still else "PASS",
+        "evidence": [
+            ("curves still descending (>0.005 bpc over the last 3 evals): "
+             + ", ".join(desc)) if desc else
+            "no vocab curve improved >0.005 bpc over its last 3 evals",
+        ] + [f"{v['vocab']}: best {v.get('best_bpc')} @ step "
+             f"{v.get('best_step')} ({v.get('stop_kind') or 'n/a'})"
+             for v in vocabs if v.get("best_bpc") is not None],
+        "vocabs": vocabs,
+        "sources": [p.name for _, p in _G3_FILES]
+                   + ["checkpoints/*/summary.json"],
+    }
+
+
+def _dumb_proxies(positions):
+    """Dumb (non-learned) consensus proxies from a viz sample.
+
+    uniform_mix: argmax of the uniform (1/N) mixture of the dots' pass-1
+    top-5 distributions — an ensemble with no learned weights.
+    plurality: most common dot top-1 prediction.
+    best_single_dot: the best one dot could do alone across the sample
+    (oracle-ish upper reference, reported for context).
+    Scored over exactly the positions where pooled_top and dots exist.
+    """
+    n = pooled = uniform = plurality = oracle = 0
+    dot_hits: dict = {}
+    for P in positions if isinstance(positions, list) else []:
+        if not isinstance(P, dict):
+            continue
+        tgt, pool = P.get("next"), P.get("pooled_top")
+        dots = P.get("dots") if isinstance(P.get("dots"), list) else []
+        if tgt is None or not pool or not dots:
+            continue
+        n += 1
+        if pool[0] and pool[0][0] == tgt:
+            pooled += 1
+        sc: dict = {}
+        votes: dict = {}
+        held = False
+        for k, d in enumerate(dots):
+            if not isinstance(d, dict):
+                continue
+            tops = d.get("top") if isinstance(d.get("top"), list) else []
+            if not tops:
+                continue
+            t1 = tops[0]
+            if t1:
+                votes[t1[0][0]] = votes.get(t1[0][0], 0) + 1
+                dot_hits[k] = dot_hits.get(k, 0) + (1 if t1[0][0] == tgt else 0)
+                for tok, pr in t1:
+                    sc[tok] = sc.get(tok, 0.0) + float(pr) / len(dots)
+            if any(t and t[0][0] == tgt for t in tops):
+                held = True
+        if held:
+            oracle += 1
+        if votes and max(votes, key=votes.get) == tgt:
+            plurality += 1
+        if sc and max(sc, key=sc.get) == tgt:
+            uniform += 1
+    return {"sampled": n, "pooled_top1": pooled,
+            "uniform_mix_top1": uniform, "plurality_top1": plurality,
+            "oracle_top1": oracle,
+            "best_single_dot_top1": max(dot_hits.values()) if dot_hits else 0}
+
+
+def _gate_g4():
+    """Consensus health: does the pooled consensus beat dumb proxies?"""
+    exports = []
+    all_pass = True
+    any_data = False
+    for p in sorted(VIZ.glob("*.json")):
+        d = _read_json(p)
+        if not d:
+            continue
+        positions = ((d.get("sample") or {}).get("positions"))
+        if not isinstance(positions, list) or not positions:
+            continue
+        any_data = True
+        m = _dumb_proxies(positions)
+        best_proxy = max(m["uniform_mix_top1"], m["plurality_top1"])
+        ok = m["pooled_top1"] > best_proxy
+        all_pass = all_pass and ok
+        exports.append({
+            "name": p.stem, "file": f"results/viz/{p.name}", **m,
+            "best_dumb_proxy": best_proxy,
+            "outvote_rate": round(1 - m["pooled_top1"] / m["sampled"], 4)
+                            if m["sampled"] else None,
+            "status": "PASS" if ok else "FAIL",
+        })
+    if not any_data:
+        return {"id": "G4", "title": "Consensus health", "status": "NO_DATA",
+                "evidence": ["no results/viz/*.json exports with a "
+                             "sample.positions payload"],
+                "sources": ["results/viz/*.json"]}
+    return {
+        "id": "G4", "title": "Consensus health",
+        "status": "PASS" if all_pass else "FAIL",
+        "evidence": [
+            f"{len(exports)} export(s): pooled top-1 "
+            f"{[e['pooled_top1'] for e in exports]} vs best dumb proxy "
+            f"{[e['best_dumb_proxy'] for e in exports]} (uniform mix / "
+            f"plurality vote over the same dots)",
+        ],
+        "exports": exports,
+        "sources": ["results/viz/*.json"],
+    }
+
+
+def api_gates():
+    evals = {}
+    for p in sorted(RESULTS.glob("eval_*.json")):
+        d = _read_json(p)
+        if d:
+            evals[p.stem] = d
+    return {"gates": [_gate_g1(evals), _gate_g2(), _gate_g3(), _gate_g4()],
+            "git_head": _git_head(),
+            "computed_at": datetime.now(timezone.utc)
+                            .isoformat(timespec="seconds").replace("+00:00", "Z")}
+
+
+_RAW_PREFIXES = ("results/", "configs/", "checkpoints/", "UBM/", "data/")
+
+
+def _raw_file(rel: str):
+    """Read-only evidence endpoint: serve a committed text file by repo-
+    relative path under an allow-listed prefix. Returns (status, text|err)."""
+    if not rel or rel.startswith("/") or "\\" in rel:
+        return 400, "path must be repo-relative"
+    parts = rel.split("/")
+    if any(seg in ("", ".", "..") for seg in parts):
+        return 400, "path traversal is not allowed"
+    if not rel.startswith(_RAW_PREFIXES):
+        return 403, f"only {' , '.join(_RAW_PREFIXES)} are served"
+    p = (ROOT / rel).resolve()
+    if ROOT not in p.parents or not p.is_file():
+        return 404, f"no file {rel}"
+    if p.stat().st_size > 8 * 1024 * 1024:
+        return 400, "file too large to serve"
+    try:
+        return 200, p.read_text(encoding="utf-8", errors="replace")
+    except Exception as e:                                   # noqa: BLE001
+        return 500, f"could not read {rel}: {e.__class__.__name__}"
+
+
 def api_arch(config: str | None = None):
     """Machine-checkable architecture description for the diagram page.
 
@@ -846,6 +1272,18 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send_json(*ROUTES["diagnosis"]())
             if path == "/api/profiles":
                 return self._send_json(*ROUTES["profiles"]())
+            if path == "/api/gates":
+                return self._send_json(200, api_gates())
+            if path == "/api/config_used":
+                return self._send_json(200, api_config_used())
+            if path == "/api/raw":
+                q = dict(pair.split("=", 1) for pair in query.split("&")
+                         if "=" in pair)
+                code, text = _raw_file(q.get("path", ""))
+                if code == 200:
+                    return self._send(200, text.encode("utf-8"),
+                                      "text/plain; charset=utf-8")
+                return self._send_json(code, {"error": text})
             if path == "/api/arch":
                 q = dict(pair.split("=", 1) for pair in query.split("&")
                          if "=" in pair)

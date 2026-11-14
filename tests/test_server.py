@@ -42,7 +42,7 @@ def test_api_endpoints_serve_json():
     try:
         for ep in ("/api/runs", "/api/evals", "/api/reports", "/api/summaries",
                    "/api/arch", "/api/viz", "/api/vocab", "/api/diagnosis",
-                   "/api/profiles"):
+                   "/api/profiles", "/api/gates", "/api/config_used"):
             st, body = _get(base + ep)
             assert st == 200, (ep, st)
             json.loads(body)                     # must be valid JSON
@@ -311,6 +311,273 @@ def test_all_committed_configs_parse():
             assert d.get("name") or d.get("model"), p.name
 
 
+# ------------------------------------------------- gates (G1–G4, step 1) ---
+def _recompute_equal_compute():
+    """Independent recompute of the G2 wall table from the committed CSVs.
+
+    Deliberately does NOT call server helpers — same parse rules (markers
+    skipped, first row per step wins, sorted by step) written out in full.
+    """
+    import csv as _csv
+    def rows(p):
+        raw = list(_csv.reader(p.read_text(encoding="utf-8").splitlines()))
+        hdr, out, seen = raw[0], [], set()
+        for r in raw[1:]:
+            if not r or not r[0] or r[0].lstrip()[:1] in ("<", "=", ">"):
+                continue
+            try:
+                step = float(r[0])
+            except ValueError:
+                continue
+            if step in seen:
+                continue
+            seen.add(step)
+            out.append(r)
+        out.sort(key=lambda r: float(r[0]))
+        return hdr, out
+    def curve(p):
+        hdr, rs = rows(p)
+        vi, wi = hdr.index("bpc_val"), hdr.index("elapsed_s")
+        pts, best = [], None
+        for r in rs:
+            if len(r) <= max(vi, wi) or r[vi] == "" or r[wi] == "":
+                continue
+            v, w = float(r[vi]), float(r[wi])
+            best = v if best is None else min(best, v)
+            pts.append((w, best))
+        return pts
+    e0 = curve(ROOT / "results" / "train_e0_plain_ensemble_eqc_seed0.csv")
+    e1 = curve(ROOT / "results" / "train_e1_weights_passes_eqc_seed0.csv")
+    cap = min(e0[-1][0], e1[-1][0])
+    def best_at(c, w):
+        b = None
+        for cw, cb in c:
+            if cw <= w:
+                b = cb
+            else:
+                break
+        return b
+    walls = sorted({w for c in (e0, e1) for w, _ in c if w <= cap})
+    table = [{"wall_s": w, "e0": best_at(e0, w), "e1": best_at(e1, w)}
+             for w in walls]
+    return table
+
+
+def test_gates_endpoint_serves_all_four_gates():
+    srv, base = _start()
+    try:
+        st, body = _get(base + "/api/gates")
+        assert st == 200
+        d = json.loads(body)
+        ids = [g["id"] for g in d["gates"]]
+        assert ids == ["G1", "G2", "G3", "G4"]
+        for g in d["gates"]:
+            assert g["status"] in ("PASS", "PENDING", "PARTIAL", "FAIL",
+                                   "NO_DATA"), g["id"]
+            assert g["sources"], g["id"]
+            assert g["evidence"], g["id"]
+        assert d["gates"][0]["id"] == "G1"
+    finally:
+        srv.shutdown()
+
+
+def test_g1_counts_exclude_retracted():
+    srv, base = _start()
+    try:
+        d = json.loads(_get(base + "/api/gates")[1])
+        g1 = d["gates"][0]
+        evals = {}
+        for p in sorted((ROOT / "results").glob("eval_*.json")):
+            evals[p.stem] = json.loads(p.read_text(encoding="utf-8"))
+        ret = [n for n, v in evals.items() if v.get("retracted")]
+        live = [n for n, v in evals.items() if not v.get("retracted")]
+        assert g1["counts"]["retracted"] == len(ret)
+        # a retracted eval must never appear in the unverified-provenance list
+        assert not set(g1["counts"]["missing"]) & set(ret)
+        assert set(g1["counts"]["missing"]) <= set(live)
+        assert g1["counts"]["unverified"] == len(g1["counts"]["missing"])
+    finally:
+        srv.shutdown()
+
+
+def test_g2_equal_compute_matches_independent_recompute():
+    srv, base = _start()
+    try:
+        d = json.loads(_get(base + "/api/gates")[1])
+        g2 = d["gates"][1]
+        table = _recompute_equal_compute()
+        assert g2["matched_walls"] == len(table)
+        assert len(g2["table"]) == len(table)
+        last, exp = g2["table"][-1], table[-1]
+        assert abs(last["wall_s"] - exp["wall_s"]) < 1e-6
+        assert abs(last["e0_bpc"] - exp["e0"]) < 1e-9
+        assert abs(last["e1_bpc"] - exp["e1"]) < 1e-9
+        # status follows the recomputed comparison exactly
+        wins = all(t["e1"] is not None and t["e0"] is not None
+                   and t["e1"] <= t["e0"] + 1e-9 for t in table)
+        assert g2["status"] == ("PASS" if wins else "FAIL")
+        # the committed GRU reference must appear in the table rows that
+        # any b0 CSV covers (b0_gru_pilot reaches 1.7358)
+        if any(r.get("b0_bpc") is not None for r in g2["table"]):
+            best_b0 = min(r["b0_bpc"] for r in g2["table"]
+                          if r.get("b0_bpc") is not None)
+            pilot = [ln.split(",") for ln in
+                     (ROOT / "results" / "train_b0_gru_pilot_seed0.csv")
+                     .read_text(encoding="utf-8").splitlines()]
+            vi = pilot[0].index("bpc_val")
+            csv_min = min(float(r[vi]) for r in pilot[1:]
+                          if len(r) > vi and r[vi] != "")
+            assert abs(best_b0 - min(best_b0, csv_min)) < 1e-9
+            assert best_b0 <= csv_min + 1e-9
+    finally:
+        srv.shutdown()
+
+
+def _dedupe_csv(p):
+    """Same parse rule as the server: markers skipped, first row per step
+    wins (the committed artifact-recovery variants appear as duplicate
+    steps with a different tau0 protocol), sorted by step."""
+    import csv as _csv
+    raw = list(_csv.reader(p.read_text(encoding="utf-8").splitlines()))
+    hdr, out, seen = raw[0], [], set()
+    for r in raw[1:]:
+        if not r or not r[0] or r[0].lstrip()[:1] in ("<", "=", ">"):
+            continue
+        try:
+            step = float(r[0])
+        except ValueError:
+            continue
+        if step in seen:
+            continue
+        seen.add(step)
+        out.append(r)
+    out.sort(key=lambda r: float(r[0]))
+    return hdr, out
+
+
+def test_g3_follows_committed_vocab_curves():
+    srv, base = _start()
+    try:
+        d = json.loads(_get(base + "/api/gates")[1])
+        g3 = d["gates"][2]
+        assert [v["vocab"] for v in g3["vocabs"]] == ["vocab2", "vocab3",
+                                                      "vocab4"]
+        still = False
+        for v in g3["vocabs"]:
+            p = ROOT / "results" / v["csv"]
+            assert p.exists()
+            if v.get("best_bpc") is None:
+                continue
+            hdr, rows = _dedupe_csv(p)
+            si, vi = hdr.index("step"), hdr.index("bpc_val")
+            ev = [(float(r[si]), float(r[vi])) for r in rows
+                  if len(r) > vi and r[vi] != ""]
+            best = min(ev, key=lambda t: t[1])
+            assert abs(v["best_bpc"] - best[1]) < 1e-9
+            assert v["best_step"] == best[0]
+            delta = ev[-1][1] - ev[-3][1]
+            assert abs(v["last3_delta"] - round(delta, 5)) < 1e-9
+            still = still or delta < -0.005
+        assert g3["status"] == ("PENDING" if still else "PASS")
+    finally:
+        srv.shutdown()
+
+
+def test_g4_matches_independent_recompute():
+    srv, base = _start()
+    try:
+        d = json.loads(_get(base + "/api/gates")[1])
+        g4 = d["gates"][3]
+        imports_ok = True
+        for e in g4["exports"]:
+            p = ROOT / "results" / "viz" / f"{e['name']}.json"
+            assert p.exists()
+            pos = json.loads(p.read_text(encoding="utf-8"))["sample"]["positions"]
+            n = pooled = uni = plur = 0
+            for P in pos:
+                tgt, pool = P.get("next"), P.get("pooled_top")
+                dots = P.get("dots") or []
+                if tgt is None or not pool or not dots:
+                    continue
+                n += 1
+                if pool[0][0] == tgt:
+                    pooled += 1
+                sc, votes = {}, {}
+                for dd in dots:
+                    t1 = (dd.get("top") or [None])[0]
+                    if t1:
+                        votes[t1[0][0]] = votes.get(t1[0][0], 0) + 1
+                        for tok, pr in t1:
+                            sc[tok] = sc.get(tok, 0.0) + float(pr) / len(dots)
+                if votes and max(votes, key=votes.get) == tgt:
+                    plur += 1
+                if sc and max(sc, key=sc.get) == tgt:
+                    uni += 1
+            assert e["sampled"] == n
+            assert e["pooled_top1"] == pooled
+            assert e["uniform_mix_top1"] == uni
+            assert e["plurality_top1"] == plur
+            best_proxy = max(uni, plur)
+            assert e["status"] == ("PASS" if pooled > best_proxy else "FAIL")
+        # gate PASS only if every export passes
+        assert g4["status"] == ("PASS" if all(
+            e["status"] == "PASS" for e in g4["exports"]) else "FAIL")
+    finally:
+        srv.shutdown()
+
+
+def test_raw_endpoint_serves_results_and_blocks_traversal():
+    srv, base = _start()
+    try:
+        # allowed: an actual committed results file, byte-identical
+        p = ROOT / "results" / "eval_e1_weights_passes_pilot_seed0.json"
+        st, body = _get(base + "/api/raw?path=results/"
+                        + p.name)
+        assert st == 200
+        assert body == p.read_bytes()
+        # traversal / absolute / non-allowlisted are rejected
+        for q, code in (("path=../secrets", 400), ("path=/etc/passwd", 400),
+                        ("path=server/server.py", 403),
+                        ("path=results/does_not_exist.json", 404)):
+            st, _ = _get(base + "/api/raw?" + q)
+            assert st == code, (q, st)
+    finally:
+        srv.shutdown()
+
+
+def test_read_csv_rows_skips_conflict_markers_and_dedupes():
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "toy.csv"
+        p.write_text(
+            "step,bpc_val,elapsed_s\n"
+            "240,3.9,777.6\n"
+            "<<<<<<< Updated upstream\n"
+            "240,3.9,999.9\n"          # duplicate step: first row must win
+            "=======\n"
+            "120,4.1,300.0\n"
+            ">>>>>>> Stashed changes\n"
+            "480,3.5,1500.0\n"
+            "junk,row,here\n")
+        hdr, rows = server_mod._read_csv_rows(p)
+        assert [r["step"] for r in rows] == [120.0, 240.0, 480.0]
+        by_step = {r["step"]: r for r in rows}
+        assert by_step[240.0]["elapsed_s"] == 777.6      # first occurrence
+        assert by_step[120.0]["bpc_val"] == 4.1
+        assert server_mod._read_csv_rows(Path(td) / "nope.csv") is None
+
+
+def test_eval_val_sha_provenance_helpers():
+    """Future evals: val_sha256 (or provenance.val_sha256) is honoured."""
+    assert server_mod._eval_retracted({"retracted": None}) is False
+    assert server_mod._eval_retracted({"retracted": {"reason": "x"}}) is True
+    assert server_mod._eval_retracted({}) is False
+    assert server_mod._eval_val_sha({"val_sha256": "abc"}) == "abc"
+    assert server_mod._eval_val_sha(
+        {"provenance": {"val_sha256": "def"}}) == "def"
+    assert server_mod._eval_val_sha({}) is None
+
+
 # ------------------------------------------------------------- static ------
 def test_static_pages_served():
     srv, base = _start()
@@ -354,6 +621,10 @@ def test_app_js_has_a_page_function_for_every_nav_item():
     for ep in ("/api/generate", "/api/generate/runs",
                "/api/generate/result", "/api/generations"):
         assert ep in js, ep
+    # step 1: dashboard gates scoreboard + provenance-aware scores page
+    assert "/api/gates" in js
+    for gate_bit in ("G1", "G2", "G3", "G4", "unverified corpus", "RETRACTED"):
+        assert gate_bit in js, gate_bit
 
 
 def test_static_assets_are_offline_safe():

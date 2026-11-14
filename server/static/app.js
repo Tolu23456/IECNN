@@ -214,117 +214,134 @@ function card(txt, lbl, cls) {
   return h("div", { class: "card" + (cls ? " " + cls : "") },
     h("div", { class: "big" }, String(txt)), h("div", { class: "lbl" }, lbl));
 }
+/* link to the committed file a number came from (read-only evidence view) */
+function rawLink(path) {
+  return h("a", { href: `/api/raw?path=${encodeURIComponent(path)}`,
+                  target: "_blank", rel: "noopener" }, path);
+}
+function sourceLine(sources) {
+  if (!sources || !sources.length) return null;
+  return h("div", { class: "muted srcs" }, "evidence: ",
+    ...sources.flatMap((s, i) => {
+      const link = /[*]/.test(s) ? h("span", {}, s)
+        : rawLink(s);
+      return i ? [", ", link] : [link];
+    }));
+}
+/* provenance chips: run · step · tau · vocab sha · wall/compute */
+function provChip(label, value, title) {
+  return h("span", { class: "hpchip", title: title || "" }, label + " ",
+    h("b", {}, String(value)));
+}
+const shaShort = s => (s ? String(s).slice(0, 12) + "…" : "—");
+
+/* gate status -> pill class */
+const GATE_CLS = { PASS: "ok", FAIL: "bad", PENDING: "warn",
+                   PARTIAL: "warn", NO_DATA: "" };
+
+function equalComputeTable(table) {
+  return h("div", { class: "scrolltb" }, h("table", {},
+    h("thead", {}, h("tr", {}, h("th", {}, "wall s"), h("th", {}, "E0 plain-ensemble bpc (best so far)"),
+      h("th", {}, "E1 weights+passes bpc (best so far)"), h("th", {}, "B0 GRU bpc (best so far)"))),
+    h("tbody", {}, table.map(r => h("tr", { class:
+        (r.e1_bpc != null && r.e0_bpc != null && r.e1_bpc <= r.e0_bpc) ? "best" : "" },
+      h("td", { class: "num" }, String(r.wall_s)),
+      h("td", { class: "num" }, fmt(r.e0_bpc, 5)),
+      h("td", { class: "num" }, fmt(r.e1_bpc, 5)),
+      h("td", { class: "num" }, r.b0_bpc != null ? fmt(r.b0_bpc, 5) : "—"))))));
+}
 
 /* ======================================================== DASHBOARD ======= */
-const PILOT_RUNGS = [
-  { label: "B0 GRU",              rung: "b0_gru_pilot",                  color: "#81c784" },
-  { label: "E0 plain ensemble",   rung: "e0_plain_ensemble_pilot",       color: "#4fc3f7" },
-  { label: "E1 weights+passes",   rung: "e1_weights_passes_pilot",       color: "#ffb74d" },
-  { label: "E1 no-λ (ablation)",  rung: "e1_weights_passes_nolambda_pilot", color: "#e57373" },
-];
+/* Gates scoreboard G1–G4 — every status and number is computed server-side
+   at request time from committed files (results/*.csv, eval/summary/viz
+   JSONs). Nothing here is hardcoded. */
+
+function gateDetails(g) {
+  const det = h("details", {}, h("summary", {}, "show the numbers"));
+  if (g.id === "G2" && Array.isArray(g.table) && g.table.length) {
+    det.append(h("p", { class: "muted" },
+      "equal-compute table: best bpc_val each run had achieved by each matched wall-time point (lower is better; green = E1 at or ahead of E0 at that wall point)"),
+      equalComputeTable(g.table));
+  }
+  if (g.id === "G3" && Array.isArray(g.vocabs)) {
+    det.append(h("table", {},
+      h("thead", {}, h("tr", {}, h("th", {}, "vocab"), h("th", {}, "best bpc_val"),
+        h("th", {}, "at step"), h("th", {}, "last-3-eval Δ"), h("th", {}, "state"),
+        h("th", {}, "stop kind"))),
+      h("tbody", {}, g.vocabs.map(v => h("tr", {},
+        h("td", {}, v.vocab),
+        h("td", { class: "num" }, fmt(v.best_bpc, 5)),
+        h("td", { class: "num" }, String(v.best_step ?? "—")),
+        h("td", { class: "num" }, fmt(v.last3_delta, 5)),
+        h("td", {}, v.status ?? "—"),
+        h("td", {}, v.stop_kind ?? "—"))))));
+    if (g.vocabs.some(v => v.note)) det.append(h("p", { class: "muted" },
+      g.vocabs.find(v => v.note).note));
+  }
+  if (g.id === "G4" && Array.isArray(g.exports)) {
+    det.append(h("p", { class: "muted" },
+      "horse race per export (same 255-position sample): pooled learned consensus vs dumb proxies that need no learned weights. Oracle = some dot held the answer (any pass) — context, not the pass bar."),
+      h("table", {},
+        h("thead", {}, h("tr", {}, h("th", {}, "export"), h("th", {}, "pooled top-1"),
+          h("th", {}, "uniform top-5 mix"), h("th", {}, "plurality vote"),
+          h("th", {}, "best single dot"), h("th", {}, "oracle top-1"),
+          h("th", {}, "outvote rate"), h("th", {}, "status"))),
+        h("tbody", {}, g.exports.map(e => h("tr", { class: e.status === "PASS" ? "best" : "" },
+          h("td", {}, e.name),
+          h("td", { class: "num" }, `${e.pooled_top1}/${e.sampled}`),
+          h("td", { class: "num" }, `${e.uniform_mix_top1}/${e.sampled}`),
+          h("td", { class: "num" }, `${e.plurality_top1}/${e.sampled}`),
+          h("td", { class: "num" }, `${e.best_single_dot_top1}/${e.sampled}`),
+          h("td", { class: "num" }, `${e.oracle_top1}/${e.sampled}`),
+          h("td", { class: "num" }, e.outvote_rate != null ? fmt(e.outvote_rate, 3) : "—"),
+          h("td", {}, h("span", { class: "pill " + (e.status === "PASS" ? "ok" : "bad") }, e.status)))))));
+  }
+  if (g.counts) det.append(h("p", { class: "muted" },
+    `verified ${g.counts.verified} · unverified ${g.counts.unverified} · retracted (excluded) ${g.counts.retracted}`));
+  if (g.note) det.append(h("p", { class: "muted" }, g.note));
+  return det;
+}
+
+function gateCard(g) {
+  const cls = GATE_CLS[g.status] || "";
+  const c = h("div", { class: "card gate" },
+    h("div", { class: "ghd" },
+      h("span", { class: "gid" }, g.id),
+      h("span", { class: "pill " + cls }, g.status)),
+    h("div", { class: "gt" }, g.title),
+    h("ul", { class: "gev" }, (g.evidence || []).map(e => h("li", {}, e))));
+  const src = sourceLine(g.sources);
+  if (src) c.append(src);
+  const det = gateDetails(g);
+  if (det.childNodes.length <= 1) det.append(
+    h("p", { class: "muted" }, "no extra numbers for this gate yet"));
+  c.append(det);
+  return c;
+}
 
 async function pageDashboard(root) {
-  const [runs, evals, arch] = await Promise.all(
-    [api("/api/runs"), api("/api/evals"), api("/api/arch")]);
-  state.runsIndex = runs; state.arch = arch;
+  const [gates, runs] = await Promise.all([api("/api/gates"), api("/api/runs")]);
+  state.runsIndex = runs;
   root.innerHTML = "";
   root.append(h("h1", {}, "Dashboard"),
-    h("p", {}, "Read straight from the repository (results CSVs, eval re-scores, configs). ",
+    h("p", {}, "Gates scoreboard — every status and number below is computed at request time from committed files (results/ CSVs + eval/summary/viz JSONs), never hardcoded. ",
       "No training happens on this machine — all torch compute runs on GitHub Actions."));
 
-  const byName = name => runs.runs.find(r => r.name === name);
-  const evalFor = rung => Object.entries(evals).find(([k]) => k.includes(rung));
-
-  // headline cards — numbers pulled from live eval re-scores / CSVs, never hardcoded
-  const cards = h("div", { class: "cards" });
-  for (const pr of PILOT_RUNGS) {
-    const ev = evalFor(pr.rung);
-    let big, lbl, sub;
-    if (ev) {
-      const [k, v] = ev;
-      big = fmt(v.best_full_val_bpc_at_best_tau, 5);
-      lbl = `${pr.label} — full-val bpc (re-scored)`;
-      sub = `eval ${k} · best step ${v.best_step} · τ0 ${fmt(v.tau0_used, 4)}`;
-    } else {
-      const r = byName("train_" + pr.rung + "_seed0");
-      big = r && r.best_val !== null ? fmt(r.best_val, 5) : "—";
-      lbl = `${pr.label} — best val bpc (100k-char sample)`;
-      sub = r ? `${r.points} eval pts · last step ${r.last_step}` : "no data yet";
-    }
-    cards.append(h("div", { class: "card click", onclick: () => { location.hash = "#/scores"; } },
-      h("div", { class: "big", style: `color:${pr.color}` }, big),
-      h("div", { class: "lbl" }, lbl),
-      h("div", { class: "lbl muted" }, sub)));
-  }
-  root.append(cards);
-
-  // ladder chart
-  const ladder = {
-    labels: PILOT_RUNGS.map(x => x.label),
-    datasets: [{ label: "bpc (lower is better)",
-                 data: PILOT_RUNGS.map(pr => {
-                   const ev = evalFor(pr.rung);
-                   if (ev) return ev[1].best_full_val_bpc_at_best_tau;
-                   const r = byName("train_" + pr.rung + "_seed0");
-                   return r && r.best_val !== null ? r.best_val : null;
-                 }),
-                 backgroundColor: PILOT_RUNGS.map(x => x.color + "cc"),
-                 borderColor: PILOT_RUNGS.map(x => x.color),
-                 borderRadius: 6, maxBarThickness: 72 }],
-  };
-  root.append(chartBox("The ladder so far — E0 → E1 (equal-compute pilots)",
-    ladder, "bar", { sub: "full-val re-score where available, else best sampled val", ylabel: "bpc" }));
-
-  // sparkline strip of the pilot curves
-  const spark = h("div", { class: "sparkrow" });
-  for (const pr of PILOT_RUNGS) {
-    const r = byName("train_" + pr.rung + "_seed0");
-    if (!r) continue;
-    spark.append(h("div", { class: "spark", onclick: () => {
-        location.hash = `#/runs/${r.name}`; } },
-      h("div", { class: "t", style: `color:${pr.color}` }, pr.label),
-      h("div", { class: "v" }, fmt(r.best_val, 4), h("span", { class: "s" }, " best val")),
-      h("div", { class: "s" }, `seed 0 · ${r.points} eval pts · step ${r.last_step}`),
-      h("div", { class: "spw" }, h("canvas", {}))));
-  }
-  // fill sparklines after the strip is in the DOM (needs /api/run data)
-  if (spark.children.length) {
-    root.append(spark);
-    Promise.all(PILOT_RUNGS.map(pr => byName("train_" + pr.rung + "_seed0")
-      ? api(`/api/run/${byName("train_" + pr.rung + "_seed0").name}`).catch(() => null) : null))
-      .then(ds => {
-        $$(".spark .spw canvas", spark).forEach((cv, i) => {
-          const d = ds[i];
-          if (d && HAS_CHART && d.series?.bpc_val) {
-            const s = d.series.bpc_val.filter(v => v !== null);
-            const c = PILOT_RUNGS[i].color;
-            new Chart(cv, { type: "line", data: {
-                labels: s.map((_, j) => j),
-                datasets: [{ data: s, borderColor: c, borderWidth: 1.6,
-                             pointRadius: 0, tension: .25 }] },
-              options: { animation: false, maintainAspectRatio: false,
-                plugins: { legend: { display: false } },
-                scales: { x: { display: false }, y: { display: false } } } });
-          }
-        });
-      });
+  // headline: E1 vs E0 at equal wall compute (from G2, same numbers as the table)
+  const g2 = (gates.gates || []).find(g => g.id === "G2");
+  if (g2 && g2.headline) {
+    root.append(h("div", { class: "headline " + (GATE_CLS[g2.status] || "") },
+      h("span", { class: "pill " + (GATE_CLS[g2.status] || "") }, g2.status),
+      " ", h("b", {}, "E1 vs E0 at equal compute — ", g2.headline.replace(/^at equal wall compute[^:]*: /, "")),
+      " ",
+      h("a", { href: "#/runs/train_e1_weights_passes_eqc_seed0" }, "open curves →")));
   }
 
-  // eval report highlights
-  const evs = Object.entries(evals);
-  if (evs.length) {
-    const box = h("div", { class: "cards" });
-    for (const [k, v] of evs) {
-      box.append(h("div", { class: "card click",
-          onclick: () => { location.hash = "#/scores"; } },
-        h("div", { class: "big", style: "color:var(--accent)" },
-          fmt(v.best_full_val_bpc_at_best_tau, 5)),
-        h("div", { class: "lbl" }, `${k} — full-val bpc @ best τ`),
-        h("div", { class: "lbl muted" },
-          `step ${v.best_step} · passes ${fmt(v.per_pass_bpc?.[0], 3)} → ${fmt(v.per_pass_bpc?.[2], 3)}`)));
-    }
-    root.append(h("h2", {}, "Checkpoint re-scores"), box);
-  }
+  const grid = h("div", { class: "gates" });
+  for (const g of gates.gates || []) grid.append(gateCard(g));
+  root.append(grid);
+  if (gates.computed_at) root.append(h("div", { class: "muted" },
+    `gates computed ${gates.computed_at} · git ${esc(gates.git_head || "")}`));
 
   // all runs table
   const tbl = h("table", {},
@@ -338,8 +355,7 @@ async function pageDashboard(root) {
       h("td", { class: "num" }, String(r.last_step ?? "—")),
       h("td", { class: "num" }, fmt(r.best_val)),
       h("td", { class: "num" }, String(r.best_step ?? "—"))))));
-  root.append(h("h2", {}, "All runs in results/"), tbl,
-    h("div", { class: "muted" }, `git ${esc(runs.git_head)}`));
+  root.append(h("h2", {}, "All runs in results/"), tbl);
 }
 
 /* ============================================================= RUNS ======= */
@@ -1065,41 +1081,129 @@ async function renderViz(root, v) {
 
 /* ========================================================= SCORES ========= */
 async function pageScores(root) {
-  const [evals, runs] = await Promise.all([api("/api/evals"), api("/api/runs")]);
+  const [evals, runs, summaries, reports] = await Promise.all(
+    [api("/api/evals"), api("/api/runs"), api("/api/summaries"),
+     api("/api/reports")]);
   root.innerHTML = "";
-  root.append(h("h1", {}, "Re-score reports (corpus-verified)"),
-    h("p", {}, "Each checkpoint's best step was re-scored on the FULL validation set at that step's τ0 — the numbers here supersede the sampled val curve. ",
-      "vocab_sha256 is checked across every report below and against the viz export + diagnosis table: a mismatch would fail loudly runner-side."));
+  root.append(h("h1", {}, "Re-score reports"),
+    h("p", {}, "Each checkpoint's best step was re-scored on the FULL validation set at that step's τ0. ",
+      "Provenance (run · step · τ · vocab sha · wall/compute) is shown with every number; ",
+      h("code", {}, "vocab_sha256"), " is checked across every report below and against the viz export + diagnosis table."));
 
   const entries = Object.entries(evals);
-  if (!entries.length) { warnbox(root, "No eval_*.json reports in results/ yet."); return; }
+  if (!entries.length) {
+    warnbox(root, "No eval_*.json reports in results/ yet — they are produced runner-side by the re-score/diagnose workflows; committed files land in results/ and this page fills in. ",
+      h("code", {}, "gh workflow run diagnose_reload.yml"));
+    return;
+  }
 
-  // vocab sha consistency
-  const shas = new Set(entries.map(([, v]) => v.vocab_sha256).filter(Boolean));
+  // corpus val sha for the val-provenance check
+  const valSha = ((reports.split_info || {}).parts || {}).val?.sha256 || "";
+
+  // vocab sha consistency across NON-retracted reports only
+  const live = entries.filter(([, v]) => !v.retracted);
+  const shas = new Set(live.map(([, v]) => v.vocab_sha256).filter(Boolean));
   const shaOK = shas.size === 1;
   const sha = [...shas][0] || "";
   root.append(h("div", { class: "cards" },
     h("div", { class: "card" },
       h("div", { class: "big", style: `color:${shaOK ? "var(--good)" : "var(--bad)"}` },
         shaOK ? "✓ consistent" : "✗ MISMATCH"),
-      h("div", { class: "lbl" }, `vocab_sha256 across ${entries.length} reports`),
+      h("div", { class: "lbl" }, `vocab_sha256 across ${live.length} active reports`),
       h("div", { class: "lbl muted" }, sha ? sha.slice(0, 16) + "…" : "—"))));
 
+  // wall/compute for each eval: summary JSON first, then the run CSV's
+  // last elapsed_s
+  const computeFor = async (name, v) => {
+    const ck = (v.ckpt_dir || "").split("/").filter(Boolean).pop() || "";
+    const summ = summaries[ck];
+    if (summ && summ.steps_final != null) {
+      return { text: `steps_final ${summ.steps_final}` +
+        (summ.train_seconds_total != null
+          ? ` · train ${fmt(summ.train_seconds_total, 1)} s` : ""),
+        src: `checkpoints/${ck}/summary.json` };
+    }
+    const run = runs.runs.find(r => r.name === ck);
+    if (run) {
+      try {
+        const d = await api(`/api/run/${run.name}`);
+        const el = (d.series?.elapsed_s || []).filter(x => x !== null);
+        if (el.length) return { text: `last eval at ${fmt(el[el.length - 1], 1)} s wall (${d.n_points} eval pts)`,
+                                src: `results/${run.name}.csv` };
+      } catch { /* fall through */ }
+    }
+    return null;
+  };
+
   for (const [name, v] of entries) {
+    const retracted = !!v.retracted;
+    const vs = v.val_sha256 || v.provenance?.val_sha256;
+    const verified = !!(vs && valSha &&
+      (vs === valSha || vs.slice(0, 16) === valSha.slice(0, 16)));
+    const mismatch = !!(vs && valSha && !verified);
     const passes = v.per_pass_bpc || [];
-    root.append(h("h2", {}, name,
-      h("span", { class: "pill ok" }, "full-val")));
-    root.append(h("div", { class: "cards" },
-      card(fmt(v.best_full_val_bpc_at_best_tau, 5), "full-val bpc @ best τ"),
+    const ck = (v.ckpt_dir || "").split("/").filter(Boolean).pop() || "—";
+    const sec = h("div", {});
+    root.append(sec);
+    const h2 = h("h2", {}, name, h("span", { class: "pill" }, "full-val"),
+      verified ? h("span", { class: "pill ok" }, "corpus-verified ✓")
+      : mismatch ? h("span", { class: "pill warn" }, "✗ val corpus mismatch — hidden")
+      : h("span", { class: "pill warn" }, "unverified corpus"));
+    if (retracted) h2.append(h("span", { class: "pill warn" }, "RETRACTED"));
+    sec.append(h2);
+
+    if (mismatch) {
+      // a declared val sha that does NOT match the committed corpus: the
+      // number is hidden behind the flag
+      sec.append(h("div", { class: "errbox" },
+        h("b", {}, "val_sha256 mismatch — number hidden. "),
+        `this report declares val sha ${shaShort(vs)} but the committed val split is ${shaShort(valSha)}; the score was computed against a different corpus and is not shown. `));
+      sec.append(h("details", { class: "rawjson" },
+        h("summary", {}, `raw JSON — ${name}`),
+        h("pre", {}, JSON.stringify(v, null, 1))));
+      continue;
+    }
+
+    const comp = await computeFor(name, v);
+    const prov = h("div", { class: "hpchips" },
+      provChip("run", ck),
+      provChip("best step", v.best_step ?? "—"),
+      provChip("τ0", fmt(v.tau0_used, 4)),
+      provChip("vocab sha", shaShort(v.vocab_sha256),
+        "full sha256: " + (v.vocab_sha256 || "—")));
+    if (comp) {
+      prov.append(provChip("compute", comp.text));
+      prov.append(h("span", { class: "muted" }, "(from "), rawLink(comp.src),
+        h("span", { class: "muted" }, ")"));
+    }
+    sec.append(prov);
+
+    const cards = h("div", { class: "cards" });
+    const bigNum = h("div", { class: "big" + (retracted ? " struck" : "") },
+      fmt(v.best_full_val_bpc_at_best_tau, 5));
+    cards.append(h("div", { class: "card" + (retracted ? " mutedcard" : "") },
+      bigNum, h("div", { class: "lbl" }, "full-val bpc @ best τ")),
       card(String(v.best_step ?? "—"), "best step"),
       card(fmt(v.tau0_used, 4), "τ0 used"),
       card(fmt(v.weight_entropy, 4), "weight entropy at best step"),
       card(fmt(v.hard_bpc_at_best_tau, 5), "hard (top-m) bpc"),
       card(fmt(v.mode_gap, 5), "mode gap (hard − soft)"),
       card(fmt(v.bpc_train_slice, 5), "train-slice bpc"),
-      card((v.vocab_sha256 || "").slice(0, 12) + "…", "vocab_sha256")));
+      card(shaShort(v.vocab_sha256), "vocab_sha256"));
+    if (retracted) {
+      const r = v.retracted;
+      cards.append(h("div", { class: "card mutedcard warncard" },
+        h("div", { class: "lbl", style: "color:var(--accent2)" },
+          `RETRACTED ${r.date ? "· " + r.date : ""}`),
+        h("div", { class: "lbl" }, r.reason || "retracted"),
+        r.superseded_by ? h("div", { class: "lbl muted" },
+          `superseded by: ${r.superseded_by}`) : null));
+    }
+    sec.append(cards);
+    if (retracted) sec.append(h("p", { class: "muted" },
+      "This report's numbers are excluded from every aggregate, best pick and gate on this dashboard."));
     if (passes.length) {
-      root.append(chartBox(`Per-pass bpc — ${name}`, {
+      sec.append(chartBox(`Per-pass bpc — ${name}`, {
         labels: passes.map((_, i) => `pass ${i + 1}`),
         datasets: [{ label: "bpc", data: passes,
           backgroundColor: ["#7986cbbb", "#4fc3f7bb", "#ffd54fbb"],
@@ -1108,17 +1212,20 @@ async function pageScores(root) {
       }, "bar", { sub: "each pass should improve on the last (iterative refinement)", ylabel: "bpc", legend: false }));
     }
     // compare against the run's own sampled val curve
-    const runName = name.replace(/^eval_/, "").replace(/_seed(\d+)$/, "_seed$1");
-    const run = runs.runs.find(r => r.name === runName);
+    const run = runs.runs.find(r => r.name === name.replace(/^eval_/, ""));
     if (run) {
-      root.append(h("p", {}, `Sampled val curve for ${run.name}: best ${fmt(run.best_val)} at step ${run.best_step ?? "?"} (100k-char sample — expect the full-val re-score to sit nearby). `,
+      sec.append(h("p", {}, `Sampled val curve for ${run.name}: best ${fmt(run.best_val)} at step ${run.best_step ?? "?"} (100k-char sample — expect the full-val re-score to sit nearby). `,
         h("a", { href: `#/runs/${run.name}` }, "open curve →")));
     }
+    sec.append(sourceLine([`results/${name}.json`]));
+    sec.append(h("details", { class: "rawjson" },
+      h("summary", {}, `raw JSON — ${name}`),
+      h("pre", {}, JSON.stringify(v, null, 1))));
   }
 
-  // side-by-side comparison when there are exactly 2+ evals
-  if (entries.length >= 2) {
-    const [nA, vA] = entries[0], [nB, vB] = entries[1];
+  // side-by-side comparison of the first two ACTIVE (non-retracted) evals
+  if (live.length >= 2) {
+    const [nA, vA] = live[0], [nB, vB] = live[1];
     const row = (label, key, d = 5) => {
       const a = vA[key], b = vB[key];
       return h("tr", {},
