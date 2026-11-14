@@ -46,7 +46,7 @@ def main() -> None:
     args = ap.parse_args()
 
     d = Path(args.ckpt_dir)
-    ck = torch.load(d / "checkpoint.pt", weights_only=False)
+    ck = torch.load(d / "checkpoint.pt", map_location="cpu", weights_only=False)
     rec_sha = str(ck.get("vocab_sha256", ""))
     if rec_sha:
         got = fingerprint(args.vocab)

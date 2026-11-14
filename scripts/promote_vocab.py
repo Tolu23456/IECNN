@@ -85,20 +85,21 @@ def make_settle_fn(model, train_slice, seq_len, batch, lr, tau0):
     touch the frozen rows either.
     """
     def settle_fn(m, ubm, new_ids, steps):
+        device = next(m.parameters()).device
         before = {n: p.requires_grad for n, p in m.named_parameters()}
         for p in m.parameters():
             p.requires_grad_(True)
         opt = torch.optim.AdamW([m.embed.weight], lr=lr, weight_decay=0.0)
         ids = np.asarray(ubm.encode(train_slice), dtype=np.int64)
         b = Batcher(ids, seq_len, batch, seed=0, shuffle=True)
-        rows = torch.zeros(m.embed.weight.shape[0])
-        rows[torch.tensor(new_ids, dtype=torch.long)] = 1.0
+        rows = torch.zeros(m.embed.weight.shape[0], device=device)
+        rows[torch.tensor(new_ids, dtype=torch.long, device=device)] = 1.0
         m.train()
         losses = []
         for _ in range(int(steps)):
             x, y = b.next_batch()
-            xb = torch.from_numpy(np.ascontiguousarray(x))
-            yb = torch.from_numpy(np.ascontiguousarray(y))
+            xb = torch.from_numpy(np.ascontiguousarray(x)).to(device)
+            yb = torch.from_numpy(np.ascontiguousarray(y)).to(device)
             out = m(xb, tau0=tau0)
             loss = main_loss(out["final_log_probs"], yb)
             opt.zero_grad()

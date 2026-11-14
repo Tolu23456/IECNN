@@ -97,7 +97,7 @@ def main() -> None:
             "book, >200k chars). Re-run with a *_pilot.yaml corpus_config.")
 
     # trained weights = best_state (what the re-score used)
-    ck = torch.load(d / "checkpoint.pt", weights_only=False)
+    ck = torch.load(d / "checkpoint.pt", map_location="cpu", weights_only=False)
     state = ck.get("best_state") or ck["model"]
     live = build_model(config, V)
     live.load_state_dict(state, strict=True)
@@ -190,7 +190,7 @@ def main() -> None:
     print("(c) torch.save -> torch.load round trip:", flush=True)
     tmp = Path("_roundtrip_tmp.pt")          # cwd (runner-safe), cleaned below
     torch.save({"model": live.state_dict()}, tmp)
-    rt_state = torch.load(tmp, weights_only=False)["model"]
+    rt_state = torch.load(tmp, map_location="cpu", weights_only=False)["model"]
     tmp.unlink(missing_ok=True)
     rt = build_model(config, V)
     rt.load_state_dict(rt_state, strict=True)

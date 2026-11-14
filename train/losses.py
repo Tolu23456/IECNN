@@ -66,7 +66,7 @@ def decorrelation_penalty(dot_log_probs: torch.Tensor, final_log_probs: torch.Te
     var = cov_ij.diagonal().clamp(min=1e-12)
     std = var.sqrt()
     rho = cov_ij / (std[None, :] * std[:, None] + 1e-12)
-    mask = torch.triu(torch.ones(dots, dots), diagonal=1).bool()
+    mask = torch.triu(torch.ones(dots, dots, device=rho.device), diagonal=1).bool()
     penalty = torch.relu(rho[mask]).mean()
     if not torch.isfinite(penalty):
         raise FloatingPointError("decorrelation_penalty produced non-finite values")

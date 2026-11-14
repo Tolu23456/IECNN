@@ -92,7 +92,7 @@ def main() -> None:
         raise SystemExit("empty prompt: pass --prompt or --prompt-file")
 
     d = Path(args.ckpt_dir)
-    ck = torch.load(d / "checkpoint.pt", weights_only=False)
+    ck = torch.load(d / "checkpoint.pt", map_location="cpu", weights_only=False)
     summary, config = load_run_meta(d, ck, args.config_fallback or None)
     run = d.name
     kind = config["model"]["kind"]

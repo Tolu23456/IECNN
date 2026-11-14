@@ -157,6 +157,15 @@ def train_one(config: dict, seed: int, out_dir: Path, max_steps: int | None = No
     used_batch = batcher.batch_size
 
     model = build_model(config, vocab_size)
+    # training.device (Tolu, 2026-11-14: "train on Colab/Kaggle GPUs"): the
+    # code is device-agnostic (every kernel derives device from its inputs);
+    # only autocast was hard-coded to CPU. "auto" picks cuda when present.
+    device = str(tcfg.get("device", "auto"))
+    if device in ("auto", "cuda") and torch.cuda.is_available():
+        device = "cuda"
+    else:
+        device = "cpu"
+    model.to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=peak_lr, betas=betas,
                             weight_decay=weight_decay)
 
@@ -180,7 +189,7 @@ def train_one(config: dict, seed: int, out_dir: Path, max_steps: int | None = No
     last_step = start_step - 1  # ACTUAL last step executed (early stop makes
                                 # the loop range a ceiling, not the truth)
     if resume and ckpt_path.exists():
-        state = torch.load(ckpt_path, weights_only=False)
+        state = torch.load(ckpt_path, map_location="cpu", weights_only=False)
         if str(state.get("vocab_sha256", "")) != vocab_sha:
             raise RuntimeError(
                 f"VOCAB MISMATCH, refusing to resume: checkpoint {ckpt_path} "
@@ -275,20 +284,21 @@ def train_one(config: dict, seed: int, out_dir: Path, max_steps: int | None = No
             group["lr"] = lr
 
         x, y = batcher.next_batch()
-        xb = torch.from_numpy(np.ascontiguousarray(x))
-        yb = torch.from_numpy(np.ascontiguousarray(y))
+        xb = torch.from_numpy(np.ascontiguousarray(x)).to(device)
+        yb = torch.from_numpy(np.ascontiguousarray(y)).to(device)
         kwargs = {}
         if is_iecnn:
             tau0 = temperature_at(step, steps, tau_warmup, tau_max, tau_min)
             floor = weight_floor_at(step, steps, weight_floor_fraction / _iecnn_n_dots(model))
             hard = use_hard_batch(step, steps, hard_start, hard_frac, hard_rng)
             kwargs = {"tau0": tau0, "hard_mode": bool(hard), "floor": floor}
-        # training.precision = "bf16" runs forward+loss under CPU bf16
-        # autocast (speed goal opt 2, 2026-11-14): the [B,T,N,V] blocks are
+        # training.precision = "bf16" runs forward+loss under bf16 autocast
+        # (speed goal opt 2, 2026-11-14): the [B,T,N,V] blocks are
         # memory-bound, so halved bytes ~ halved time on those ops. Default
         # "fp32" = autocast disabled = bit-identical to before. Evals always
         # run in fp32 so recorded scores keep a single precision story.
-        with torch.autocast("cpu", dtype=torch.bfloat16, enabled=use_bf16):
+        # Autocast follows training.device (GPU port: was hard-coded "cpu").
+        with torch.autocast(device, dtype=torch.bfloat16, enabled=use_bf16):
             out = model(xb, **kwargs)
             loss = main_loss(out["final_log_probs"], yb)
             aux_parts = {"main": float(loss.item())}

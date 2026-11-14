@@ -44,7 +44,7 @@ def main() -> None:
     args = ap.parse_args()
 
     d = Path(args.ckpt_dir)
-    ck = torch.load(d / "checkpoint.pt", weights_only=False)
+    ck = torch.load(d / "checkpoint.pt", map_location="cpu", weights_only=False)
     summary = json.load(open(d / "summary.json"))
     config = json.load(open(d / "config_used.json"))
     run = d.name

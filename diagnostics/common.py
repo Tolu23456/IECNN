@@ -39,7 +39,7 @@ def load_run(ckpt_path, config_path=None, vocab=None,
     p = Path(ckpt_path)
     d = p if p.is_dir() else p.parent
     ck = torch.load(d / "checkpoint.pt" if p.is_dir() else p,
-                    weights_only=False)
+                    map_location="cpu", weights_only=False)
     if config_path:
         config = json.loads(Path(config_path).read_text())
     else:
