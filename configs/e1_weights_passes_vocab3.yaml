@@ -1,0 +1,15 @@
+# E1 vocab3 pilot: same as e1_weights_passes_vocab2 but vocab_v3 @ 4096.
+# Completes the bpc-vs-vocab curve (512: 3.20294, 2048: 2.59667) — does the
+# extra vocab keep paying, or does the fertility curve's flattening
+# (2.86 -> 3.20 chars/token) plus the 2x bigger output layer cost more than
+# it gains? Fertility data (results/vocab_v3_compression.json).
+#
+# Memory: the per-pass per-dot log_pi block [B,T,N,V] scales with V —
+# vocab2@16 was 805 MB retained, so vocab3 runs at batch_size 8 to keep the
+# same footprint class as vocab2@16.
+base: e1_weights_passes_pilot.yaml
+name: e1_weights_passes_vocab3
+ubm:
+  vocab_file: UBM/vocab_v3.json
+training:
+  batch_size: 8
