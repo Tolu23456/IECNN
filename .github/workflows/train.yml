@@ -166,8 +166,11 @@ jobs:
           overwrite: true
 
       # ---- chain control: only if the time cap was hit, re-dispatch self ---
+      # NOT on cancel: a cancelled run's chain dispatch would start training
+      # from a HALF-WRITTEN checkpoint (observed 2026-11-14 when the fleet
+      # was stopped manually).
       - name: Chain control
-        if: always()
+        if: always() && !cancelled()
         env:
           GH_TOKEN: ${{ github.token }}
           SEED: ${{ matrix.seed }}
@@ -189,7 +192,13 @@ jobs:
           echo "chained to a new chunk (artifact $ARTIFACT)"
 
       - name: Commit results when finished
-        if: always() && github.event.inputs.commit_results == 'true'
+        # NOT on cancel: a cancelled run's checkout can be hours older than
+        # main, and its results/ ride-along then OVERWRITES fresher files
+        # (observed 2026-11-14: the e0 warmstart CSV lost 32 rows, back from
+        # step 13680 to 6240, when a cancelled chunk 4 committed its stale
+        # snapshot). Upload-artifact below still fires on cancel — recovery
+        # from the artifact stays possible without main being rolled back.
+        if: always() && !cancelled() && github.event.inputs.commit_results == 'true'
         run: |
           set -euo pipefail
           OUT="checkpoints/${{ github.event.inputs.config }}_seed${{ matrix.seed }}"
