@@ -7,6 +7,7 @@ or a config-parsing drift fails the build.
 from __future__ import annotations
 
 import json
+import re
 import sys
 import threading
 import urllib.request
@@ -30,6 +31,10 @@ def _get(url: str):
 
 
 def _start():
+    # each logical "server start" in tests shares the imported module, so
+    # reset the per-IP rate window between tests
+    if hasattr(server_mod, "_RATE_HITS"):
+        server_mod._RATE_HITS.clear()
     srv = server_mod.ThreadingHTTPServer(("127.0.0.1", 0), server_mod.Handler)
     t = threading.Thread(target=srv.serve_forever, daemon=True)
     t.start()
@@ -787,6 +792,108 @@ def test_every_page_has_empty_state_with_next_action():
     assert "Could not build this page" in js
 
 
+# --------------------------------------------- POST security (step 5) -------
+def test_post_requires_session_token():
+    srv, base = _start()
+    try:
+        # the token is embedded into served pages, not exposed as an API
+        st, body = _get(base + "/")
+        assert st == 200 and b"IECNN_SESSION" in body
+        assert server_mod.SESSION_TOKEN.encode() in body
+        # GETs stay open without any token
+        st, _ = _get(base + "/api/runs")
+        assert st == 200
+        # POST without / with a wrong token → 401
+        for tok in (None, "wrong-token-123"):
+            st, raw = _post(base, "/api/generate", {"prompt": "hi"}, token=tok)
+            d = json.loads(raw)
+            assert st == 401, (tok, st, d)
+            assert "X-IECNN-Session" in d["error"]
+    finally:
+        srv.shutdown()
+
+
+def test_post_rejects_foreign_host_and_cross_origin():
+    """The GH layer is faked for every POST that passes the gate — tests
+    must never dispatch the real generate workflow."""
+    with _FakeGH(routes={"dispatches": (204, None)}):
+        srv, base = _start()
+        port = base.rsplit(":", 1)[1]
+        try:
+            # DNS-rebinding guard: a foreign Host header is 403
+            st, raw = _post(base, "/api/generate", {"prompt": "hi"},
+                            headers={"Host": "evil.example"})
+            assert st == 403 and "Host" in json.loads(raw)["error"]
+            # browser-style cross-origin POST is 403
+            st, raw = _post(base, "/api/generate", {"prompt": "hi"},
+                            headers={"Origin": "https://evil.example"})
+            assert st == 403 and "origin" in json.loads(raw)["error"].lower()
+            # same-origin Origin (what the real page sends) passes the
+            # gate — with the faked GH layer the dispatch goes through
+            st, raw = _post(base, "/api/generate", {"prompt": "hi"},
+                            headers={"Origin": f"http://127.0.0.1:{port}"})
+            d = json.loads(raw)
+            assert st == 200 and d.get("ok") is True, d
+            # allowed host spellings all pass the Host check
+            for host in (f"localhost:{port}", "127.0.0.1",
+                         f"127.0.0.1:{port}", f"[::1]:{port}"):
+                st, raw = _post(base, "/api/generate", {"prompt": "hi"},
+                                headers={"Host": host})
+                d = json.loads(raw)
+                assert st == 200 and d.get("ok") is True, (host, d)
+        finally:
+            srv.shutdown()
+
+
+def test_post_generate_rate_limited():
+    """5 generate POSTs/min/IP; the 6th within the window is 429."""
+    with _FakeGH(routes={"dispatches": (204, None)}) as fake:
+        srv, base = _start()
+        try:
+            codes = []
+            for i in range(6):
+                req = urllib.request.Request(
+                    base + "/api/generate", method="POST",
+                    data=json.dumps({"prompt": f"p{i}"}).encode(),
+                    headers={"Content-Type": "application/json",
+                             "X-IECNN-Session": server_mod.SESSION_TOKEN})
+                try:
+                    with urllib.request.urlopen(req, timeout=15) as r:
+                        codes.append((r.status, r.headers.get("Retry-After")))
+                except urllib.error.HTTPError as e:
+                    codes.append((e.code, e.headers.get("Retry-After")))
+            assert [c[0] for c in codes[:5]] == [200] * 5, codes
+            assert codes[5][0] == 429
+            retry = codes[5][1]
+            assert retry is not None and 1 <= int(retry) <= 61
+            assert fake.calls[0][1] == "POST"     # dispatches still flowed
+        finally:
+            srv.shutdown()
+    # a fresh "server start" (fresh rate window) accepts generate again
+    with _FakeGH(routes={"dispatches": (204, None)}):
+        srv, base = _start()
+        try:
+            st, raw = _post(base, "/api/generate", {"prompt": "after"})
+            assert st == 200, json.loads(raw)
+        finally:
+            srv.shutdown()
+
+
+def test_host_header_check_is_shared_by_all_posts():
+    """The gate is in do_POST, not in one endpoint: future POST endpoints
+    inherit it."""
+    srv, base = _start()
+    try:
+        st, raw = _post(base, "/api/generate", {"prompt": "hi"},
+                        headers={"Host": "evil.example"})
+        assert st == 403
+        # GETs are unaffected by any of the POST guards
+        st, _ = _get(base + "/api/generations")
+        assert st == 200
+    finally:
+        srv.shutdown()
+
+
 # ------------------------------------------------------------- static ------
 def test_static_pages_served():
     srv, base = _start()
@@ -955,16 +1062,33 @@ def test_viz_endpoint_carries_consensus_audit():
 
 
 # ----------------------------------------------------------- playground ----
-def _post(base: str, path: str, body) -> tuple[int, bytes]:
+def _post(base: str, path: str, body, token: str = "auto",
+          headers: dict | None = None) -> tuple[int, bytes]:
+    h = {"Content-Type": "application/json"}
+    if token == "auto":                      # behave like the real page
+        token = server_mod.SESSION_TOKEN
+    if token is not None:
+        h["X-IECNN-Session"] = token
+    h.update(headers or {})
     req = urllib.request.Request(
         base + path, method="POST",
         data=json.dumps(body).encode("utf-8"),
-        headers={"Content-Type": "application/json"})
+        headers=h)
     try:
         with urllib.request.urlopen(req, timeout=15) as r:
             return r.status, r.read()
     except urllib.error.HTTPError as e:              # noqa: F821
         return e.code, e.read()
+
+
+def _page_token(base: str) -> str:
+    """The per-startup token as a real client would get it: out of the
+    served index.html."""
+    st, body = _get(base + "/")
+    assert st == 200
+    m = re.search(rb'window\.IECNN_SESSION="([A-Za-z0-9_\-]+)"', body)
+    assert m, "index.html must embed window.IECNN_SESSION"
+    return m.group(1).decode()
 
 
 class _FakeGH:

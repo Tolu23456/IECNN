@@ -26,8 +26,12 @@ import base64
 import csv
 import json
 import re
+import secrets
+import socket
 import subprocess
 import sys
+import threading
+import time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -1345,22 +1349,47 @@ class Handler(BaseHTTPRequestHandler):
             sys.stderr.write("  %s\n" % (fmt % args))
 
     # ------------------------------------------------------------ helpers --
-    def _send(self, code: int, body: bytes, ctype: str):
+    def _send(self, code: int, body: bytes, ctype: str, headers=None):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-cache")
         self.send_header("X-Content-Type-Options", "nosniff")
+        for k, v in (headers or []):
+            self.send_header(k, v)
         self.end_headers()
         self.wfile.write(body)
 
-    def _send_json(self, code: int, obj):
-        self._send(code, _json_bytes(obj), "application/json; charset=utf-8")
+    def _send_json(self, code: int, obj, headers=None):
+        self._send(code, _json_bytes(obj), "application/json; charset=utf-8",
+                   headers)
+
+    # ------------------------------------------------- POST security gate --
+    def _gate_post(self, path: str):
+        """None = allowed; else (code, payload, retry_after=0) to reject with.
+        Rate limiting is enforced separately, after body validation, so junk
+        requests cannot exhaust a real user's budget."""
+        if not _host_allowed(self.headers.get("Host", "")):
+            return 403, {"error": "foreign Host header rejected"}, 0
+        if not _origin_allowed(self.headers.get("Origin", ""),
+                               self.headers.get("Host", "")):
+            return 403, {"error": "cross-origin POST rejected"}, 0
+        if path != "/api/generate":
+            return None
+        if self.headers.get("X-IECNN-Session", "") != SESSION_TOKEN:
+            return (401, {"error": "missing or wrong X-IECNN-Session token "
+                                   "(reload the page to get a fresh one)"}, 0)
+        return None
 
     # ---------------------------------------------------------------- POST --
     def do_POST(self):
         path = self.path.split("?")[0]
         try:
+            gate = self._gate_post(path)
+            if gate is not None:
+                headers = ([("Retry-After", str(gate[2]))]
+                           if gate[0] == 429 else None)
+                return self._send_json(gate[0], gate[1], headers)
             if path == "/api/generate":
                 try:
                     n = int(self.headers.get("Content-Length") or 0)
@@ -1374,6 +1403,20 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception:                            # noqa: BLE001
                     return self._send_json(400,
                                            {"error": "body is not valid JSON"})
+                # validate BEFORE the rate window: junk bodies must not eat
+                # a real user's 5-per-minute budget
+                if isinstance(body, dict):
+                    _, verr = _clamp_playground(body)
+                else:
+                    verr = "body must be a JSON object"
+                if verr:
+                    return self._send_json(400, {"error": verr})
+                ok, retry = _rate_limit(self.client_address[0])
+                if not ok:
+                    return self._send_json(
+                        429, {"error": "rate limit: 5 generate requests per "
+                                       "minute; try again later"},
+                        [("Retry-After", str(retry))])
                 out = api_generate(body)
                 # "status" here is an HTTP code only on error payloads
                 code = out["status"] if isinstance(out.get("status"), int) else 200
@@ -1463,9 +1506,93 @@ class Handler(BaseHTTPRequestHandler):
                      "css": "text/css; charset=utf-8",
                      "json": "application/json"}.get(f.suffix.lstrip("."),
                                                      "application/octet-stream")
-            return self._send(200, f.read_bytes(), ctype)
+            data = f.read_bytes()
+            if ctype.startswith("text/html"):
+                data = _inject_session(data)   # per-startup session token
+            return self._send(200, data, ctype)
         except Exception as e:                                   # noqa: BLE001
             return self._send_json(500, {"error": repr(e)})
+
+
+# ------------------------------------------ POST security (step 5) ----------
+# POSTs are the only write path (they dispatch the generate workflow), so
+# they carry a small same-origin gate:
+#   1. session token  — one per server start (below), embedded into served
+#      HTML by _inject_session; required as the X-IECNN-Session header
+#      (401 otherwise).
+#   2. Host check     — DNS-rebinding guard; foreign Host headers are 403.
+#   3. Origin check   — when a browser sends an Origin, it must be this
+#      host (403 otherwise). Non-browser clients (no Origin) still need
+#      the session token.
+#   4. rate limit     — 5 generate POSTs / minute / client IP → 429 with
+#      a Retry-After header.
+# GETs are read-only views over committed files and stay unauthenticated.
+
+SESSION_TOKEN = secrets.token_urlsafe(32)
+
+_ALLOWED_HOSTS = {"127.0.0.1", "localhost", "::1", "[::1]", "",
+                  socket.gethostname().lower()}
+
+
+def _normalize_host(h: str) -> str:
+    """'127.0.0.1:8765' / '[::1]:8765' / 'LOCALHOST' → bare, lowercased host."""
+    h = (h or "").strip().lower()
+    if h.count(":") >= 2 and h.startswith("["):        # [::1]:port
+        return h[1:].split("]", 1)[0]
+    if h.count(":") == 1:                              # host:port
+        return h.rsplit(":", 1)[0]
+    return h.strip("[]")                               # bare (maybe IPv6)
+
+
+def _host_allowed(host_header: str) -> bool:
+    if not host_header:
+        return True              # HTTP/1.0-style client: nothing to bind to
+    return _normalize_host(host_header) in _ALLOWED_HOSTS
+
+
+def _origin_allowed(origin: str, host_header: str) -> bool:
+    if not origin:
+        return True              # non-browser client: token check still applies
+    m = re.match(r"^[a-z][a-z0-9+.\-]*://\[?([^\]/]+)\]?(/|$)", origin.strip().lower())
+    if not m:
+        return False
+    return _normalize_host(m.group(1)) == _normalize_host(host_header)
+
+
+_RATE_LOCK = threading.Lock()
+_RATE_HITS: dict = {}            # client ip -> [monotonic timestamps]
+
+
+def _rate_limit(ip: str, limit: int = 5, window_s: float = 60.0):
+    """Sliding window; returns (allowed, retry_after_seconds)."""
+    now = time.monotonic()
+    with _RATE_LOCK:
+        hits = [t for t in _RATE_HITS.get(ip, []) if now - t < window_s]
+        if len(hits) >= limit:
+            retry = max(1, int(window_s - (now - hits[0])) + 1)
+            _RATE_HITS[ip] = hits
+            return False, retry
+        hits.append(now)
+        _RATE_HITS[ip] = hits
+        return True, 0
+
+
+def _inject_session(html: bytes) -> bytes:
+    """Embed the per-startup session token into a served HTML page.
+
+    app.js reads window.IECNN_SESSION and echoes it back as the
+    X-IECNN-Session header on POSTs.
+    """
+    script = ("<script>window.IECNN_SESSION="
+              + json.dumps(SESSION_TOKEN) + ";</script>").encode("utf-8")
+    low = html.lower()
+    if b"</head>" in low:
+        i = low.index(b"</head>")
+        return html[:i] + script + html[i:]
+    if b"</body>" in low:
+        i = low.index(b"</body>")
+        return html[:i] + script + html[i:]
+    return html + script
 
 
 def main() -> None:

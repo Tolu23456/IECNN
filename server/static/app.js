@@ -24,11 +24,17 @@ async function api(path) {
   return r.json();
 }
 async function apiSend(path, body) {
+  const headers = { "Content-Type": "application/json" };
+  if (window.IECNN_SESSION) headers["X-IECNN-Session"] = window.IECNN_SESSION;
   const r = await fetch(path, { method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers,
     body: JSON.stringify(body) });
   const d = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(d.error || `${path} → HTTP ${r.status}`);
+  if (!r.ok) {
+    const retry = r.headers.get("Retry-After");
+    throw new Error((d.error || `${path} → HTTP ${r.status}`) +
+      (retry ? ` (retry after ${retry}s)` : ""));
+  }
   return d;
 }
 const fmt = (x, d = 4) => (x === null || x === undefined ||
