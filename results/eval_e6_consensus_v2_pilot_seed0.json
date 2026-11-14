@@ -1,0 +1,16 @@
+{
+ "ckpt_dir": "checkpoints/e6_consensus_v2_pilot_seed0",
+ "best_step": 600,
+ "tau0_used": 0.94079,
+ "best_full_val_bpc_at_best_tau": 2.83524,
+ "per_pass_bpc": [
+  3.062,
+  2.86462,
+  2.83524
+ ],
+ "weight_entropy": 0.53828,
+ "hard_bpc_at_best_tau": 2.8351857002979997,
+ "mode_gap": -5e-05,
+ "bpc_train_slice": 2.95449,
+ "vocab_sha256": "07a93dfd60c41ca5f904ed479dd4c96ea66307d89553fb6410ba12d0a37ecbee"
+}
