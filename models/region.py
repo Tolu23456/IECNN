@@ -7,6 +7,7 @@ The consensus machinery lives in `consensus.py` (label-free, C2).
 from __future__ import annotations
 
 import math
+import os
 
 import torch
 import torch.nn as nn
@@ -96,25 +97,78 @@ class Region(nn.Module):
         All label-free and all already computed inside the pass loop (the
         oracle only ever TRAINS the head — see train/losses.py — it is not an
         input). Pass 1 uses neutral values for the not-yet-existing weight
-        and region entropy.
+        and region entropy. Leading dims are agnostic: callers pass either
+        [B, T, N, ...] or a row chunk [c, N, ...].
         """
         from models.verifier import verifier_features
-        b, t, n = gamma.shape
-        top = pi.argmax(-1)                                  # [B, T, N]
+        n = gamma.shape[-1]
+        top = pi.argmax(-1)                                  # [..., N]
         same = (top.unsqueeze(-1) == top.unsqueeze(-2)).float()
-        agree = (same.sum(-1) - 1.0) / max(n - 1, 1)         # [B, T, N]
+        agree = (same.sum(-1) - 1.0) / max(n - 1, 1)         # [..., N]
         state_norm = state.norm(dim=-1) / math.sqrt(self.d_s)
         if w_prev is None:
             w_feat = torch.full_like(gamma, 1.0 / n)
         else:
             w_feat = w_prev
         if log_b_prev is not None:
-            h_region = consensus.entropy(log_b_prev)         # [B, T]
+            h_region = consensus.entropy(log_b_prev)         # [...] leading dims
         else:
-            h_region = torch.zeros(b, t, device=device)
+            h_region = torch.zeros(gamma.shape[:-1], device=device)
         pass_frac = torch.tensor(p / self.n_passes, device=device)
         return verifier_features(gamma, w_feat, agree, state_norm, err,
                                  h_region, pass_frac)
+
+    # ------------------------------------------------------------------
+    def _pass_consensus(self, log_pi_c, gamma_c, trust_term_c, trust_prev_c,
+                        state_c, err_c, w_prev_c, log_b_prev_c, dot_mask,
+                        p: int, tau_p: float, hard_mode: bool, floor: float):
+        """One row-chunk of the per-pass consensus (see the chunking note in
+        `forward`). Inputs/outputs carry a leading chunk dim instead of
+        [B, T]: log_pi_c [c, N, V], gamma/trust_term/trust/w [c, N],
+        state [c, N, d_s], err [c, N, 3], log_b_prev [c, V]. Returns
+        (trust_c, w_c, log_b_c, v_out_c, err_next_c)."""
+        pi = log_pi_c.exp()
+        v_out = None
+        if self.use_weights:
+            # loo/JS are computed ONCE here and reused for the error feature
+            # of the next pass (spec 04 = same numbers either way; computing
+            # them twice cost ~30% of the forward). The _fast variant reuses
+            # log_pi for the JS entropy terms (last-bit differences only).
+            scores, loo, js = consensus.compute_scores_fast(
+                pi, log_pi_c, gamma_c, trust_term_c, self.alpha, self.beta,
+                return_parts=True)
+            if self.verifier is not None:
+                # E6: the verifier's trust judgment joins the consensus
+                # scores (scaled — it must EARN influence from small).
+                feats = self._verifier_features(
+                    pi, gamma_c, state_c, err_c, w_prev_c, log_b_prev_c,
+                    p, log_pi_c.device)
+                v_out = self.verifier(feats).squeeze(-1)         # [c, N]
+                scores = scores + self.v_scale * v_out
+            trust_c = consensus.update_trust(trust_prev_c, scores, self.rho)
+            w_c = consensus.compute_weights(trust_c, tau_p,
+                                            floor=0.0 if hard_mode else floor)
+            err_next = consensus.error_features_from_parts(pi, loo, js)
+        else:
+            trust_c = None
+            w_c = consensus.uniform_weights(self.n_dots, pi)   # rung E0
+            if p < self.n_passes:      # only a LATER pass needs these numbers
+                crowd = consensus.leave_one_out_mean(pi)
+                js_own = consensus.js_from_parts_fast(pi, log_pi_c, crowd)
+                err_next = consensus.error_features_from_parts(pi, crowd, js_own)
+            else:
+                err_next = None
+
+        if dot_mask is not None:      # dot dropout: excluded dot gets 0
+            w_c = w_c * dot_mask
+            w_c = w_c / w_c.sum(-1, keepdim=True).clamp_min(1e-9)
+
+        if self.pooling == "mixture":
+            b_mix = consensus.pool_mixture(pi, w_c)
+            log_b_c = (b_mix / b_mix.sum(-1, keepdim=True).clamp_min(1e-12)).clamp_min(1e-12).log()
+        else:
+            log_b_c = consensus.pool_log_linear(log_pi_c, w_c)
+        return trust_c, w_c, log_b_c, v_out, err_next
 
     # ------------------------------------------------------------------
     def forward(self, rows: torch.Tensor, emb_table: torch.Tensor,
@@ -134,13 +188,22 @@ class Region(nn.Module):
 
         state = self.dots.initial_state((b, t))
         trust = None
-        pi_prev = None
-        prev_crowd = prev_js = None
         w_prev = None
         state_prev = None
         msg_read = None
         log_b_prev = None
         per_pass = []
+
+        # chunked consensus (speed opt 4): rows per consensus slice; 0 or
+        # >= f disables chunking (single slice = the pre-opt-4 math exactly).
+        f_total = b * t
+        chunk = f_total
+        try:
+            cz = int(os.environ.get("IECNN_CONS_CHUNK", "64"))
+        except ValueError:
+            cz = 64
+        if 0 < cz < f_total:
+            chunk = cz
 
         # dot dropout (spec table at E4: "5% of steps, one random dot masked
         # per region"): active only in training; the SAME dot is masked across
@@ -153,68 +216,62 @@ class Region(nn.Module):
 
         for p in range(1, self.n_passes + 1):
             tau_p = tau0 * (self.kappa ** (p - 1))
+            if p == 1:
+                err = torch.zeros(b, t, n, 3, device=device, dtype=rows.dtype)
             if p == 1 or not self.use_weights:
                 h_pool = torch.zeros(b, t, n, self.d_s, device=device, dtype=rows.dtype)
             else:
                 pooled = torch.einsum("bfn,bfnd->bfd", w_prev, state_prev)  # [B,T,d_s]
                 h_pool = pooled[:, :, None, :].expand(b, t, n, self.d_s)
                 # ^ every dot reads the SAME pooled opinion (spec 01, input table)
-            if p == 1:
-                err = torch.zeros(b, t, n, 3, device=device, dtype=rows.dtype)
-            else:
-                # error features from the numbers already computed at pass p-1
-                err = consensus.error_features_from_parts(pi_prev, prev_crowd, prev_js)
             out = self.dots(wind_k, wind_v, valid, h_pool, err, round_idx=p - 1,
                             msg_in=msg_read if p > 1 else None, state=state,
                             emb_table=emb_table)
             state_prev = out.state
-            pi = out.log_pi.exp()
-            v_out = None
 
+            # ---- consensus + pooling, chunked over rows (speed opt 4) ----
+            # The [., N, V] chain (exp, loo, JS, scores, weights, pool) is
+            # memory-bound: whole-tensor it streams hundreds of MB through a
+            # small L3 several times per pass. In `chunk`-row slices the
+            # working set stays cache-hot and the big temporaries (loo, m,
+            # logm) exist only per chunk. chunk == f reproduces the previous
+            # single-slice math op-for-op (same ops, same order); only the
+            # pooling GEMM's reassociation differs (last bit).
+            f = b * t
+            log_pi_f = out.log_pi.reshape(f, n, -1)          # contiguous views
+            gamma_f = out.gamma.reshape(f, n)
+            trust_term_f = out.trust_term.reshape(f, n)
+            state_f = out.state.reshape(f, n, self.d_s)
+            err_f = err.reshape(f, n, 3)
+            w_prev_f = w_prev.reshape(f, n) if w_prev is not None else None
+            trs, ws, lbs, vos, ens = [], [], [], [], []
+            for i in range(0, f, chunk):
+                sl = slice(i, min(i + chunk, f))
+                tr_c, w_c, lb_c, v_c, en_c = self._pass_consensus(
+                    log_pi_f[sl], gamma_f[sl], trust_term_f[sl],
+                    trust[sl] if trust is not None else None,
+                    state_f[sl], err_f[sl],
+                    w_prev_f[sl] if w_prev_f is not None else None,
+                    log_b_prev[sl] if log_b_prev is not None else None,
+                    dot_mask, p, tau_p, hard_mode, floor)
+                trs.append(tr_c); ws.append(w_c); lbs.append(lb_c)
+                vos.append(v_c); ens.append(en_c)
             if self.use_weights:
-                # loo/JS are computed ONCE here and reused for the error
-                # feature of the next pass (spec 04 = same numbers either way;
-                # computing them twice cost ~30% of the forward). The _fast
-                # variant reuses log_pi for the JS entropy terms (last-bit
-                # differences only; see models/consensus.py docstrings).
-                scores, loo, js = consensus.compute_scores_fast(
-                    pi, out.log_pi, out.gamma, out.trust_term,
-                    self.alpha, self.beta, return_parts=True)
-                v_out = None
-                if self.verifier is not None:
-                    # E6: the verifier's trust judgment joins the consensus
-                    # scores (scaled — it must EARN influence from small).
-                    feats = self._verifier_features(
-                        pi, out.gamma, out.state, err, w_prev, log_b_prev,
-                        p, device)
-                    v_out = self.verifier(feats).squeeze(-1)     # [B, T, N]
-                    scores = scores + self.v_scale * v_out
-                trust = consensus.update_trust(trust, scores, self.rho)
-                w = consensus.compute_weights(trust, tau_p, floor=0.0 if hard_mode else floor)
-                crowd, js_own = loo, js
-            else:
-                w = consensus.uniform_weights(n, pi)          # rung E0: plain ensemble
-                if p < self.n_passes:      # only a LATER pass needs these numbers
-                    crowd = consensus.leave_one_out_mean(pi)
-                    js_own = consensus.js_from_parts_fast(pi, out.log_pi, crowd)
-                else:
-                    crowd = js_own = None
-
-            if dot_mask is not None:      # dot dropout: excluded dot gets 0
-                w = w * dot_mask
-                w = w / w.sum(-1, keepdim=True).clamp_min(1e-9)
-
-            if self.pooling == "mixture":
-                b_mix = consensus.pool_mixture(pi, w)
-                log_b = (b_mix / b_mix.sum(-1, keepdim=True).clamp_min(1e-12)).clamp_min(1e-12).log()
-            else:
-                log_b = consensus.pool_log_linear(out.log_pi, w)
+                trust = torch.cat(trs, 0)
+            w_f = torch.cat(ws, 0)
+            log_b_f = torch.cat(lbs, 0)
+            v_out = torch.cat(vos, 0) if self.verifier is not None else None
+            # error features for the NEXT pass, computed now (chunk-wise) so
+            # this pass's pi/loo never have to be kept whole
+            if p < self.n_passes:
+                err = torch.cat(ens, 0).reshape(b, t, n, 3)
+            w = w_f.reshape(b, t, n)
+            log_b = log_b_f.reshape(b, t, -1)
             per_pass.append({"log_pi": out.log_pi, "weights": w,
                              "log_b": log_b, "gamma": out.gamma, "tau": tau_p,
-                             "verifier": v_out})
-            log_b_prev = log_b
-            pi_prev = pi
-            prev_crowd, prev_js = crowd, js_own
+                             "verifier": (v_out.reshape(b, t, n)
+                                          if v_out is not None else None)})
+            log_b_prev = log_b_f
             w_prev = w
             if self.messages is not None:
                 msg_write = self.messages(out.state, training=training)   # read at p+1

@@ -113,3 +113,49 @@ def test_dot_drops_its_pooled_weight():
     b = model0(x)["final_log_probs"]
     assert torch.allclose(a, b)
 
+
+
+# ---- speed opt 4: chunked consensus (2026-11-14) ---------------------------
+def test_chunked_consensus_matches_single_slice():
+    """Chunked consensus (IECNN_CONS_CHUNK) must reproduce the single-slice
+    math: same outputs to 1e-5 (pooling GEMM reassociation is last-bit), same
+    loss, and every dot still gets gradients."""
+    import os
+    from train.losses import main_loss
+
+    model = _model()
+    torch.manual_seed(0)
+    x = torch.randint(0, 512, (2, 32))
+    y = torch.randint(0, 512, (2, 32))
+
+    saved = os.environ.get("IECNN_CONS_CHUNK")
+    try:
+        os.environ["IECNN_CONS_CHUNK"] = "0"          # single slice
+        out1 = model(x)
+        loss1 = main_loss(out1["final_log_probs"], y)
+        loss1.backward()
+        g1 = {n: p.grad.detach().clone() for n, p in model.named_parameters()
+              if p.grad is not None}
+        model.zero_grad(set_to_none=True)
+
+        os.environ["IECNN_CONS_CHUNK"] = "7"          # ragged chunks
+        model2 = _model()
+        out7 = model2(x)
+        loss7 = main_loss(out7["final_log_probs"], y)
+        loss7.backward()
+    finally:
+        if saved is None:
+            os.environ.pop("IECNN_CONS_CHUNK", None)
+        else:
+            os.environ["IECNN_CONS_CHUNK"] = saved
+
+    assert abs(loss1.item() - loss7.item()) < 1e-5, (loss1.item(), loss7.item())
+    for a, b in ((out1["final_log_probs"], out7["final_log_probs"]),):
+        assert (a - b).abs().max().item() < 1e-5
+    for r, (ro1, ro7) in enumerate(zip(out1["region_outputs"],
+                                       out7["region_outputs"])):
+        assert (ro1["weights"] - ro7["weights"]).abs().max().item() < 1e-5, r
+        assert (ro1["log_b"] - ro7["log_b"]).abs().max().item() < 1e-5, r
+    for n_, p in model2.named_parameters():
+        if n_ in g1 and g1[n_].abs().sum() > 0:
+            assert p.grad is not None and torch.isfinite(p.grad).all(), n_
