@@ -156,9 +156,13 @@ def main() -> None:
                 lp0 = _next_log_probs(model, out, kind)
             lp = lp0 / args.temperature
             if args.top_k > 0:
+                # TRUE top-k: tokens outside the top-k are excluded (-inf),
+                # not merely clipped to the kth value. clamp_max(kth) kept
+                # the whole tail in the distribution (each tail token at p_k),
+                # flattening sampling — found by the nucleus tests, 2026-11-14.
                 k = min(args.top_k, lp.shape[-1])
                 kth = lp.topk(k).values[-1]
-                lp = lp.clamp_max(kth)
+                lp = lp.masked_fill(lp < kth, float("-inf"))
             if args.top_p < 1.0:
                 # nucleus: see nucleus_mask (applied after top-k)
                 lp = nucleus_mask(lp, args.top_p)
