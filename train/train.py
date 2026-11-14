@@ -222,6 +222,7 @@ def train_one(config: dict, seed: int, out_dir: Path, max_steps: int | None = No
         "lambda_c": float(tcfg_all.get("lambda_c", 0.0)),   # decorrelation (E4)
         "lambda_k": float(tcfg_all.get("lambda_k", 0.0)),   # confidence calib.
         "lambda_w": float(tcfg_all.get("lambda_w", 0.0)),   # weight entropy bonus
+        "lambda_w_cut_frac": float(tcfg_all.get("lambda_w_cut_frac", 0.2)),
         "lambda_o": float(tcfg_all.get("lambda_o", 0.0)),   # E6 per-dot oracle
         "lambda_v": float(tcfg_all.get("lambda_v", 0.0)),   # E6 verifier BCE
         "gamma_b": float(tcfg_all.get("gamma_b", 2.0)),
@@ -286,7 +287,8 @@ def train_one(config: dict, seed: int, out_dir: Path, max_steps: int | None = No
             loss = main_loss(out["final_log_probs"], yb)
             aux_parts = {"main": float(loss.item())}
 
-            if is_iecnn and any(v != 0 for k, v in lambdas.items() if k != "gamma_b"):
+            if is_iecnn and any(v != 0 for k, v in lambdas.items()
+                                if k not in ("gamma_b", "lambda_w_cut_frac")):
                 from train.losses import (region_loss, boosted_dot_loss,
                                           decorrelation_penalty, confidence_loss,
                                           weight_entropy_bonus, oracle_dot_loss,
@@ -313,7 +315,9 @@ def train_one(config: dict, seed: int, out_dir: Path, max_steps: int | None = No
                     loss = loss + lambdas["lambda_k"] * lk
                     aux_parts["L_conf"] = float(lk.detach())
                 if lambdas["lambda_w"] > 0:
-                    lw_val = weight_entropy_lambda(step, steps, lambdas["lambda_w"])
+                    lw_val = weight_entropy_lambda(step, steps,
+                                                   lambdas["lambda_w"],
+                                                   lambdas["lambda_w_cut_frac"])
                     lw = weight_entropy_bonus(last_pass["weights"])
                     loss = loss - lw_val * lw
                     aux_parts["L_w"] = -float(lw.detach()) * lw_val

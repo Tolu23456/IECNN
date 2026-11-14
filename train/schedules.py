@@ -45,9 +45,16 @@ def correlation_lambda(step: int, ramp_steps: int, final_value: float) -> float:
     return final_value * (step / max(1, ramp_steps))
 
 
-def weight_entropy_lambda(step: int, total_steps: int, start_value: float) -> float:
-    """Weight-entropy bonus decays to zero by 20% of training (spec 06, 2.6)."""
-    cut = 0.2 * total_steps
+def weight_entropy_lambda(step: int, total_steps: int, start_value: float,
+                          cut_frac: float = 0.2) -> float:
+    """Weight-entropy bonus decays to zero by `cut_frac` of training (spec 06, 2.6).
+
+    cut_frac defaults to 0.2 (spec value). Chunked runs are short, so a rung may
+    extend the bonus lifetime by setting training.lambda_w_cut_frac > 0.2.
+    """
+    if not (0.0 < cut_frac <= 1.0):
+        raise ValueError(f"lambda_w_cut_frac must be in (0, 1], got {cut_frac}")
+    cut = cut_frac * total_steps
     if step >= cut:
         return 0.0
     return start_value * (1.0 - step / cut)

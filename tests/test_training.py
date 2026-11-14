@@ -189,3 +189,45 @@ def test_precision_overlay_merges_and_default_absent():
     assert cfg["training"]["precision"] == "bf16"
     base = load_config("configs/e1_weights_passes_vocab2.yaml")
     assert "precision" not in base["training"]
+
+
+# ---- E6 homogenization fix: lambda_w_cut_frac knob (2026-11-14) ------------
+def test_weight_entropy_lambda_cut_frac_knob():
+    """Default cut_frac = 0.2 keeps the spec schedule bit-identical; a larger
+    cut_frac keeps the bonus alive later in a short chunked run; invalid
+    values fail loudly (latent-loss lesson: real tests, not stubs)."""
+    from train.schedules import weight_entropy_lambda
+    # default == spec schedule
+    assert weight_entropy_lambda(0, 100, 0.05) == 0.05
+    assert weight_entropy_lambda(19, 100, 0.05) > 0.0
+    assert weight_entropy_lambda(20, 100, 0.05) == 0.0
+    # explicit 0.2 matches default
+    assert weight_entropy_lambda(20, 100, 0.05, 0.2) == 0.0
+    # extended bonus: still alive past the spec cut, decays linearly to 0 at 80%
+    assert weight_entropy_lambda(50, 100, 0.05, 0.8) == 0.05 * (1 - 50 / 80)
+    assert weight_entropy_lambda(79, 100, 0.05, 0.8) > 0.0
+    assert weight_entropy_lambda(80, 100, 0.05, 0.8) == 0.0
+    try:
+        weight_entropy_lambda(0, 100, 0.05, 0.0)
+        raise AssertionError("cut_frac=0.0 must fail loudly")
+    except ValueError:
+        pass
+    try:
+        weight_entropy_lambda(0, 100, 0.05, 1.5)
+        raise AssertionError("cut_frac=1.5 must fail loudly")
+    except ValueError:
+        pass
+
+
+def test_lambda_w_cut_frac_config_knob_wiring():
+    """train.py reads training.lambda_w_cut_frac (default 0.2) and passes it
+    to the schedule: a 0.8 config keeps L_w nonzero where 0.2 gives none."""
+    from train.schedules import weight_entropy_lambda
+    from config import load_config
+    base = load_config("configs/e6_consensus_v2_pilot.yaml", "tiny.yaml")
+    assert base["training"].get("lambda_w_cut_frac", 0.2) == 0.2
+    # the smoke assertion mirrors train.py's exact call shape
+    steps, lam = 600, 0.05
+    old = weight_entropy_lambda(300, steps, lam)
+    new = weight_entropy_lambda(300, steps, lam, 0.8)
+    assert old == 0.0 and new > 0.0

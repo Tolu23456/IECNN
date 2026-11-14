@@ -1,0 +1,21 @@
+# E6b pilot (2h class): E6 consensus-v2 with the diversity fix from the
+# like-for-like audit (DECISIONS.md 2026-11-14).
+#
+# The audit found: the verifier extracts far more of the bases' knowledge
+# (extraction 16.7 -> 36.8%) BUT the committee collapsed (oracle top-1
+# 14.1 -> 7.5%, oracle top-5 33.7 -> 19.6%, overlap5 0.58 -> 0.74 — the
+# bases agree too much). Two schedule defects drove the homogenization:
+#   1. lambda_c (decorrelation) ramps over 5000 steps — in a 600-step pilot
+#      it never reached even 0.012. Now 0.3 with a 150-step ramp so bases
+#      are pushed apart while the committee is still forming.
+#   2. The lambda_w weight-entropy bonus decayed to zero by 20% of CHUNK
+#      steps (= step 120 here). lambda_w_cut_frac 0.8 keeps it alive for
+#      the whole run (train.py knob, default 0.2 = bit-identical legacy).
+# Everything else identical to e6_consensus_v2_pilot so bpc comparisons at
+# matched steps stay like-for-like.
+base: e6_consensus_v2_pilot.yaml
+name: e6b_diversity_pilot
+training:
+  lambda_c: 0.3
+  lambda_c_ramp_steps: 150
+  lambda_w_cut_frac: 0.8
