@@ -2,6 +2,29 @@
 
 Newest entry at the top.
 
+## 2026-11-14 (morning) — E6 "consensus-v2" built; expert-of-the-moment decoding shipped
+
+- **E6 implemented** (Tolu green-lit): per-region verifier head
+  (`models/verifier.py`, 8 label-free features → MLP → trust score, scaled
+  into the consensus scores by learned `v_scale` init 0.05), per-dot oracle
+  CE (`lambda_o=0.2`, weight-independent — the muted-dot fix), verifier BCE
+  (`lambda_v=0.5`) against truth-rank targets (1.0 at rank 1 → 0 at rank
+  V/8), outvoted positions oversampled 3×, diversity counter-weight
+  (`lambda_c=0.1`). λ_o/λ_v default 0: E0–E5 untouched (verified by
+  config-load asserts + bit-exactness tests in `tests/test_e6.py`).
+- **Six-metric acceptance logging**: `train_*_e6_seed*.csv` (pooled_top1,
+  oracle_top1, oracle_top5, outvote_rate, verifier_sel, overlap5,
+  per-dot acc) + `summary.json.e6_consensus_metrics` at the best and final
+  points. Baselines to beat (E1@512, 255-pos audit): pooled 2.4%,
+  γ-proxy 3.9%, oracle 9.0%, outvote 80/255, overlap 0.58/5.
+- **Configs**: `e6_consensus_v2.yaml` (rung) +
+  `e6_consensus_v2_pilot.yaml` (2h, vocab2 @2048 class → compare vs
+  E1 vocab2's 2.59667 @780). Dispatch after CI green.
+- **Expert-of-the-moment decoding** documented (DECISIONS.md) and shipped:
+  `scripts/generate.py --expert-sampling` + generate.yml input
+  `expert_sampling` (sample dot by trust — weights squared — then token
+  from that dot's own distribution; chosen dot ids recorded in the JSON).
+
 ## 2026-11-14 (small hours) — bpc-vs-vocab curve complete: 4096 wins again; vocab3 to-plateau dispatched
 
 - **Full-val bpc vs vocab (corpus-verified, best-step tau), E1 pilot class:**

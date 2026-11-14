@@ -87,3 +87,75 @@ def weight_entropy_bonus(weights: torch.Tensor) -> torch.Tensor:
     """
     ent = -(weights * (weights + 1e-12).log()).sum(dim=-1)
     return ent.mean()
+
+
+# ---------------------------------------------------------------------
+# E6 consensus-v2 (Tolu, 2026-11-14): oracle-supervised consensus. The
+# oracle (true next token) is free at training time — today it only
+# reaches the dots INDIRECTLY through the pooled loss. These losses make
+# it direct. They violate spec C2 ("all label-free") deliberately; that
+# is the rung's recorded deviation.
+
+def _position_weights(final_log_probs: torch.Tensor, targets: torch.Tensor,
+                      outvote_weight: float) -> torch.Tensor:
+    """[B, T] oversampling mask: outvoted positions (pooled argmax wrong)
+    get `outvote_weight`x. The outvoted set (measured 80/255 on E1@512) is
+    the training set for "trust was wrong here"."""
+    with torch.no_grad():
+        wrong = (final_log_probs.argmax(-1) != targets).float()
+        return 1.0 + (outvote_weight - 1.0) * wrong
+
+
+def oracle_dot_loss(dot_log_probs: torch.Tensor,
+                    final_log_probs: torch.Tensor, targets: torch.Tensor,
+                    outvote_weight: float = 3.0) -> torch.Tensor:
+    """Per-dot CE toward the truth for EVERY dot, weight-independent.
+
+    dot_log_probs [B, T, N, V]; final_log_probs [B, T, V]; targets [B, T].
+    The muted-dot fix: a dot at consensus weight ~1e-4 receives essentially
+    zero gradient through pooling, so a wrongly-muted dot is locked out of
+    the classroom (measured: dots 1/6 at w~0.0001, yet dot 1 was right
+    15/255 times). This loss gives every dot its own line to the teacher
+    regardless of its weight. Outvoted positions are oversampled.
+    """
+    pos_w = _position_weights(final_log_probs, targets, outvote_weight)
+    ce = -dot_log_probs.gather(-1, targets[..., None, None].expand(
+        *targets.shape, dot_log_probs.size(-2), 1)).squeeze(-1)   # [B, T, N]
+    weighted = ce * pos_w[..., None]
+    if not torch.isfinite(weighted).all():
+        raise FloatingPointError("oracle_dot_loss produced non-finite values")
+    return weighted.sum() / (pos_w.sum() * dot_log_probs.size(-2))
+
+
+def verifier_truth_target(dot_log_probs: torch.Tensor, targets: torch.Tensor,
+                          span: int | None = None) -> torch.Tensor:
+    """Soft oracle target per dot: 1.0 at truth-rank 1, decaying to 0 at
+    rank `span`+1 (span = V/8 by default). Rank-based, so positions where
+    NO dot is exactly right still give calibrated signal (a dot with truth
+    at rank 3 is 'warmer' than one at rank 900) instead of teaching garbage.
+    """
+    log_truth = dot_log_probs.gather(
+        -1, targets[..., None, None].expand(
+            *targets.shape, dot_log_probs.size(-2), 1)).squeeze(-1)  # [B,T,N]
+    with torch.no_grad():
+        rank = (dot_log_probs.detach() > log_truth.unsqueeze(-1)).sum(-1) + 1
+        if span is None:
+            span = max(1, dot_log_probs.size(-1) // 8)
+        return (1.0 - (rank - 1).float() / span).clamp(0.0, 1.0)
+
+
+def verifier_loss(verifier_scores: torch.Tensor, dot_log_probs: torch.Tensor,
+                  final_log_probs: torch.Tensor, targets: torch.Tensor,
+                  outvote_weight: float = 3.0) -> torch.Tensor:
+    """BCE(verifier score, oracle truth-rank target), outvoted-oversampled.
+
+    verifier_scores [B, T, N] (raw head output); rest as oracle_dot_loss.
+    Trains the head on the RAW score (scaling for pooling happens elsewhere,
+    so the head's ranking is what the BCE shapes).
+    """
+    pos_w = _position_weights(final_log_probs, targets, outvote_weight)
+    with torch.no_grad():
+        tgt = verifier_truth_target(dot_log_probs, targets)
+    bce = F.binary_cross_entropy_with_logits(verifier_scores, tgt,
+                                             reduction="none")   # [B, T, N]
+    return bce.sum() / (pos_w.sum() * verifier_scores.size(-1))

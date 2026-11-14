@@ -50,6 +50,13 @@ def main() -> None:
     ap.add_argument("--temperature", type=float, default=0.8)
     ap.add_argument("--top-k", type=int, default=40,
                     help="0 = sample from the full distribution")
+    ap.add_argument("--expert-sampling", action="store_true",
+                    help="IECNN only: expert-of-the-moment decoding — sample "
+                         "the dot by its consensus trust (squared weights, "
+                         "sharper than the vote), then the token from THAT "
+                         "dot's distribution. Each continuation comes from "
+                         "one coherent reader: diverse-but-coherent paths "
+                         "instead of the pooled average.")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
@@ -97,13 +104,26 @@ def main() -> None:
     torch.manual_seed(args.seed)
     ids = list(prompt_ids)
     gen_ids: list[int] = []
+    expert_dots: list[int] = []
     t0 = time.time()
     with torch.no_grad():
         for _ in range(args.max_new_tokens):
             ctx = torch.tensor([ids[-seq_len:]], dtype=torch.long)
             out = model(ctx, tau0=tau0, floor=0.0) if kind == "iecnn" \
                 else model(ctx)
-            lp = _next_log_probs(model, out, kind) / args.temperature
+            if kind == "iecnn" and args.expert_sampling:
+                # expert-of-the-moment (Tolu's idea, documented in
+                # DECISIONS.md): pick ONE dot by trust, sample from it.
+                # Weights are squared to sharpen the vote toward the
+                # leaders. All N dots of the last pass of the last region
+                # are live candidates — including muted ones.
+                pp = out["per_pass_last_region"][-1]
+                w = pp["weights"][0, -1]                   # [N]
+                dot = int(torch.multinomial(w ** 2, 1))
+                expert_dots.append(dot)
+                lp = pp["log_pi"][0, -1, dot] / args.temperature
+            else:
+                lp = _next_log_probs(model, out, kind) / args.temperature
             if args.top_k > 0:
                 k = min(args.top_k, lp.shape[-1])
                 kth = lp.topk(k).values[-1]
@@ -128,6 +148,7 @@ def main() -> None:
                 prompt_text.encode("utf-8")).hexdigest(),
             "temperature": args.temperature,
             "top_k": args.top_k,
+            "expert_sampling": bool(args.expert_sampling),
             "seed": args.seed,
             "seq_len": seq_len,
         },
@@ -135,6 +156,7 @@ def main() -> None:
         "prompt_tokens": len(prompt_ids),
         "generated": generated,
         "generated_ids": gen_ids,
+        "expert_dots": expert_dots if args.expert_sampling else None,
         "elapsed_s": round(elapsed, 2),
     }
     out_path = Path(args.out)

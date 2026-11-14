@@ -1,0 +1,32 @@
+# Rung E6 "consensus-v2" (Tolu, 2026-11-14: oracle-supervised consensus).
+#
+# Three additions on top of E1 (recorded in DECISIONS.md as the spec-C2
+# deviation — the oracle (true next token) is used AT TRAINING TIME only):
+#   1. verifier head (model.verifier): a small per-region MLP reads the
+#      label-free per-dot features (gamma, prev weight, agreement, state
+#      norm, error features, pass index, region entropy) and outputs a
+#      trust score added to the consensus scores. Supervised by BCE against
+#      the dot's truth-rank target (lambda_v).
+#   2. per-dot oracle loss (lambda_o): CE toward the truth for EVERY dot,
+#      independent of its consensus weight — the muted-dot fix (dots at
+#      w~1e-4 get zero gradient through pooling; dot 1 was right 15/255).
+#   3. diversity counter-weight (lambda_c): decorrelation stays on so the
+#      per-dot teacher cannot homogenize the committee (overlap 0.58/5).
+#      Outvoted positions (80/255 measured) are oversampled 3x in both
+#      oracle losses (outvote_weight).
+#
+# Acceptance test (results go in summary.json e6_consensus_metrics + the
+# *_e6_seed*.csv): per-dot top-1 accuracy rises everywhere, overlap flat or
+# down, oracle top-5 up, pooled full-val bpc below the matching E1 vocab
+# class, outvote rate down, verifier selection accuracy toward the oracle
+# band (gamma-proxy baseline 3.9%, oracle 9%).
+base: e1_weights_passes.yaml
+name: e6_consensus_v2
+model:
+  verifier: true
+training:
+  lambda_o: 0.2
+  lambda_v: 0.5
+  lambda_c: 0.1
+  lambda_c_ramp_steps: 5000
+  outvote_weight: 3.0

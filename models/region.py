@@ -55,6 +55,14 @@ class Region(nn.Module):
         self.alpha = nn.Parameter(torch.tensor(1.0))
         self.beta = nn.Parameter(torch.tensor(1.0))
 
+        # E6 consensus-v2: verifier head replaces pure scalars with a learned
+        # oracle-supervised trust judgment. Off (absent) = bit-identical E1.
+        self.verifier = None
+        if bool(m.get("verifier", False)):
+            from models.verifier import VerifierHead
+            self.verifier = VerifierHead(seed=2000 + region_index)
+            self.v_scale = nn.Parameter(torch.tensor(0.05))
+
         # messages: write at pass p, read at pass p+1 (spec 05)
         self.messages = None
         if self.use_messages:
@@ -76,6 +84,37 @@ class Region(nn.Module):
         rel = self.rel_emb(dist_idx)                 # [w, d_q], distance 0 at t itself
         wind_k = wind_k_raw + rel[None, None]
         return wind_k, wind_v, valid.to(device)
+
+    # ------------------------------------------------------------------
+    def _verifier_features(self, pi: torch.Tensor, gamma: torch.Tensor,
+                           state: torch.Tensor, err: torch.Tensor,
+                           w_prev: torch.Tensor | None,
+                           log_b_prev: torch.Tensor | None,
+                           p: int, device) -> torch.Tensor:
+        """Per-dot features for the verifier head: [..., N, 8].
+
+        All label-free and all already computed inside the pass loop (the
+        oracle only ever TRAINS the head — see train/losses.py — it is not an
+        input). Pass 1 uses neutral values for the not-yet-existing weight
+        and region entropy.
+        """
+        from models.verifier import verifier_features
+        b, t, n = gamma.shape
+        top = pi.argmax(-1)                                  # [B, T, N]
+        same = (top.unsqueeze(-1) == top.unsqueeze(-2)).float()
+        agree = (same.sum(-1) - 1.0) / max(n - 1, 1)         # [B, T, N]
+        state_norm = state.norm(dim=-1) / math.sqrt(self.d_s)
+        if w_prev is None:
+            w_feat = torch.full_like(gamma, 1.0 / n)
+        else:
+            w_feat = w_prev
+        if log_b_prev is not None:
+            h_region = consensus.entropy(log_b_prev)         # [B, T]
+        else:
+            h_region = torch.zeros(b, t, device=device)
+        pass_frac = torch.tensor(p / self.n_passes, device=device)
+        return verifier_features(gamma, w_feat, agree, state_norm, err,
+                                 h_region, pass_frac)
 
     # ------------------------------------------------------------------
     def forward(self, rows: torch.Tensor, emb_table: torch.Tensor,
@@ -138,6 +177,15 @@ class Region(nn.Module):
                 scores, loo, js = consensus.compute_scores(
                     pi, out.gamma, out.trust_term, self.alpha, self.beta,
                     return_parts=True, log_pi=out.log_pi)
+                v_out = None
+                if self.verifier is not None:
+                    # E6: the verifier's trust judgment joins the consensus
+                    # scores (scaled — it must EARN influence from small).
+                    feats = self._verifier_features(
+                        pi, out.gamma, out.state, err, w_prev, log_b_prev,
+                        p, device)
+                    v_out = self.verifier(feats).squeeze(-1)     # [B, T, N]
+                    scores = scores + self.v_scale * v_out
                 trust = consensus.update_trust(trust, scores, self.rho)
                 w = consensus.compute_weights(trust, tau_p, floor=0.0 if hard_mode else floor)
                 crowd, js_own = loo, js
@@ -159,7 +207,8 @@ class Region(nn.Module):
             else:
                 log_b = consensus.pool_log_linear(out.log_pi, w)
             per_pass.append({"log_pi": out.log_pi, "weights": w,
-                             "log_b": log_b, "gamma": out.gamma, "tau": tau_p})
+                             "log_b": log_b, "gamma": out.gamma, "tau": tau_p,
+                             "verifier": v_out})
             log_b_prev = log_b
             pi_prev = pi
             prev_crowd, prev_js = crowd, js_own

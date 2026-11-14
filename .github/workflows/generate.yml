@@ -28,6 +28,9 @@ on:
         default: "40"
       seed:
         default: "0"
+      expert_sampling:
+        description: "IECNN only: expert-of-the-moment decoding (sample dot by trust, then token from that dot)"
+        default: "false"
 
 permissions:
   contents: write
@@ -127,6 +130,7 @@ jobs:
           TOPK: ${{ github.event.inputs.top_k }}
           SEED: ${{ github.event.inputs.seed }}
           VOCAB: ${{ github.event.inputs.vocab }}
+          EXPERT: ${{ github.event.inputs.expert_sampling }}
         run: |
           set -euo pipefail
           # checkpoint dir comes from what the artifact actually contains —
@@ -137,6 +141,8 @@ jobs:
           SLUG="gen-$(date -u +%Y%m%d-%H%M%S)"
           echo "SLUG=$SLUG" >> "$GITHUB_ENV"
           printf '%s' "$PROMPT" > /tmp/prompt.txt
+          EXPERT_FLAG=""
+          if [ "$EXPERT" = "true" ]; then EXPERT_FLAG="--expert-sampling"; fi
           python scripts/generate.py \
             --ckpt-dir "$CKPT_DIR" \
             --vocab "$VOCAB" \
@@ -145,6 +151,7 @@ jobs:
             --temperature "$TEMP" \
             --top-k "$TOPK" \
             --seed "$SEED" \
+            $EXPERT_FLAG \
             --out "results/generation/$SLUG.json"
 
       - name: Commit generation

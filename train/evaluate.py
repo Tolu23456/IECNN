@@ -149,6 +149,98 @@ def evaluate_bpc_per_pass(model, ubm, text, seq_len: int | None = None,
             "weight_entropy": round(ent_sum / max(1, ent_n), 5)}
 
 
+@torch.no_grad()
+def evaluate_consensus_metrics(model, ubm, text, seq_len: int | None = None,
+                               max_chars: int | None = None, tau0: float = 1.0,
+                               floor: float = 0.0,
+                               prepared: tuple | None = None) -> dict:
+    """E6 consensus health metrics (Tolu's six-metric acceptance test).
+
+    One forward per window over the eval text, LAST pass of the last region:
+
+      pooled_top1   fraction where the pooled argmax is the truth (today ~2%)
+      oracle_top1   fraction where SOME dot's top-1 is the truth (~9%)
+      oracle_top5   fraction where the truth is in some dot's top-5 (~30%)
+      outvote_rate  fraction where a dot was right and the pooled answer
+                    was wrong (the consensus-audit "outvoted" number)
+      verifier_sel  top-verifier dot's top-1 accuracy (None without a head)
+      overlap5      mean pairwise top-5 overlap of dots (diversity guard;
+                    0.58/5 measured at E1@512 — must stay flat or fall)
+      acc_per_dot   per-dot top-1 accuracy list (muted dots must revive)
+
+    Uses the same forward as scoring, so it costs one extra pass over the
+    eval subset at eval steps only.
+    """
+    device = next(model.parameters()).device
+    ids, expand_len = prepared if prepared is not None else prepare_text(ubm, text)
+    if not ids:
+        raise ValueError("cannot evaluate empty text")
+    context = seq_len or getattr(model, "context_length", 256) or 256
+    kwargs = {"tau0": tau0, "floor": floor}
+
+    n_pos = 0
+    pooled_hit = oracle1 = oracle5 = outvoted = verif_hit = 0
+    overlap_sum = 0.0
+    acc_hits: list[int] | None = None
+    for start in range(0, len(ids) - 1, context):
+        end = min(start + context + 1, len(ids))
+        window = ids[start:end]
+        x = torch.tensor([window[:-1]], dtype=torch.long, device=device)
+        y = torch.tensor([window[1:]], dtype=torch.long, device=device)
+        out = model(x, **kwargs)
+        pp = out.get("per_pass_last_region")
+        if not pp or "log_pi" not in pp[-1]:
+            break                       # baseline: metrics undefined
+        log_pi = pp[-1]["log_pi"][0]                     # [T, N, V]
+        truth = y[0]                                     # [T]
+        top5 = log_pi.topk(5, dim=-1).indices            # [T, N, 5]
+        top1 = top5[..., 0]                              # [T, N]
+        hit = (top1 == truth[:, None])                   # [T, N]
+        if acc_hits is None:
+            acc_hits = [0] * top1.shape[-1]
+        for k in range(top1.shape[-1]):
+            acc_hits[k] += int(hit[:, k].sum().item())
+        n_pos += truth.numel()
+        oracle1 += int(hit.any(-1).sum().item())
+        in5 = (top5 == truth[:, None, None]).any(-1)     # [T, N]
+        oracle5 += int(in5.any(-1).sum().item())
+        pooled_top = out["final_log_probs"][0].argmax(-1)
+        p_hit = (pooled_top == truth)
+        pooled_hit += int(p_hit.sum().item())
+        outvoted += int((~p_hit & hit.any(-1)).sum().item())
+        # pairwise top-5 overlap via token-count identity:
+        # sum over pairs of |A_i ∩ A_j| = sum over tokens C(c_v, 2)
+        counts = torch.zeros(top5.shape[0], log_pi.shape[-1],
+                             dtype=torch.long, device=device)
+        counts.scatter_add_(1, top5.reshape(top5.shape[0], -1),
+                            torch.ones_like(top5.reshape(top5.shape[0], -1),
+                                            dtype=torch.long))
+        npairs = top1.shape[-1] * (top1.shape[-1] - 1) / 2
+        overlap_sum += float((counts * (counts - 1) / 2).sum(-1)
+                             .sum().item()) / (npairs * 5)
+        v = pp[-1].get("verifier")
+        if v is not None:
+            v = v[0]                                     # [T, N]
+            verif_hit += int(hit.gather(1, v.argmax(-1, keepdim=True)
+                                        ).sum().item())
+        if max_chars is not None:
+            chars_here = sum(expand_len[start + 1: start + 1 + truth.numel()])
+            if chars_here >= max_chars:
+                break
+    if n_pos == 0 or acc_hits is None:
+        raise ValueError("no IECNN positions found for consensus metrics")
+    return {
+        "n_positions": n_pos,
+        "pooled_top1": pooled_hit / n_pos,
+        "oracle_top1": oracle1 / n_pos,
+        "oracle_top5": oracle5 / n_pos,
+        "outvote_rate": outvoted / n_pos,
+        "verifier_sel": (verif_hit / n_pos) if pp[-1].get("verifier") is not None else None,
+        "overlap5": overlap_sum / n_pos,
+        "acc_per_dot": [h / n_pos for h in acc_hits],
+    }
+
+
 def mode_gap(model, ubm, text: str) -> dict:
     """Soft bpc, hard bpc, and the gap (hard minus soft)."""
     soft = evaluate_bpc(model, ubm, text, hard_mode=False)

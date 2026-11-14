@@ -1,0 +1,18 @@
+# E6 pilot (2h class): consensus-v2 on the vocab2 @2048 class so the
+# comparison is clean against E1 vocab2's 2.59667 full-val bpc @780.
+#
+# batch 16 (the [B,T,N,V] block at V=2048, now with verifier overhead on
+# top), eval_every 120 (the E6 metrics pass costs one extra forward per
+# eval), patience 6 / wall 2h — same pilot discipline as every rung.
+base: e1_weights_passes_vocab2.yaml
+name: e6_consensus_v2_pilot
+model:
+  verifier: true
+training:
+  lambda_o: 0.2
+  lambda_v: 0.5
+  lambda_c: 0.1
+  lambda_c_ramp_steps: 5000
+  outvote_weight: 3.0
+  eval_every: 120
+  checkpoint_every: 120

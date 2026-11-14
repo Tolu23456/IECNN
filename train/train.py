@@ -222,8 +222,15 @@ def train_one(config: dict, seed: int, out_dir: Path, max_steps: int | None = No
         "lambda_c": float(tcfg_all.get("lambda_c", 0.0)),   # decorrelation (E4)
         "lambda_k": float(tcfg_all.get("lambda_k", 0.0)),   # confidence calib.
         "lambda_w": float(tcfg_all.get("lambda_w", 0.0)),   # weight entropy bonus
+        "lambda_o": float(tcfg_all.get("lambda_o", 0.0)),   # E6 per-dot oracle
+        "lambda_v": float(tcfg_all.get("lambda_v", 0.0)),   # E6 verifier BCE
         "gamma_b": float(tcfg_all.get("gamma_b", 2.0)),
     }
+    outvote_weight = float(tcfg_all.get("outvote_weight", 3.0))
+    # E6 six-metric logging: on when any oracle-supervised loss is active
+    e6_metrics_on = is_iecnn and (lambdas["lambda_o"] > 0
+                                  or lambdas["lambda_v"] > 0)
+    e6_log = None
     cons = config.get("consensus", {})
     tau_max = float(cons.get("tau_max", 1.0)); tau_min = float(cons.get("tau_min", 0.2))
     tau_warmup = int(cons.get("tau_warmup", 2000))
@@ -269,7 +276,8 @@ def train_one(config: dict, seed: int, out_dir: Path, max_steps: int | None = No
         if is_iecnn and any(v != 0 for k, v in lambdas.items() if k != "gamma_b"):
             from train.losses import (region_loss, boosted_dot_loss,
                                       decorrelation_penalty, confidence_loss,
-                                      weight_entropy_bonus)
+                                      weight_entropy_bonus, oracle_dot_loss,
+                                      verifier_loss)
             last_pass = out["per_pass_last_region"][-1]
             if lambdas["lambda_r"] > 0 and len(out["region_outputs"]) > 1:
                 stack = torch.stack([ro["log_b"] for ro in out["region_outputs"]])
@@ -296,6 +304,16 @@ def train_one(config: dict, seed: int, out_dir: Path, max_steps: int | None = No
                 lw = weight_entropy_bonus(last_pass["weights"])
                 loss = loss - lw_val * lw
                 aux_parts["L_w"] = -float(lw.detach()) * lw_val
+            if lambdas["lambda_o"] > 0:
+                lo = oracle_dot_loss(last_pass["log_pi"], out["final_log_probs"],
+                                     yb, outvote_weight)
+                loss = loss + lambdas["lambda_o"] * lo
+                aux_parts["L_oracle"] = float(lo.detach())
+            if lambdas["lambda_v"] > 0 and last_pass.get("verifier") is not None:
+                lv = verifier_loss(last_pass["verifier"], last_pass["log_pi"],
+                                   out["final_log_probs"], yb, outvote_weight)
+                loss = loss + lambdas["lambda_v"] * lv
+                aux_parts["L_verif"] = float(lv.detach())
 
         opt.zero_grad(set_to_none=True)
         loss.backward()
@@ -336,6 +354,31 @@ def train_one(config: dict, seed: int, out_dir: Path, max_steps: int | None = No
                      round(aux_parts.get("L_w", 0.0), 5) if "L_w" in aux_parts else "",
                      round(elapsed, 1),
                      round(float(gn_total), 4), *gn7])
+            if e6_metrics_on:
+                from train.evaluate import evaluate_consensus_metrics
+                e6m = evaluate_consensus_metrics(
+                    model, ubm, val_text, seq_len=context,
+                    max_chars=None if last else eval_chars,
+                    tau0=kwargs.get("tau0", 1.0) if is_iecnn else 1.0,
+                    prepared=prepared_val)
+                if e6_log is None:
+                    e6_log = _CSVLog(
+                        Path(tcfg.get("csv_dir", "results")) /
+                        f"train_{name}_e6_seed{seed}.csv",
+                        ["step", "pooled_top1", "oracle_top1", "oracle_top5",
+                         "outvote_rate", "verifier_sel", "overlap5",
+                         "acc_per_dot"],
+                        append=start_step > 0)
+                e6_log.row([step,
+                            round(e6m["pooled_top1"], 5),
+                            round(e6m["oracle_top1"], 5),
+                            round(e6m["oracle_top5"], 5),
+                            round(e6m["outvote_rate"], 5),
+                            ("" if e6m["verifier_sel"] is None
+                             else round(e6m["verifier_sel"], 5)),
+                            round(e6m["overlap5"], 5),
+                            json.dumps([round(a, 5)
+                                        for a in e6m["acc_per_dot"]])])
             prev_best = best_val
             if bpc < best_val:
                 best_val = bpc
@@ -439,11 +482,16 @@ def train_one(config: dict, seed: int, out_dir: Path, max_steps: int | None = No
             mb = evaluate_bpc(model, ubm, val_text, seq_len=context,
                               hard_mode=True, **best_eval_kwargs)
             mode_gap_best = round(mb - best_full_val_bpc, 5)
+        if e6_metrics_on:
+            e6_best = evaluate_consensus_metrics(
+                model, ubm, val_text, seq_len=context, **best_eval_kwargs,
+                prepared=prepared_val)
         model.load_state_dict(last_state)
         print(f"[{name} seed{seed}] BEST at step {best_step}: full-val bpc "
               f"{best_full_val_bpc:.4f} (tau0 "
               f"{best_eval_kwargs.get('tau0', 1.0):.3f})", flush=True)
     # final CSV row: full 12+7 columns at the ACTUAL last step
+
     final_bpc_train = round(evaluate_bpc(
         model, ubm, eval_slice, seq_len=context, max_chars=eval_chars,
         tau0=final_eval_kwargs.get("tau0", 1.0) if is_iecnn else 1.0,
@@ -455,6 +503,26 @@ def train_one(config: dict, seed: int, out_dir: Path, max_steps: int | None = No
              final_ev["weight_entropy"] if is_iecnn else "", "", "",
              "", "", "", "", "", "", ""])
     log.close()
+    if e6_log is not None:
+        e6_log.close()
+
+    # E6 final consensus health at the ACTUAL last step (and at the best
+    # point when it was re-scored) — the acceptance numbers for the rung.
+    e6_final = e6_best = None
+    if e6_metrics_on:
+        from train.evaluate import evaluate_consensus_metrics
+        e6_final = evaluate_consensus_metrics(
+            model, ubm, val_text, seq_len=context, **final_eval_kwargs,
+            prepared=prepared_val)
+        if e6_best is None:               # best == final point (not re-scored)
+            e6_best = e6_final
+        print(f"[{name} seed{seed}] E6 consensus: pooled_top1 "
+              f"{e6_best['pooled_top1']:.3f} oracle_top1 "
+              f"{e6_best['oracle_top1']:.3f} oracle_top5 "
+              f"{e6_best['oracle_top5']:.3f} outvote "
+              f"{e6_best['outvote_rate']:.3f} verifier_sel "
+              f"{e6_best['verifier_sel']} overlap5 {e6_best['overlap5']:.3f}",
+              flush=True)
 
     summary = {
         "name": name,
@@ -480,6 +548,9 @@ def train_one(config: dict, seed: int, out_dir: Path, max_steps: int | None = No
         "hit_wall_cap": stop_kind == "wall_cap",
         "reached_step_target": stopped_reason is None,
         "stopped_reason": stopped_reason,
+        "e6_consensus_metrics": (
+            {"best": e6_best, "final": e6_final}
+            if e6_metrics_on else None),
         "train_seconds_total": round(train_seconds, 1),
         "seq_len": seq_len,
         "wall_seconds": round(elapsed_total, 1),
