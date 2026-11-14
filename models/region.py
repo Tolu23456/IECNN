@@ -196,12 +196,17 @@ class Region(nn.Module):
 
         # chunked consensus (speed opt 4): rows per consensus slice; 0 or
         # >= f disables chunking (single slice = the pre-opt-4 math exactly).
+        # DEFAULT OFF: measured on the bench (results/bench_opt4_bf16.json,
+        # vocab2/batch16/V=2048), chunk 64 was a 1.9x SLOWDOWN (10.13 vs
+        # 5.43 s/step) — the [B,T,N,V] temporaries fit RAM, so slicing only
+        # breaks GEMM batching. Keep the knob for memory-tight big-vocab
+        # runs where the same block approaches GB scale.
         f_total = b * t
         chunk = f_total
         try:
-            cz = int(os.environ.get("IECNN_CONS_CHUNK", "64"))
+            cz = int(os.environ.get("IECNN_CONS_CHUNK", "0"))
         except ValueError:
-            cz = 64
+            cz = 0
         if 0 < cz < f_total:
             chunk = cz
 
