@@ -16,6 +16,21 @@ from models import consensus
 from models.dot import DotPopulation
 from models.memory import gather_windows
 
+_COMPILED_CORE = None
+
+
+def _compiled_consensus_core(*args):
+    """Lazily compiled consensus_core (torch.compile/inductor). The whole
+    per-pass [., N, V] chain — exp, leave-one-out, JS identity, scores,
+    trust, floor-softmax, error features, matmul pooling — as one graph so
+    inductor can fuse the bandwidth-bound elementwise chain. dynamic=False:
+    shapes are fixed per config; recompiles only on (rare) shape changes."""
+    global _COMPILED_CORE
+    if _COMPILED_CORE is None:
+        _COMPILED_CORE = torch.compile(consensus.consensus_core,
+                                       dynamic=False, fullgraph=False)
+    return _COMPILED_CORE(*args)
+
 
 class Region(nn.Module):
     """Rung-building block. One region reads a fixed window of memory rows."""
@@ -35,6 +50,11 @@ class Region(nn.Module):
         self.pooling = m.get("pooling", "log_linear")
         self.rho = float(config.get("consensus", {}).get("rho", 0.5))
         self.kappa = float(config.get("consensus", {}).get("kappa", 0.7))
+        # speed goal round 2: fuse the per-pass [., N, V] consensus chain
+        # with torch.compile (training.compile_consensus: true). Default OFF
+        # — eager stays the bit-for-bit reference path.
+        self.compile_consensus = bool(config.get("training", {})
+                                      .get("compile_consensus", False))
         self.hard_top_m = int(m.get("hard_top_m", 4))
         self.dynamic_query = bool(m.get("dynamic_query", False))
         self.share_pass_params = bool(m.get("share_pass_params", True))
@@ -134,6 +154,36 @@ class Region(nn.Module):
             # of the next pass (spec 04 = same numbers either way; computing
             # them twice cost ~30% of the forward). The _fast variant reuses
             # log_pi for the JS entropy terms (last-bit differences only).
+            if (self.compile_consensus and self.n_dots >= 2
+                    and self.pooling == "log_linear" and dot_mask is None):
+                # fused path (torch.compile): the whole [c, N, V] chain in
+                # one graph. tau/floor as 0-dim tensors so per-step annealed
+                # floats are data, not recompile-triggering guards. Verifier
+                # features stay eager (they need pi before the core); their
+                # verdict folds in as v_scale * v_out (zeros when absent —
+                # bit-exact x + 0 = x).
+                dtype, device = log_pi_c.dtype, log_pi_c.device
+                if self.verifier is not None:
+                    feats = self._verifier_features(
+                        pi, gamma_c, state_c, err_c, w_prev_c, log_b_prev_c,
+                        p, device)
+                    v_out = self.verifier(feats).squeeze(-1)     # [c, N]
+                    v_scale_t, v_out_t = self.v_scale, v_out
+                else:
+                    v_scale_t = torch.zeros((), dtype=dtype, device=device)
+                    v_out_t = torch.zeros(gamma_c.shape, dtype=dtype,
+                                          device=device)
+                tau_t = torch.tensor(tau_p, dtype=dtype, device=device)
+                floor_t = torch.tensor(0.0 if hard_mode else floor,
+                                       dtype=dtype, device=device)
+                trust_in = trust_prev_c if trust_prev_c is not None \
+                    else torch.zeros_like(gamma_c)
+                trust_c, w_c, log_b_c, err_next = _compiled_consensus_core(
+                    log_pi_c, gamma_c, trust_term_c, trust_in,
+                    self.alpha, self.beta, v_scale_t, v_out_t,
+                    self.rho, tau_t, floor_t, self.n_dots,
+                    pi if self.verifier is not None else None)
+                return trust_c, w_c, log_b_c, v_out, err_next
             scores, loo, js = consensus.compute_scores_fast(
                 pi, log_pi_c, gamma_c, trust_term_c, self.alpha, self.beta,
                 return_parts=True)

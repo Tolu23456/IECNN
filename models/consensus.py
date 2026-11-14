@@ -216,3 +216,54 @@ def entropy(logits: torch.Tensor) -> torch.Tensor:
     """Shannon entropy H(p) of a log-prob tensor in nats: [..., V] -> [...]."""
     p = logits.exp()
     return -(p * logits).sum(-1)
+
+
+def consensus_core(log_pi: torch.Tensor, gamma: torch.Tensor,
+                   trust_term: torch.Tensor, trust_prev: torch.Tensor,
+                   alpha: torch.Tensor, beta: torch.Tensor,
+                   v_scale: torch.Tensor, v_out: torch.Tensor,
+                   rho: float, tau_t: torch.Tensor, floor_t: torch.Tensor,
+                   n_dots: int, pi_in: torch.Tensor | None = None):
+    """The whole per-pass [., N, V] consensus chain as ONE function — the
+    torch.compile fusion target (speed goal round 2, 2026-11-14).
+
+    Eager PyTorch launches ~10 separate elementwise kernels over [f, N, V]
+    here (exp, sum, sub, div, 4x JS entropy chain, gather, max, matmul
+    pool); each reads+writes hundreds of MB and the step is bandwidth-bound
+    under bf16. Inductor fuses the pointwise chain into 1-2 kernels, cutting
+    memory traffic several-fold.
+
+    Same math as the eager inline sequence in Region._pass_consensus
+    (compute_scores_fast -> update_trust -> compute_weights -> pooling),
+    with two mechanical differences, both caller-controlled:
+      * tau and floor arrive as 0-dim TENSORS (per-step annealed floats
+        would otherwise be dynamo guards -> recompile every step);
+      * the verifier's contribution is folded in as v_scale * v_out (callers
+        pass a zero v_out / v_scale when no verifier — bit-exact: x + 0 = x);
+      * trust_prev is a real tensor (zeros on pass 1: rho*0 + u == u
+        bit-exactly, same as update_trust's first-pass clone);
+      * pi_in: callers that already materialized pi = exp(log_pi) (the E6
+        verifier features need it) pass it here to skip a second exp; with
+        pi_in=None the core computes pi itself (non-verifier rungs). Both
+        variants specialize under dynamo.
+
+    Returns (trust, w, log_b, err) where err is error_features_from_parts'
+    [.., N, 3] stack. Not used unless training.compile_consensus is on; the
+    eager path stays the reference (tests pin equivalence).
+    """
+    pi = log_pi.exp() if pi_in is None else pi_in
+    total = pi.sum(dim=-2, keepdim=True)                       # [..., 1, V]
+    loo = (total - pi) / max(n_dots - 1, 1)                    # [..., N, V]
+    js = js_from_parts_fast(pi, log_pi, loo)
+    scores = alpha * (-js) + beta * gamma + trust_term + v_scale * v_out
+    trust = rho * trust_prev + scores
+    t = trust.clamp(-20.0, 20.0)
+    w = F.softmax(t / tau_t.clamp_min(_EPS), dim=-1)
+    w_floor = w.clamp_min(floor_t)
+    w = torch.where(floor_t > 0.0, w_floor / w_floor.sum(-1, keepdim=True).clamp_min(1e-9), w)
+    own_top = pi.argmax(dim=-1)
+    crowd_on_own_top = loo.gather(-1, own_top.unsqueeze(-1)).squeeze(-1)
+    peak = pi.max(dim=-1).values
+    err = torch.stack([js, crowd_on_own_top, peak], dim=-1)
+    log_b = pool_log_linear(log_pi, w)
+    return trust, w, log_b, err

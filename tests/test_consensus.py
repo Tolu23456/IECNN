@@ -146,3 +146,80 @@ def test_pool_log_linear_matches_product_form():
     fast = consensus.pool_log_linear(log_pi, w)
     assert torch.allclose(ref, fast, atol=1e-5), \
         (ref - fast).abs().max().item()
+
+
+# ---- fused consensus core (torch.compile target, speed goal round 2) -------
+def _core_inputs(g, f=5, n=4, v=16):
+    log_pi = F.log_softmax(torch.randn(f, n, v, generator=g), dim=-1)
+    gamma = torch.randn(f, n, generator=g)
+    trust_term = torch.randn(f, n, generator=g)
+    trust_prev = torch.randn(f, n, generator=g)
+    alpha = torch.tensor(1.3)
+    beta = torch.tensor(0.8)
+    v_scale = torch.tensor(0.0)
+    v_out = torch.zeros(f, n)
+    rho, tau, floor = 0.5, 0.9, 0.05
+    return (log_pi, gamma, trust_term, trust_prev, alpha, beta,
+            v_scale, v_out, rho, tau, floor)
+
+
+def test_consensus_core_matches_eager_composite():
+    """consensus_core must reproduce the exact eager chain:
+    compute_scores_fast -> update_trust -> compute_weights ->
+    error_features_from_parts -> pool_log_linear."""
+    g = torch.Generator().manual_seed(0)
+    (log_pi, gamma, trust_term, trust_prev, alpha, beta,
+     v_scale, v_out, rho, tau, floor) = _core_inputs(g)
+    trust, w, log_b, err = consensus.consensus_core(
+        log_pi, gamma, trust_term, trust_prev, alpha, beta,
+        v_scale, v_out, rho, torch.tensor(tau), torch.tensor(floor), n=4)
+
+    pi = log_pi.exp()
+    scores, loo, js = consensus.compute_scores_fast(
+        pi, log_pi, gamma, trust_term, alpha, beta, return_parts=True)
+    scores = scores + v_scale * v_out
+    trust_ref = consensus.update_trust(trust_prev, scores, rho)
+    w_ref = consensus.compute_weights(trust_ref, tau, floor)
+    err_ref = consensus.error_features_from_parts(pi, loo, js)
+    log_b_ref = consensus.pool_log_linear(log_pi, w_ref)
+
+    assert torch.allclose(trust, trust_ref, atol=1e-6), (trust - trust_ref).abs().max()
+    assert torch.allclose(w, w_ref, atol=1e-6), (w - w_ref).abs().max()
+    assert torch.allclose(err, err_ref, atol=1e-6), (err - err_ref).abs().max()
+    assert torch.allclose(log_b, log_b_ref, atol=1e-6), (log_b - log_b_ref).abs().max()
+
+
+def test_consensus_core_floor_zero_and_verifier_fold():
+    """floor=0 must select the plain softmax (where-guard), and a zero
+    verifier fold must be bit-exact (x + 0 == x); a real verifier verdict
+    must shift the trust exactly like the eager two-step add."""
+    g = torch.Generator().manual_seed(1)
+    (log_pi, gamma, trust_term, trust_prev, alpha, beta,
+     _, _, rho, tau, _) = _core_inputs(g)
+    # floor 0
+    _, w0, _, _ = consensus.consensus_core(
+        log_pi, gamma, trust_term, trust_prev, alpha, beta,
+        torch.tensor(0.0), torch.zeros(4), rho,
+        torch.tensor(tau), torch.tensor(0.0), n=4)
+    scores0, _, _ = consensus.compute_scores_fast(
+        log_pi.exp(), log_pi, gamma, trust_term, alpha, beta, return_parts=True)
+    trust0 = consensus.update_trust(trust_prev, scores0, rho)
+    assert torch.allclose(w0, consensus.compute_weights(trust0, tau, 0.0),
+                          atol=1e-6)
+    # zero-fold bit-exactness
+    _, wz, _, _ = consensus.consensus_core(
+        log_pi, gamma, trust_term, trust_prev, alpha, beta,
+        torch.tensor(0.0), torch.zeros(4), rho,
+        torch.tensor(tau), torch.tensor(0.0), n=4)
+    assert torch.equal(w0, wz)
+    # real verifier verdict
+    v_out = torch.randn(4, generator=g)
+    vs = torch.tensor(0.3)
+    trust_v, wv, _, _ = consensus.consensus_core(
+        log_pi, gamma, trust_term, trust_prev, alpha, beta, vs, v_out, rho,
+        torch.tensor(tau), torch.tensor(0.05), n=4)
+    scores_v = scores0 + vs * v_out
+    trust_v_ref = consensus.update_trust(trust_prev, scores_v, rho)
+    assert torch.allclose(trust_v, trust_v_ref, atol=1e-6)
+    assert torch.allclose(wv, consensus.compute_weights(trust_v_ref, tau, 0.05),
+                          atol=1e-6)

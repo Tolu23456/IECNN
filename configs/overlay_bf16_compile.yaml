@@ -1,0 +1,8 @@
+# A/B overlay: bf16 + fused consensus core (torch.compile/inductor fuses the
+# per-pass [B,T,N,V] elementwise chain — the bandwidth-bound bulk of the
+# step). Equivalence is pinned by tests (compiled vs eager, fwd + grads);
+# timing measured by the paired A/B bench (same runner, interleaved).
+base: overlay_bf16.yaml
+model: {}
+training:
+  compile_consensus: true

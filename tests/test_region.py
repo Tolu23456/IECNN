@@ -159,3 +159,75 @@ def test_chunked_consensus_matches_single_slice():
     for n_, p in model2.named_parameters():
         if n_ in g1 and g1[n_].abs().sum() > 0:
             assert p.grad is not None and torch.isfinite(p.grad).all(), n_
+
+
+# ---- fused consensus core (training.compile_consensus, speed goal rd 2) ----
+def test_compiled_consensus_matches_eager_full_model():
+    """training.compile_consensus=true (torch.compile/inductor fusion of the
+    per-pass [B,T,N,V] chain) must reproduce the eager model: same outputs
+    to 1e-6 (inductor reassociation is last-bit class), same loss, and every
+    parameter that gets an eager gradient gets a matching one."""
+    from train.losses import main_loss
+
+    x = torch.randint(0, 512, (2, 32))
+    y = torch.randint(0, 512, (2, 32))
+
+    model_e = _model()
+    out_e = model_e(x)
+    loss_e = main_loss(out_e["final_log_probs"], y)
+    loss_e.backward()
+    grads_e = {n: p.grad.detach().clone() for n, p in model_e.named_parameters()
+               if p.grad is not None}
+
+    set_seed(0)
+    cfg = load_config("configs/e1_weights_passes.yaml", "tiny.yaml")
+    cfg["training"]["compile_consensus"] = True
+    model_c = build_iecnn(cfg, 512)
+    out_c = model_c(x)
+    loss_c = main_loss(out_c["final_log_probs"], y)
+    loss_c.backward()
+
+    assert torch.allclose(out_e["final_log_probs"], out_c["final_log_probs"],
+                          atol=1e-6), (out_e["final_log_probs"]
+                                       - out_c["final_log_probs"]).abs().max()
+    for r, (ro_e, ro_c) in enumerate(zip(out_e["region_outputs"],
+                                         out_c["region_outputs"])):
+        assert torch.allclose(ro_e["log_b"], ro_c["log_b"], atol=1e-6), r
+        assert torch.allclose(ro_e["weights"], ro_c["weights"], atol=1e-6), r
+    for n, g_e in grads_e.items():
+        p_c = dict(model_c.named_parameters())[n]
+        assert p_c.grad is not None, f"{n} got no gradient under compile"
+        assert torch.allclose(g_e, p_c.grad, atol=1e-4), \
+            f"{n} grad mismatch {(g_e - p_c.grad).abs().max()}"
+
+
+def test_compiled_consensus_matches_eager_with_verifier():
+    """E6 variant: the verifier features stay eager (they need pi before the
+    core); the folded verdict must reproduce eager trust/weights/log_b."""
+    from train.losses import main_loss
+
+    x = torch.randint(0, 512, (2, 24))
+    y = torch.randint(0, 512, (2, 24))
+
+    model_e = _model("e6_consensus_v2")
+    out_e = model_e(x)
+    loss_e = main_loss(out_e["final_log_probs"], y)
+    loss_e.backward()
+
+    set_seed(0)
+    cfg = load_config("configs/e6_consensus_v2.yaml", "tiny.yaml")
+    cfg["training"]["compile_consensus"] = True
+    model_c = build_iecnn(cfg, 512)
+    out_c = model_c(x)
+    loss_c = main_loss(out_c["final_log_probs"], y)
+    loss_c.backward()
+
+    assert torch.allclose(out_e["final_log_probs"], out_c["final_log_probs"],
+                          atol=1e-6), (out_e["final_log_probs"]
+                                       - out_c["final_log_probs"]).abs().max()
+    for n, p_e in model_e.named_parameters():
+        if p_e.grad is None:
+            continue
+        p_c = dict(model_c.named_parameters())[n]
+        assert p_c.grad is not None, f"{n} got no gradient under compile"
+        assert torch.allclose(p_e.grad, p_c.grad, atol=1e-4), n
