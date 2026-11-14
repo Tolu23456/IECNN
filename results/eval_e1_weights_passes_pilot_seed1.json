@@ -1,0 +1,16 @@
+{
+ "ckpt_dir": "checkpoints/e1_weights_passes_pilot_seed1",
+ "best_step": 360,
+ "tau0_used": 0.9846,
+ "best_full_val_bpc_at_best_tau": 3.49401,
+ "per_pass_bpc": [
+  3.68446,
+  3.54437,
+  3.49401
+ ],
+ "weight_entropy": 1.91595,
+ "hard_bpc_at_best_tau": 3.49475599276773,
+ "mode_gap": 0.00075,
+ "bpc_train_slice": 3.60542,
+ "vocab_sha256": "3abea29efde983cadbdea7386b1d842e8e94dabb5e39812ff34be5915697e8c0"
+}
