@@ -78,6 +78,8 @@ def main() -> None:
     eval_chars = int(tcfg.get("eval_chars", 12000))
     lr_sched = str(tcfg.get("lr_schedule", "cosine"))
     lr_fn = lr_at_constant if lr_sched == "constant" else lr_at
+    precision = str(tcfg.get("precision", "fp32")).lower()
+    use_bf16 = precision == "bf16"
 
     batcher = Batcher(train_ids, seq_len, batch_size, seed=args.seed, shuffle=True)
     model = build_model(config, vocab_size)
@@ -119,33 +121,34 @@ def main() -> None:
             floor = weight_floor_at(step, total_steps, floor_frac / _iecnn_n_dots(model))
             hard = use_hard_batch(step, total_steps, hard_start, hard_frac, hard_rng)
             kwargs = {"tau0": tau0, "hard_mode": bool(hard), "floor": floor}
-        out = model(xb, **kwargs)
-        loss = main_loss(out["final_log_probs"], yb)
-        if is_iecnn and any(v != 0 for v in lambdas.values()):
-            last_pass = out["per_pass_last_region"][-1]
-            if lambdas["lambda_r"] > 0 and len(out["region_outputs"]) > 1:
-                stack = torch.stack([ro["log_b"] for ro in out["region_outputs"]])
-                loss = loss + lambdas["lambda_r"] * region_loss(stack, yb)
-            if lambdas["lambda_d"] > 0:
-                loss = loss + lambdas["lambda_d"] * boosted_dot_loss(
-                    last_pass["log_pi"], out["final_log_probs"], yb, gamma_b)
-            if lambdas["lambda_c"] > 0:
-                lc_val = correlation_lambda(step, lam_ramp, lambdas["lambda_c"])
-                loss = loss + lc_val * decorrelation_penalty(
-                    last_pass["log_pi"], out["final_log_probs"], yb)
-            if lambdas["lambda_k"] > 0:
-                loss = loss + lambdas["lambda_k"] * confidence_loss(
-                    last_pass["gamma"], last_pass["log_pi"], yb)
-            if lambdas["lambda_w"] > 0:
-                lw_val = weight_entropy_lambda(step, total_steps, lambdas["lambda_w"])
-                loss = loss - lw_val * weight_entropy_bonus(last_pass["weights"])
-            if lambdas["lambda_o"] > 0:
-                loss = loss + lambdas["lambda_o"] * oracle_dot_loss(
-                    last_pass["log_pi"], out["final_log_probs"], yb, outvote_weight)
-            if lambdas["lambda_v"] > 0 and last_pass.get("verifier") is not None:
-                loss = loss + lambdas["lambda_v"] * verifier_loss(
-                    last_pass["verifier"], last_pass["log_pi"],
-                    out["final_log_probs"], yb, outvote_weight)
+        with torch.autocast("cpu", dtype=torch.bfloat16, enabled=use_bf16):
+            out = model(xb, **kwargs)
+            loss = main_loss(out["final_log_probs"], yb)
+            if is_iecnn and any(v != 0 for v in lambdas.values()):
+                last_pass = out["per_pass_last_region"][-1]
+                if lambdas["lambda_r"] > 0 and len(out["region_outputs"]) > 1:
+                    stack = torch.stack([ro["log_b"] for ro in out["region_outputs"]])
+                    loss = loss + lambdas["lambda_r"] * region_loss(stack, yb)
+                if lambdas["lambda_d"] > 0:
+                    loss = loss + lambdas["lambda_d"] * boosted_dot_loss(
+                        last_pass["log_pi"], out["final_log_probs"], yb, gamma_b)
+                if lambdas["lambda_c"] > 0:
+                    lc_val = correlation_lambda(step, lam_ramp, lambdas["lambda_c"])
+                    loss = loss + lc_val * decorrelation_penalty(
+                        last_pass["log_pi"], out["final_log_probs"], yb)
+                if lambdas["lambda_k"] > 0:
+                    loss = loss + lambdas["lambda_k"] * confidence_loss(
+                        last_pass["gamma"], last_pass["log_pi"], yb)
+                if lambdas["lambda_w"] > 0:
+                    lw_val = weight_entropy_lambda(step, total_steps, lambdas["lambda_w"])
+                    loss = loss - lw_val * weight_entropy_bonus(last_pass["weights"])
+                if lambdas["lambda_o"] > 0:
+                    loss = loss + lambdas["lambda_o"] * oracle_dot_loss(
+                        last_pass["log_pi"], out["final_log_probs"], yb, outvote_weight)
+                if lambdas["lambda_v"] > 0 and last_pass.get("verifier") is not None:
+                    loss = loss + lambdas["lambda_v"] * verifier_loss(
+                        last_pass["verifier"], last_pass["log_pi"],
+                        out["final_log_probs"], yb, outvote_weight)
         opt.zero_grad(set_to_none=True)
         loss.backward()
         grad_norms_by_component(model)
@@ -197,6 +200,7 @@ def main() -> None:
         "tag": args.tag,
         "config": args.config,
         "overlay": args.overlay,
+        "precision": precision,
         "git_sha": sha,
         "torch_version": torch.__version__,
         "torch_threads": torch.get_num_threads(),

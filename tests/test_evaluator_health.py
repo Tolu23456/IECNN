@@ -125,3 +125,61 @@ def test_per_pass_evaluator_reports_all_passes_and_entropy():
     # and the plain evaluator agrees with the per-pass final
     assert math.isclose(evaluate_bpc(model, ubm, text, seq_len=64),
                         ev["final"], rel_tol=1e-6)
+
+# ---- speed goal opt 3: batched eval forwards (2026-11-14) ------------------
+def test_batched_eval_matches_batch1():
+    """Batching independent window rows must not move the scores: bpc and
+    per-pass numbers from EVAL_BATCH=1 vs the default batch agree to 1e-6."""
+    from models.iecnn import build_iecnn
+    from config import load_config
+    from train import evaluate as ev
+
+    ubm = _tiny_ubm()
+    vocab = len(ubm.bases)
+    cfg = load_config("configs/e1_weights_passes.yaml", "tiny.yaml")
+    torch.manual_seed(7)
+    model = build_iecnn(cfg, vocab)
+    model.eval()
+    text = "abcdef ghijkl mnopqr stuvwx " * 6
+    prepared = ev.prepare_text(ubm, text)
+
+    saved = ev.EVAL_BATCH
+    try:
+        ev.EVAL_BATCH = 1
+        b1 = ev.evaluate_bpc(model, ubm, text, seq_len=24, prepared=prepared)
+        p1 = ev.evaluate_bpc_per_pass(model, ubm, text, seq_len=24, prepared=prepared)
+        ev.EVAL_BATCH = 4
+        b4 = ev.evaluate_bpc(model, ubm, text, seq_len=24, prepared=prepared)
+        p4 = ev.evaluate_bpc_per_pass(model, ubm, text, seq_len=24, prepared=prepared)
+    finally:
+        ev.EVAL_BATCH = saved
+    assert abs(b1 - b4) < 1e-6, (b1, b4)
+    assert abs(p1["final"] - p4["final"]) < 1e-6
+    for a, b_ in zip(p1["passes"], p4["passes"]):
+        assert abs(a - b_) < 1e-6, (a, b_)
+    assert abs(p1["weight_entropy"] - p4["weight_entropy"]) < 1e-4
+
+
+def test_batched_eval_cut_matches_batch1():
+    """max_chars cut accounting is unchanged by batching (same token set)."""
+    from models.baselines import GRULanguageModel
+    from train import evaluate as ev
+
+    ubm = _tiny_ubm()
+    vocab = len(ubm.bases)
+    torch.manual_seed(1)
+    model = GRULanguageModel(vocab, d=16, hidden=32)
+    model.eval()
+    text = "the quick brown fox jumps over the lazy dog " * 10
+    prepared = ev.prepare_text(ubm, text)
+    saved = ev.EVAL_BATCH
+    try:
+        ev.EVAL_BATCH = 1
+        b1 = ev.evaluate_bpc(model, ubm, text, seq_len=16, max_chars=37,
+                             prepared=prepared)
+        ev.EVAL_BATCH = 4
+        b4 = ev.evaluate_bpc(model, ubm, text, seq_len=16, max_chars=37,
+                             prepared=prepared)
+    finally:
+        ev.EVAL_BATCH = saved
+    assert abs(b1 - b4) < 1e-9, (b1, b4)

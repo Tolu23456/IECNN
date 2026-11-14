@@ -1,0 +1,6 @@
+# Speed-goal overlay (2026-11-14): forward+loss under CPU bf16 autocast.
+# A/B it against the same base config in fp32 via the bench workflow
+# (dispatch bench.yml twice: overlay empty vs this file). Default is fp32 —
+# without this overlay nothing changes, bit for bit.
+training:
+  precision: bf16

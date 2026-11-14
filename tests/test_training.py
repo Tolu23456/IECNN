@@ -122,3 +122,60 @@ def test_ladder_rung_configs_all_load():
             assert key in cfg, f"{fname} missing {key}"
     e0 = load_config("configs/e0_plain_ensemble.yaml", "tiny.yaml")
     assert e0["model"]["n_passes"] == 1 and not e0["model"]["use_weights"]
+
+
+# ---- speed goal opt 2: training.precision = bf16 (2026-11-14) -------------
+def test_bf16_autocast_step_finite_and_grads_flow():
+    """One bf16-autocast forward+backward on a tiny IECNN: finite loss, every
+    parameter gets a gradient, and bf16 output is close to fp32 (opt 2 guard;
+    train.py wraps forward+loss in exactly this context when
+    training.precision == 'bf16')."""
+    from config import load_config
+    from train.train import build_model
+
+    cfg = load_config("configs/e1_weights_passes.yaml", "tiny.yaml")
+    torch.manual_seed(0)
+    model = build_model(cfg, 64)
+    x = torch.randint(0, 64, (2, 32))
+    y = torch.randint(0, 64, (2, 32))
+
+    with torch.autocast("cpu", dtype=torch.bfloat16, enabled=True):
+        out_bf = model(x)
+        loss_bf = torch.nn.functional.nll_loss(
+            out_bf["final_log_probs"].reshape(-1, 64), y.reshape(-1))
+    loss_bf.backward()
+    assert torch.isfinite(loss_bf)
+    for name, p in model.named_parameters():
+        if p.requires_grad:
+            assert p.grad is not None and torch.isfinite(p.grad).all(), \
+                f"bf16 step left no/inf gradient on {name}"
+
+    with torch.no_grad():
+        out_fp = model(x)
+    diff = (out_fp["final_log_probs"] - out_bf["final_log_probs"].float()).abs().max()
+    assert diff.item() < 0.1, f"bf16 vs fp32 log-probs diverge: {diff.item()}"
+
+
+def test_fp32_default_is_untouched_by_precision_flag():
+    """autocast(enabled=False) is a no-op: bit-identical to no context."""
+    from config import load_config
+    from train.train import build_model
+
+    cfg = load_config("configs/e1_weights_passes.yaml", "tiny.yaml")
+    torch.manual_seed(0)
+    model = build_model(cfg, 64)
+    x = torch.randint(0, 64, (2, 32))
+    with torch.autocast("cpu", dtype=torch.bfloat16, enabled=False):
+        a = model(x)["final_log_probs"]
+    b = model(x)["final_log_probs"]
+    assert (a == b).all(), "disabled autocast changed the fp32 forward"
+
+
+def test_precision_overlay_merges_and_default_absent():
+    """overlay_bf16.yaml sets training.precision=bf16; base configs stay fp32
+    (no key = default fp32, bit-identical legacy path)."""
+    from config import load_config
+    cfg = load_config("configs/e1_weights_passes_vocab2.yaml", "overlay_bf16.yaml")
+    assert cfg["training"]["precision"] == "bf16"
+    base = load_config("configs/e1_weights_passes_vocab2.yaml")
+    assert "precision" not in base["training"]

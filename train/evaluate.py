@@ -13,8 +13,17 @@ pooled log-prob, and the pass-weights' entropy is averaged over the eval.
 from __future__ import annotations
 
 import math
+import os
 
 import torch
+
+# Rows per eval forward (speed goal opt 3, 2026-11-14): eval used to run one
+# window per forward (batch 1), which wastes the GEMMs on tiny matrices.
+# Window rows are independent (states reset per position, window memory is
+# per row), so batching them changes nothing per token — pinned by
+# test_batched_eval_matches_batch1. Keep the default small: activations at
+# [B*T, N, V] are the memory class; 4 keeps ~1.1 GB at vocab2.
+EVAL_BATCH = int(os.environ.get("IECNN_EVAL_BATCH", "4"))
 
 
 def prepare_text(ubm, text: str) -> tuple[list[int], list[int]]:
@@ -23,6 +32,28 @@ def prepare_text(ubm, text: str) -> tuple[list[int], list[int]]:
     ids = ubm.encode(text)
     expand_len = [len(ubm.expand(int(i))) for i in ids]
     return ids, expand_len
+
+
+def _equal_length_batches(starts: list[int], ids: list[int], context: int,
+                          batch: int):
+    """Group window starts whose rows share one token length.
+
+    Full windows have `context` input tokens; the tail window is shorter and
+    must run alone (padding it would score tokens the sequential accounting
+    never counted). Groups preserve order, so the sequential char-count cut
+    logic is unchanged.
+    """
+    cur: list[int] = []
+    cur_len = 0
+    for s in starts:
+        length = min(context, len(ids) - s - 1)
+        if cur and (length != cur_len or len(cur) >= batch):
+            yield cur
+            cur = []
+        cur_len = length
+        cur.append(s)
+    if cur:
+        yield cur
 
 
 def _model_forward(model, x, hard_mode: bool, has_regions: bool, kwargs: dict):
@@ -54,22 +85,27 @@ def evaluate_bpc(model, ubm, text, hard_mode: bool = False,
 
     nll_total = 0.0
     chars_total = 0
-    for start in range(0, len(ids) - 1, context):
-        end = min(start + context + 1, len(ids))
-        window = ids[start:end]
-        x = torch.tensor([window[:-1]], dtype=torch.long, device=device)
-        y = torch.tensor([window[1:]], dtype=torch.long, device=device)
+    starts = list(range(0, len(ids) - 1, context))
+    for group in _equal_length_batches(starts, ids, context, EVAL_BATCH):
+        L = min(context, len(ids) - group[0] - 1)
+        xs = [ids[s:s + L] for s in group]
+        ys = [ids[s + 1:s + 1 + L] for s in group]
+        x = torch.tensor(xs, dtype=torch.long, device=device)
+        y = torch.tensor(ys, dtype=torch.long, device=device)
         out = _model_forward(model, x, hard_mode, has_regions, kwargs)
         logp = out["final_log_probs"] if isinstance(out, dict) else out
-        nll = -logp[0].gather(1, y[0].unsqueeze(1)).squeeze(1)
-        done = False
-        for i in range(len(y[0])):
-            chars_total += expand_len[start + 1 + i]
-            nll_total += float(nll[i].item())
-            if max_chars is not None and chars_total >= max_chars:
-                done = True
+        nll = -logp.gather(2, y.unsqueeze(2)).squeeze(2)          # [K, T]
+        stop = False
+        for row, s in enumerate(group):          # sequential accounting, in order
+            for i in range(L):
+                chars_total += expand_len[s + 1 + i]
+                nll_total += float(nll[row, i].item())
+                if max_chars is not None and chars_total >= max_chars:
+                    stop = True
+                    break
+            if stop:
                 break
-        if done:
+        if stop:
             break
     if chars_total == 0:
         raise ValueError("evaluation produced zero characters")
@@ -105,11 +141,13 @@ def evaluate_bpc_per_pass(model, ubm, text, seq_len: int | None = None,
     chars_total = 0
     ent_sum, ent_n = 0.0, 0
     taus: list[float] | None = None
-    for start in range(0, len(ids) - 1, context):
-        end = min(start + context + 1, len(ids))
-        window = ids[start:end]
-        x = torch.tensor([window[:-1]], dtype=torch.long, device=device)
-        y = torch.tensor([window[1:]], dtype=torch.long, device=device)
+    starts = list(range(0, len(ids) - 1, context))
+    for group in _equal_length_batches(starts, ids, context, EVAL_BATCH):
+        L = min(context, len(ids) - group[0] - 1)
+        xs = [ids[s:s + L] for s in group]
+        ys = [ids[s + 1:s + 1 + L] for s in group]
+        x = torch.tensor(xs, dtype=torch.long, device=device)
+        y = torch.tensor(ys, dtype=torch.long, device=device)
         out = _model_forward(model, x, False, has_regions, kwargs)
         logp = out["final_log_probs"] if isinstance(out, dict) else out
         pp = out.get("per_pass_last_region") if isinstance(out, dict) else None
@@ -119,25 +157,32 @@ def evaluate_bpc_per_pass(model, ubm, text, seq_len: int | None = None,
             n_passes = len(pp)
             nll_pass = [0.0] * n_passes
             taus = [p.get("tau") for p in pp]
-        done = False
-        for i in range(len(y[0])):
-            ch = expand_len[start + 1 + i]
-            chars_total += ch
-            nll_final += float(-logp[0, i].gather(
-                0, y[0, i].unsqueeze(0)).item())
-            for p, entry in enumerate(pp):
-                nll_p = -entry["log_b"][0, i].gather(
-                    0, y[0, i].unsqueeze(0)).item()
-                nll_pass[p] += nll_p
-            w = pp[-1].get("weights")
-            if w is not None:
-                ent = -(w * w.clamp_min(1e-9).log()).sum(-1)
-                ent_sum += float(ent.sum().item())
-                ent_n += ent.numel()
-            if max_chars is not None and chars_total >= max_chars:
-                done = True
+        final_nll = -logp.gather(2, y.unsqueeze(2)).squeeze(2)    # [K, T]
+        pass_nll = [-entry["log_b"].gather(2, y.unsqueeze(2)).squeeze(2)
+                    for entry in pp]
+        w = pp[-1].get("weights")
+        ent_all = None
+        if w is not None:
+            ent_all = -(w * w.clamp_min(1e-9).log()).sum(-1)      # [K, T]
+        stop = False
+        for row, s in enumerate(group):          # sequential accounting, in order
+            for i in range(L):
+                chars_total += expand_len[s + 1 + i]
+                nll_final += float(final_nll[row, i].item())
+                for p_idx in range(n_passes):
+                    nll_pass[p_idx] += float(pass_nll[p_idx][row, i].item())
+                if ent_all is not None:
+                    # per-position weight entropy; the mean over counted
+                    # positions equals the old per-window accounting (the old
+                    # loop added each window's row T times and divided by T^2)
+                    ent_sum += float(ent_all[row, i].sum().item())
+                    ent_n += ent_all[row, i].numel()
+                if max_chars is not None and chars_total >= max_chars:
+                    stop = True
+                    break
+            if stop:
                 break
-        if done:
+        if stop:
             break
     if chars_total == 0:
         raise ValueError("evaluation produced zero characters")
@@ -182,51 +227,62 @@ def evaluate_consensus_metrics(model, ubm, text, seq_len: int | None = None,
     pooled_hit = oracle1 = oracle5 = outvoted = verif_hit = 0
     overlap_sum = 0.0
     acc_hits: list[int] | None = None
-    for start in range(0, len(ids) - 1, context):
-        end = min(start + context + 1, len(ids))
-        window = ids[start:end]
-        x = torch.tensor([window[:-1]], dtype=torch.long, device=device)
-        y = torch.tensor([window[1:]], dtype=torch.long, device=device)
+    pp_last = None
+    starts = list(range(0, len(ids) - 1, context))
+    for group in _equal_length_batches(starts, ids, context, EVAL_BATCH):
+        L = min(context, len(ids) - group[0] - 1)
+        xs = [ids[s:s + L] for s in group]
+        ys = [ids[s + 1:s + 1 + L] for s in group]
+        x = torch.tensor(xs, dtype=torch.long, device=device)
+        y = torch.tensor(ys, dtype=torch.long, device=device)
         out = model(x, **kwargs)
         pp = out.get("per_pass_last_region")
         if not pp or "log_pi" not in pp[-1]:
             break                       # baseline: metrics undefined
-        log_pi = pp[-1]["log_pi"][0]                     # [T, N, V]
-        truth = y[0]                                     # [T]
-        top5 = log_pi.topk(5, dim=-1).indices            # [T, N, 5]
-        top1 = top5[..., 0]                              # [T, N]
-        hit = (top1 == truth[:, None])                   # [T, N]
+        pp_last = pp[-1]
+        log_pi = pp[-1]["log_pi"]                         # [K, T, N, V]
+        truth = y                                         # [K, T]
+        top5 = log_pi.topk(5, dim=-1).indices             # [K, T, N, 5]
+        top1 = top5[..., 0]                               # [K, T, N]
+        hit = (top1 == truth[:, :, None])                 # [K, T, N]
+        n_dots = top1.shape[-1]
         if acc_hits is None:
-            acc_hits = [0] * top1.shape[-1]
-        for k in range(top1.shape[-1]):
-            acc_hits[k] += int(hit[:, k].sum().item())
+            acc_hits = [0] * n_dots
+        for k in range(n_dots):
+            acc_hits[k] += int(hit[..., k].sum().item())
         n_pos += truth.numel()
         oracle1 += int(hit.any(-1).sum().item())
-        in5 = (top5 == truth[:, None, None]).any(-1)     # [T, N]
+        in5 = (top5 == truth[:, :, None, None]).any(-1)   # [K, T, N]
         oracle5 += int(in5.any(-1).sum().item())
-        pooled_top = out["final_log_probs"][0].argmax(-1)
+        pooled_top = out["final_log_probs"].argmax(-1)    # [K, T]
         p_hit = (pooled_top == truth)
         pooled_hit += int(p_hit.sum().item())
         outvoted += int((~p_hit & hit.any(-1)).sum().item())
         # pairwise top-5 overlap via token-count identity:
         # sum over pairs of |A_i ∩ A_j| = sum over tokens C(c_v, 2)
-        counts = torch.zeros(top5.shape[0], log_pi.shape[-1],
+        counts = torch.zeros(top5.shape[0], top5.shape[1], log_pi.shape[-1],
                              dtype=torch.long, device=device)
-        counts.scatter_add_(1, top5.reshape(top5.shape[0], -1),
-                            torch.ones_like(top5.reshape(top5.shape[0], -1),
-                                            dtype=torch.long))
-        npairs = top1.shape[-1] * (top1.shape[-1] - 1) / 2
-        overlap_sum += float((counts * (counts - 1) / 2).sum(-1)
-                             .sum().item()) / (npairs * 5)
+        flat5 = top5.reshape(top5.shape[0], top5.shape[1], -1)
+        counts.scatter_add_(2, flat5,
+                            torch.ones_like(flat5, dtype=torch.long))
+        npairs = n_dots * (n_dots - 1) / 2
         v = pp[-1].get("verifier")
+        sel = None
         if v is not None:
-            v = v[0]                                     # [T, N]
-            verif_hit += int(hit.gather(1, v.argmax(-1, keepdim=True)
-                                        ).sum().item())
-        if max_chars is not None:
-            chars_here = sum(expand_len[start + 1: start + 1 + truth.numel()])
-            if chars_here >= max_chars:
-                break
+            sel = v.argmax(-1, keepdim=True)              # [K, T, 1]
+        stop = False
+        for row, s in enumerate(group):
+            overlap_sum += float(
+                (counts[row] * (counts[row] - 1) / 2).sum(-1).sum().item()
+            ) / (npairs * 5)
+            if sel is not None:
+                verif_hit += int(hit[row].gather(1, sel[row]).sum().item())
+            if max_chars is not None:
+                chars_here = sum(expand_len[s + 1: s + 1 + L])
+                if chars_here >= max_chars:
+                    stop = True
+        if stop:
+            break
     if n_pos == 0 or acc_hits is None:
         raise ValueError("no IECNN positions found for consensus metrics")
     return {

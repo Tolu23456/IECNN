@@ -248,6 +248,13 @@ def train_one(config: dict, seed: int, out_dir: Path, max_steps: int | None = No
     # clean. Default stays "cosine" for backwards compatibility.
     lr_sched = str(tcfg.get("lr_schedule", "cosine"))
     lr_fn = lr_at_constant if lr_sched == "constant" else lr_at
+    # training.precision (speed goal opt 2): "bf16" = CPU autocast around
+    # forward+loss; "fp32" (default) = exactly the old path.
+    precision = str(tcfg.get("precision", "fp32")).lower()
+    if precision not in ("fp32", "bf16"):
+        raise ValueError(
+            f"training.precision must be 'fp32' or 'bf16', got '{precision!r}'")
+    use_bf16 = precision == "bf16"
 
     context = min(seq_len, getattr(model, "context_length", seq_len))
     smooth: float | None = None
@@ -269,51 +276,57 @@ def train_one(config: dict, seed: int, out_dir: Path, max_steps: int | None = No
             floor = weight_floor_at(step, steps, weight_floor_fraction / _iecnn_n_dots(model))
             hard = use_hard_batch(step, steps, hard_start, hard_frac, hard_rng)
             kwargs = {"tau0": tau0, "hard_mode": bool(hard), "floor": floor}
-        out = model(xb, **kwargs)
-        loss = main_loss(out["final_log_probs"], yb)
-        aux_parts = {"main": float(loss.item())}
+        # training.precision = "bf16" runs forward+loss under CPU bf16
+        # autocast (speed goal opt 2, 2026-11-14): the [B,T,N,V] blocks are
+        # memory-bound, so halved bytes ~ halved time on those ops. Default
+        # "fp32" = autocast disabled = bit-identical to before. Evals always
+        # run in fp32 so recorded scores keep a single precision story.
+        with torch.autocast("cpu", dtype=torch.bfloat16, enabled=use_bf16):
+            out = model(xb, **kwargs)
+            loss = main_loss(out["final_log_probs"], yb)
+            aux_parts = {"main": float(loss.item())}
 
-        if is_iecnn and any(v != 0 for k, v in lambdas.items() if k != "gamma_b"):
-            from train.losses import (region_loss, boosted_dot_loss,
-                                      decorrelation_penalty, confidence_loss,
-                                      weight_entropy_bonus, oracle_dot_loss,
-                                      verifier_loss)
-            last_pass = out["per_pass_last_region"][-1]
-            if lambdas["lambda_r"] > 0 and len(out["region_outputs"]) > 1:
-                stack = torch.stack([ro["log_b"] for ro in out["region_outputs"]])
-                lr_term = region_loss(stack, yb)
-                loss = loss + lambdas["lambda_r"] * lr_term
-                aux_parts["L_region"] = float(lr_term.detach())
-            if lambdas["lambda_d"] > 0:
-                ld = boosted_dot_loss(last_pass["log_pi"], out["final_log_probs"],
-                                      yb, lambdas["gamma_b"])
-                loss = loss + lambdas["lambda_d"] * ld
-                aux_parts["L_dot"] = float(ld.detach())
-            if lambdas["lambda_c"] > 0:
-                lc_val = correlation_lambda(step, lam_ramp, lambdas["lambda_c"])
-                lc = decorrelation_penalty(last_pass["log_pi"],
-                                           out["final_log_probs"], yb)
-                loss = loss + lc_val * lc
-                aux_parts["L_corr"] = float(lc.detach()) * lc_val
-            if lambdas["lambda_k"] > 0:
-                lk = confidence_loss(last_pass["gamma"], last_pass["log_pi"], yb)
-                loss = loss + lambdas["lambda_k"] * lk
-                aux_parts["L_conf"] = float(lk.detach())
-            if lambdas["lambda_w"] > 0:
-                lw_val = weight_entropy_lambda(step, steps, lambdas["lambda_w"])
-                lw = weight_entropy_bonus(last_pass["weights"])
-                loss = loss - lw_val * lw
-                aux_parts["L_w"] = -float(lw.detach()) * lw_val
-            if lambdas["lambda_o"] > 0:
-                lo = oracle_dot_loss(last_pass["log_pi"], out["final_log_probs"],
-                                     yb, outvote_weight)
-                loss = loss + lambdas["lambda_o"] * lo
-                aux_parts["L_oracle"] = float(lo.detach())
-            if lambdas["lambda_v"] > 0 and last_pass.get("verifier") is not None:
-                lv = verifier_loss(last_pass["verifier"], last_pass["log_pi"],
-                                   out["final_log_probs"], yb, outvote_weight)
-                loss = loss + lambdas["lambda_v"] * lv
-                aux_parts["L_verif"] = float(lv.detach())
+            if is_iecnn and any(v != 0 for k, v in lambdas.items() if k != "gamma_b"):
+                from train.losses import (region_loss, boosted_dot_loss,
+                                          decorrelation_penalty, confidence_loss,
+                                          weight_entropy_bonus, oracle_dot_loss,
+                                          verifier_loss)
+                last_pass = out["per_pass_last_region"][-1]
+                if lambdas["lambda_r"] > 0 and len(out["region_outputs"]) > 1:
+                    stack = torch.stack([ro["log_b"] for ro in out["region_outputs"]])
+                    lr_term = region_loss(stack, yb)
+                    loss = loss + lambdas["lambda_r"] * lr_term
+                    aux_parts["L_region"] = float(lr_term.detach())
+                if lambdas["lambda_d"] > 0:
+                    ld = boosted_dot_loss(last_pass["log_pi"], out["final_log_probs"],
+                                          yb, lambdas["gamma_b"])
+                    loss = loss + lambdas["lambda_d"] * ld
+                    aux_parts["L_dot"] = float(ld.detach())
+                if lambdas["lambda_c"] > 0:
+                    lc_val = correlation_lambda(step, lam_ramp, lambdas["lambda_c"])
+                    lc = decorrelation_penalty(last_pass["log_pi"],
+                                               out["final_log_probs"], yb)
+                    loss = loss + lc_val * lc
+                    aux_parts["L_corr"] = float(lc.detach()) * lc_val
+                if lambdas["lambda_k"] > 0:
+                    lk = confidence_loss(last_pass["gamma"], last_pass["log_pi"], yb)
+                    loss = loss + lambdas["lambda_k"] * lk
+                    aux_parts["L_conf"] = float(lk.detach())
+                if lambdas["lambda_w"] > 0:
+                    lw_val = weight_entropy_lambda(step, steps, lambdas["lambda_w"])
+                    lw = weight_entropy_bonus(last_pass["weights"])
+                    loss = loss - lw_val * lw
+                    aux_parts["L_w"] = -float(lw.detach()) * lw_val
+                if lambdas["lambda_o"] > 0:
+                    lo = oracle_dot_loss(last_pass["log_pi"], out["final_log_probs"],
+                                         yb, outvote_weight)
+                    loss = loss + lambdas["lambda_o"] * lo
+                    aux_parts["L_oracle"] = float(lo.detach())
+                if lambdas["lambda_v"] > 0 and last_pass.get("verifier") is not None:
+                    lv = verifier_loss(last_pass["verifier"], last_pass["log_pi"],
+                                       out["final_log_probs"], yb, outvote_weight)
+                    loss = loss + lambdas["lambda_v"] * lv
+                    aux_parts["L_verif"] = float(lv.detach())
 
         opt.zero_grad(set_to_none=True)
         loss.backward()
