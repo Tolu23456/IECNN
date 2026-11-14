@@ -30,6 +30,15 @@ on:
       env_extra:
         description: "Extra env for the run, e.g. 'IECNN_EVAL_BATCH=1 IECNN_CONS_CHUNK=0' (A/B knobs)"
         default: ""
+      ab_config:
+        description: "Paired A/B: second config timed interleaved in the same runner"
+        default: ""
+      ab_overlay:
+        description: "Overlay for ab_config"
+        default: ""
+      profile:
+        description: "torch.profiler steps after timing (0 = off)"
+        default: "0"
 
 permissions:
   contents: write
@@ -77,14 +86,23 @@ jobs:
           STEPS: ${{ github.event.inputs.steps }}
           WARMUP: ${{ github.event.inputs.warmup }}
           SEED: ${{ github.event.inputs.seed }}
+          AB_CONFIG: ${{ github.event.inputs.ab_config }}
+          AB_OVERLAY: ${{ github.event.inputs.ab_overlay }}
+          PROFILE: ${{ github.event.inputs.profile }}
         run: |
           set -euo pipefail
           OVERLAY_ARG=""
           if [ -n "$OVERLAY" ]; then OVERLAY_ARG="--overlay $OVERLAY"; fi
+          AB_ARGS=""
+          if [ -n "$AB_CONFIG" ]; then
+            AB_ARGS="--ab-config configs/$AB_CONFIG"
+            if [ -n "$AB_OVERLAY" ]; then AB_ARGS="$AB_ARGS --ab-overlay $AB_OVERLAY"; fi
+          fi
           # shellcheck disable=SC2086
           env ${{ github.event.inputs.env_extra }} \
           python scripts/bench.py --config "configs/$CONFIG" $OVERLAY_ARG \
-            --tag "$TAG" --steps "$STEPS" --warmup "$WARMUP" --seed "$SEED"
+            --tag "$TAG" --steps "$STEPS" --warmup "$WARMUP" --seed "$SEED" \
+            $AB_ARGS --profile "$PROFILE"
 
       - name: Commit bench result
         run: |
