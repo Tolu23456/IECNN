@@ -55,6 +55,12 @@ EVAL_BATCH default 4 stands.
 = 8.18 → converging to unchunked ≈ 5.0. Chunking only pays when the temporaries
 actually pressure RAM (GB-scale vocab runs), which vocab2/batch16 is nowhere near.
 
+**C5 anchor, corpus-verified (12:10 UTC)**: full-val re-score of the vocab3
+warmstart checkpoint = **2.27183 bpc @1680** (tau0 0.99884; per-pass 2.910/2.535/
+2.272; hard-mode 2.2703, mode gap −0.0015; train-slice 2.291 — no overfit signal).
+The in-loop figure 2.27685 (100k-char subsample) was honest to within 0.005.
+Target ≤2.15 needs −5.4%; the plateau chain is still descending.
+
 **Provenance note (judge, Round 1)**: the 2.27685 bpc "vocab3 plateau" figure and
 the other vocab-curve numbers (3.20294 / 2.59667 / 2.44863) are the training
 runs' in-loop eval values over `training.eval_chars` = 100,000 chars, NOT
