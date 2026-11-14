@@ -26,6 +26,7 @@ from UBM import UBM                                    # noqa: E402
 from UBM.tokenizer import fingerprint                  # noqa: E402
 from train.schedules import temperature_at             # noqa: E402
 from train.train import build_model                    # noqa: E402
+from utils import load_run_meta                        # noqa: E402
 
 
 def _next_log_probs(model, out: dict, kind: str) -> torch.Tensor:
@@ -59,6 +60,9 @@ def main() -> None:
                          "instead of the pooled average.")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--config-fallback", default="",
+                    help="repo config yaml to rebuild config_used.json from "
+                         "when the artifact lacks it (timeout-killed chunk)")
     args = ap.parse_args()
 
     prompt_text = args.prompt or (Path(args.prompt_file).read_text("utf-8")
@@ -68,8 +72,7 @@ def main() -> None:
 
     d = Path(args.ckpt_dir)
     ck = torch.load(d / "checkpoint.pt", weights_only=False)
-    summary = json.load(open(d / "summary.json"))
-    config = json.load(open(d / "config_used.json"))
+    summary, config = load_run_meta(d, ck, args.config_fallback or None)
     run = d.name
     kind = config["model"]["kind"]
 

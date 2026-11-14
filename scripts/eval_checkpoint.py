@@ -28,6 +28,7 @@ from train.train import build_model                   # noqa: E402
 from train.schedules import temperature_at            # noqa: E402
 from train.evaluate import (evaluate_bpc, evaluate_bpc_per_pass,   # noqa: E402
                             prepare_text)
+from utils import load_run_meta                       # noqa: E402
 import torch                                          # noqa: E402
 
 
@@ -39,6 +40,9 @@ def main() -> None:
     ap.add_argument("--data", default="data/val.txt")
     ap.add_argument("--train-slice-chars", type=int, default=100_000)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--config-fallback", default="",
+                    help="repo config yaml to rebuild config_used.json from "
+                         "when the artifact lacks it (timeout-killed chunk)")
     args = ap.parse_args()
 
     d = Path(args.ckpt_dir)
@@ -52,8 +56,7 @@ def main() -> None:
                 f"but '{args.vocab}' hashes to {got[:16]}… — refusing to evaluate")
         print(f"vocab fingerprint ok ({rec_sha[:16]}…)", flush=True)
 
-    summary = json.load(open(d / "summary.json"))
-    config = json.load(open(d / "config_used.json"))
+    summary, config = load_run_meta(d, ck, args.config_fallback or None)
     ubm = UBM.load(args.vocab)
     vocab_size = len(ubm.bases)
 

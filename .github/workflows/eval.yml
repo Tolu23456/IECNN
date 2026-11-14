@@ -122,14 +122,21 @@ jobs:
         run: unzip -qo /tmp/artifact.zip "checkpoints/*" -d .
 
       - name: Re-score best point (full val, best-step tau)
+        env:
+          ARTIFACT: ${{ github.event.inputs.artifact }}
         run: |
           set -euo pipefail
           CKPT_DIR=$(find checkpoints -mindepth 1 -maxdepth 1 -type d | head -1)
           echo "ckpt dir: $CKPT_DIR"
           RUN=$(basename "$CKPT_DIR")
+          # config fallback for timeout-killed chunks (no config_used.json):
+          # the artifact name embeds the config file ("cfg.yaml-seeds-0-sfx")
+          CFG="${ARTIFACT%%-seeds-*}.yaml"
+          echo "config fallback: configs/$CFG"
           python scripts/eval_checkpoint.py \
             --ckpt-dir "$CKPT_DIR" \
             --vocab "${{ github.event.inputs.vocab }}" \
+            --config-fallback "configs/$CFG" \
             --out "results/eval_${RUN}.json"
           cat "results/eval_${RUN}.json"
 

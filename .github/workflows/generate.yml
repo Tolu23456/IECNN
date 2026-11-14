@@ -131,6 +131,7 @@ jobs:
           SEED: ${{ github.event.inputs.seed }}
           VOCAB: ${{ github.event.inputs.vocab }}
           EXPERT: ${{ github.event.inputs.expert_sampling }}
+          ARTIFACT: ${{ github.event.inputs.artifact }}
         run: |
           set -euo pipefail
           # checkpoint dir comes from what the artifact actually contains —
@@ -143,9 +144,11 @@ jobs:
           printf '%s' "$PROMPT" > /tmp/prompt.txt
           EXPERT_FLAG=""
           if [ "$EXPERT" = "true" ]; then EXPERT_FLAG="--expert-sampling"; fi
+          CFG="${ARTIFACT%%-seeds-*}.yaml"   # fallback for timeout-killed chunks
           python scripts/generate.py \
             --ckpt-dir "$CKPT_DIR" \
             --vocab "$VOCAB" \
+            --config-fallback "configs/$CFG" \
             --prompt-file /tmp/prompt.txt \
             --max-new-tokens "$MAXNEW" \
             --temperature "$TEMP" \

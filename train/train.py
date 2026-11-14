@@ -116,6 +116,12 @@ def train_one(config: dict, seed: int, out_dir: Path, max_steps: int | None = No
     name = config.get("name", "run")
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # config_used.json at RUN START, not chunk end: a chunk killed by the
+    # 320-min job timeout still leaves a re-scorable artifact (2026-11-14
+    # lesson: the vocab3 warmstart re-score died on a missing config_used.json).
+    (out_dir / "config_used.json").write_text(
+        json.dumps(config, indent=1, default=str))
+
     set_seed(seed)
     set_torch_threads(int(config.get("training", {}).get("torch_threads", 2)))
 
@@ -460,6 +466,19 @@ def train_one(config: dict, seed: int, out_dir: Path, max_steps: int | None = No
                 "train_seconds": train_seconds,
                 "since_best_evals": since_best_evals,
             })
+            # summary/config snapshot rides with every checkpoint so a
+            # timeout-killed chunk still leaves a self-describing artifact
+            (out_dir / "summary.json").write_text(json.dumps({
+                "name": name, "seed": seed,
+                "steps_final": step + 1, "steps_target": steps,
+                "vocab_file": vocab_file, "vocab_sha256": vocab_sha,
+                "parameters": count_parameters(model),
+                "best_val_bpc": round(best_val, 5)
+                if best_val != float("inf") else None,
+                "best_step": best_step,
+                "stop_kind": "checkpoint_snapshot",
+                "vocab_size": vocab_size, "batch_size": used_batch,
+            }, indent=1))
 
     elapsed_total = time.perf_counter() - t0
     final_eval_kwargs = {}
