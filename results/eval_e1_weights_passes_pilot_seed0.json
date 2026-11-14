@@ -12,5 +12,10 @@
  "hard_bpc_at_best_tau": 3.777581593398507,
  "mode_gap": 0.00037,
  "bpc_train_slice": 3.7378,
- "vocab_sha256": "3abea29efde983cadbdea7386b1d842e8e94dabb5e39812ff34be5915697e8c0"
+ "vocab_sha256": "3abea29efde983cadbdea7386b1d842e8e94dabb5e39812ff34be5915697e8c0",
+ "retracted": {
+  "date": "2026-11-14",
+  "reason": "scored against corpus v0 (Shakespeare val split) instead of corpus v1 (Oz val, sha16 b94503186e683737). The corpus-verified full-val bpc for this checkpoint (best_step 540, tau0 0.95426) is 3.20294 \u2014 from diagnose_reload A6 against the run's own split_info. Do not quote 3.77721 anywhere.",
+  "superseded_by": "diagnose_reload A6 full-val 3.20294 (val sha16 b94503186e683737)"
+ }
 }
