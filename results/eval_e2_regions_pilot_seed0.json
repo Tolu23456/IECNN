@@ -1,0 +1,16 @@
+{
+ "ckpt_dir": "checkpoints/e2_regions_pilot_seed0",
+ "best_step": 180,
+ "tau0_used": 1.0,
+ "best_full_val_bpc_at_best_tau": 3.54218,
+ "per_pass_bpc": [
+  3.54412,
+  3.5415,
+  3.54163
+ ],
+ "weight_entropy": 2.07427,
+ "hard_bpc_at_best_tau": 3.5422807190886627,
+ "mode_gap": 0.0001,
+ "bpc_train_slice": 3.71337,
+ "vocab_sha256": "3abea29efde983cadbdea7386b1d842e8e94dabb5e39812ff34be5915697e8c0"
+}
