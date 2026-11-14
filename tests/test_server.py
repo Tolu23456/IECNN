@@ -639,6 +639,96 @@ def test_chart_plugin_vendored():
     assert "cdn.jsdelivr" not in html and "unpkg" not in html
 
 
+# --------------------------------------- linked views + compare (step 3) ----
+def test_compare_endpoint_overlay_and_deltas():
+    srv, base = _start()
+    try:
+        a = "train_e1_weights_passes_eqc_seed0"
+        b = "train_e0_plain_ensemble_eqc_seed0"
+        st, body = _get(base + f"/api/compare?a={a}&b={b}")
+        assert st == 200
+        d = json.loads(body)
+        assert d["a"]["name"] == a and d["b"]["name"] == b
+        assert d["n_matched"] == len(d["deltas"]) > 0
+        # deltas are B−A at the shared steps, recomputed from the CSVs
+        def curve(n):
+            hdr, rows = _dedupe_csv(ROOT / "results" / f"{n}.csv")
+            si, vi = hdr.index("step"), hdr.index("bpc_val")
+            return {float(r[si]): float(r[vi]) for r in rows
+                    if len(r) > vi and r[vi] != ""}
+        ca, cb = curve(a), curve(b)
+        for t in d["deltas"]:
+            assert abs(t["a"] - ca[t["step"]]) < 1e-9
+            assert abs(t["b"] - cb[t["step"]]) < 1e-9
+            assert abs(t["delta"] - (cb[t["step"]] - ca[t["step"]])) < 1e-9
+        mean_d = sum(t["delta"] for t in d["deltas"]) / len(d["deltas"])
+        assert abs(d["mean_delta"] - mean_d) < 1e-9
+        assert d["better"] in ("a", "b", "tie")
+        assert d["matched_steps"] == sorted(d["matched_steps"])
+    finally:
+        srv.shutdown()
+
+
+def test_compare_detects_vocab_mismatch():
+    """vocab2 (sha from its eval JSON) vs the v1 pilot → mismatch = True."""
+    srv, base = _start()
+    try:
+        st, body = _get(base + "/api/compare"
+                        "?a=train_e1_weights_passes_vocab2_seed0"
+                        "&b=train_e1_weights_passes_pilot_seed0")
+        assert st == 200
+        d = json.loads(body)
+        assert d["vocab_mismatch"] is True
+        assert d["a"]["vocab_source"] == "eval vocab_sha256"
+        sha = json.loads((ROOT / "results" /
+                          "eval_e1_weights_passes_vocab2_seed0.json")
+                         .read_text(encoding="utf-8"))["vocab_sha256"]
+        assert d["a"]["vocab_sha256"] == sha
+        # same-vocab pair must NOT flag a mismatch
+        st, body = _get(base + "/api/compare"
+                        "?a=train_e1_weights_passes_pilot_seed0"
+                        "&b=train_e0_plain_ensemble_pilot_seed0")
+        d = json.loads(body)
+        assert d["vocab_mismatch"] is not True
+    finally:
+        srv.shutdown()
+
+
+def test_compare_error_cases():
+    srv, base = _start()
+    try:
+        st, body = _get(base + "/api/compare?a=../x&b=y")
+        assert st == 400
+        st, body = _get(base + "/api/compare?a=no_such_run_seed0&b=y")
+        assert st == 404
+        st, body = _get(base + "/api/compare?a=train_b0_gru_seed1&b=y")
+        assert st == 404          # b missing
+        d = json.loads(body)
+        assert "error" in d
+    finally:
+        srv.shutdown()
+
+
+def test_generations_carry_timeline_fields():
+    """generated_ids + expert_dots pass through for the token timeline."""
+    import tempfile
+    sample = {"meta": {"run": "e1_weights_passes_pilot_seed0"},
+              "prompt": "p", "generated": "ab",
+              "generated_ids": [7, 8],
+              "expert_dots": [3, None], "elapsed_s": 1.0}
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        (d / "gen-x.json").write_text(json.dumps(sample))
+        g = server_mod.api_generations(d)["generations"][0]
+        assert g["generated_ids"] == [7, 8]
+        assert g["expert_dots"] == [3, None]
+        # an export WITHOUT expert_dots keeps the field but as None
+        (d / "gen-y.json").write_text(json.dumps(
+            {"meta": {}, "generated_ids": [1]}))
+        gens = server_mod.api_generations(d)["generations"]
+        assert [x["expert_dots"] for x in gens] == [None, [3, None]]
+
+
 # ------------------------------------------------------------- static ------
 def test_static_pages_served():
     srv, base = _start()
@@ -669,21 +759,26 @@ def test_dark_theme_is_the_default():
 
 def test_index_links_every_page():
     html = (STATIC / "index.html").read_text(encoding="utf-8")
-    for page in ("dashboard", "runs", "scores", "architecture",
+    for page in ("dashboard", "runs", "compare", "scores", "architecture",
                  "checkpoints", "diagnosis", "vocab", "corpus", "playground"):
         assert f'data-page="{page}"' in html, page
 
 
 def test_app_js_has_a_page_function_for_every_nav_item():
     js = (STATIC / "app.js").read_text(encoding="utf-8")
-    for fn in ("pageDashboard", "pageRuns", "pageScores", "pageArchitecture",
-               "pageCheckpoints", "pageDiagnosis", "pageVocab", "pageCorpus",
-               "pagePlayground"):
+    for fn in ("pageDashboard", "pageRuns", "pageCompare", "pageScores",
+               "pageArchitecture", "pageCheckpoints", "pageDiagnosis",
+               "pageVocab", "pageCorpus", "pagePlayground"):
         assert f"function {fn}" in js, fn
     # playground talks to the generation endpoints
     for ep in ("/api/generate", "/api/generate/runs",
                "/api/generate/result", "/api/generations"):
         assert ep in js, ep
+    # step 3: compare page + replay + token timeline
+    assert "/api/compare" in js
+    for bit in ("replayPanel", "token timeline", "expert_dots",
+                "prefers-reduced-motion"):
+        assert bit in js, bit
     # step 1: dashboard gates scoreboard + provenance-aware scores page
     assert "/api/gates" in js
     for gate_bit in ("G1", "G2", "G3", "G4", "unverified corpus", "RETRACTED"):

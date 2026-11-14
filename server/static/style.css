@@ -289,6 +289,21 @@ button.mini:hover, button.mini.on { color: var(--text); border-color: var(--acce
 button.mini.on { background: #4fc3f71a; }
 .toolbar input[type="range"] { width: 130px; vertical-align: middle; }
 
+/* linked dot focus (weights & dots) + replay (architecture) + timeline (playground) */
+.dotcard.dim, .heat .cell.dim { opacity: .25; }
+.dotcard.focused { border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent); }
+.heat .cell.focused { outline: 2px solid var(--accent); outline-offset: 1px; }
+.replaybar { height: 7px; background: #1a2233; border-radius: 4px;
+  overflow: hidden; margin: 5px 0; }
+.replaybar > div { height: 100%; border-radius: 4px; }
+.tl { display: flex; flex-wrap: wrap; gap: 3px; max-width: 980px;
+  font-family: var(--mono); font-size: 11px; }
+.tl-chip { border: 1px solid #2a3550; border-radius: 6px; padding: 1px 5px;
+  color: var(--muted); }
+.tl-chip.hasdot { background: #4fc3f70d; }
+.stub { border-left: 3px solid var(--accent2); padding-left: 10px; }
+
 /* playground */
 textarea { display: block; width: 100%; max-width: 980px; box-sizing: border-box;
   background: var(--panel); color: var(--text); border: 1px solid var(--line);

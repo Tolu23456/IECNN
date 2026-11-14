@@ -704,6 +704,77 @@ def api_generate_result(run_id: str):
                 "status": 502}
 
 
+def api_compare(a: str, b: str):
+    """Two-run comparison computed from the committed CSVs at request time.
+
+    Overlay series (step → bpc_val), per-matched-step deltas (B−A), mean
+    delta, and a vocab-mismatch warning. Vocab identity comes from the
+    strongest source available per run: a committed eval JSON's
+    vocab_sha256, else the rung config's model.vocab_file (resolved through
+    the base: inheritance chain), else unknown (warned, never hidden).
+    """
+    for n in (a, b):
+        if not re.fullmatch(r"[\w.\-]{1,120}", n or ""):
+            return {"error": "run names must be plain names", "status": 400}
+    runs = {}
+    for tag, n in (("a", a), ("b", b)):
+        p = RESULTS / f"{n}.csv"
+        if not p.is_file():
+            return {"error": f"no results CSV named {n}", "status": 404}
+        parsed = _read_csv_rows(p)
+        if parsed is None:
+            return {"error": f"could not parse {n}.csv", "status": 500}
+        header, rows = parsed
+        pts = [(d["step"], d["bpc_val"]) for d in rows
+               if d.get("bpc_val") is not None]
+        if not pts:
+            return {"error": f"{n}.csv has no bpc_val points", "status": 404}
+        rung, seed = _run_name_meta(p)
+        # vocab identity, strongest source first. A retracted eval's SCORE
+        # is dead, but its vocab_sha256 still identifies which vocab the
+        # checkpoint ran with — identity is not the retracted claim.
+        ev = _read_json(RESULTS / f"eval_{re.sub('^train_', '', n)}.json")
+        vocab_sha = (ev or {}).get("vocab_sha256")
+        cfg = _resolve_config(rung)
+        vocab_file = ((cfg or {}).get("config") or {}).get("model", {}).get(
+            "vocab_file")
+        runs[tag] = {"name": n, "rung": rung, "seed": seed,
+                     "points": pts,
+                     "vocab_sha256": vocab_sha,
+                     "vocab_file": vocab_file,
+                     "vocab_source": ("eval vocab_sha256" if vocab_sha
+                                      else "config vocab_file" if vocab_file
+                                      else "unknown")}
+    A, B = runs["a"], runs["b"]
+    sa = dict(A["points"])
+    matched = [s for s, _ in B["points"] if s in sa]
+    deltas = []
+    for s, vb in B["points"]:
+        if s in sa:
+            deltas.append({"step": s, "a": sa[s], "b": vb,
+                           "delta": vb - sa[s]})
+    mean_a = sum(d["a"] for d in deltas) / len(deltas) if deltas else None
+    mean_b = sum(d["b"] for d in deltas) / len(deltas) if deltas else None
+    mean_delta = (mean_b - mean_a) if deltas else None
+    # vocab mismatch: shas disagree when both known; else vocab_file names
+    mismatch = None
+    sha_a, sha_b = A["vocab_sha256"], B["vocab_sha256"]
+    if sha_a and sha_b:
+        mismatch = sha_a != sha_b
+    elif A["vocab_file"] and B["vocab_file"]:
+        mismatch = A["vocab_file"] != B["vocab_file"]
+    return {"a": A, "b": B,
+            "matched_steps": matched,
+            "n_matched": len(matched),
+            "deltas": deltas,
+            "mean_a": mean_a, "mean_b": mean_b,
+            "mean_delta": mean_delta,
+            "better": ("b" if mean_delta is not None and mean_delta < 0
+                       else "a" if mean_delta is not None and mean_delta > 0
+                       else None if mean_delta is None else "tie"),
+            "vocab_mismatch": mismatch}
+
+
 def api_generations(dir_path: Path | None = None):
     """Locally committed generations (results/generation/*.json), newest
     first. Never raises: a missing or empty dir is just an empty list.
@@ -716,9 +787,12 @@ def api_generations(dir_path: Path | None = None):
             if not isinstance(j, dict):
                 continue                       # malformed file: skip, not 500
             ids = j.get("generated_ids")
+            ed = j.get("expert_dots")
             out.append({"file": p.name, "meta": j.get("meta") or {},
                         "prompt": j.get("prompt", ""),
                         "generated": j.get("generated", ""),
+                        "generated_ids": ids if isinstance(ids, list) else None,
+                        "expert_dots": ed if isinstance(ed, list) else None,
                         "n_gen_tokens": len(ids) if isinstance(ids, list) else None,
                         "elapsed_s": j.get("elapsed_s")})
     return {"generations": out}
@@ -1356,6 +1430,11 @@ class Handler(BaseHTTPRequestHandler):
             m = re.match(r"^/api/viz/([\w.\-]+)$", path)
             if m:
                 out = api_viz(m.group(1))
+                return self._send_json(out.get("status", 200), out)
+            if path == "/api/compare":
+                q = dict(pair.split("=", 1) for pair in query.split("&")
+                         if "=" in pair)
+                out = api_compare(q.get("a", ""), q.get("b", ""))
                 return self._send_json(out.get("status", 200), out)
             if path == "/api/viz":
                 return self._send_json(*ROUTES.get("viz_list", (200, api_viz_list())))

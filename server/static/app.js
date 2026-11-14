@@ -68,6 +68,7 @@ const idDisp = (i, labels) =>
 
 const PALETTE = ["#4fc3f7", "#ffb74d", "#81c784", "#e57373", "#ba68c8", "#4db6ac",
                  "#f06292", "#fff176", "#64b5f6", "#aed581"];
+const PASS_COLORS = ["#7986cb", "#4fc3f7", "#ffd54f"];   // pass 1/2/3 traces
 function rungColor(rung) {
   const r = String(rung || "");
   if (/nolambda/.test(r)) return "#e57373";
@@ -261,6 +262,7 @@ const state = { runsIndex: null, arch: null, sel: null, runData: {}, vizData: {}
 const PAGES = {
   dashboard:    { fn: pageDashboard,    title: "Dashboard" },
   runs:         { fn: pageRuns,         title: "Training runs" },
+  compare:      { fn: pageCompare,      title: "Compare" },
   scores:       { fn: pageScores,       title: "Re-score reports" },
   architecture: { fn: pageArchitecture, title: "Architecture" },
   checkpoints:  { fn: pageCheckpoints,  title: "Weights & dots" },
@@ -791,6 +793,119 @@ async function pageRuns(root, preselect) {
   await draw();
 }
 
+/* =========================================================== COMPARE ===== */
+async function pageCompare(root) {
+  if (!state.runsIndex) state.runsIndex = await api("/api/runs");
+  const runs = state.runsIndex.runs;
+  root.innerHTML = "";
+  root.append(h("h1", {}, "Compare runs"),
+    h("p", {}, "Overlay two runs' bpc_val curves and diff them at the steps they share. ",
+      "Every number is computed at request time from the committed CSVs in results/."));
+  if (runs.length < 2) {
+    warnbox(root, "Need at least two committed training CSVs in results/ to compare. ",
+      "Runs land there via the training workflow: ", h("code", {}, "gh workflow run run_rung.yml -f config=<rung>"));
+    return;
+  }
+
+  // seed A/B from the hash query (#/compare?a=..&b=..) or the eqc pair
+  const qp = new URLSearchParams(location.hash.split("?")[1] || "");
+  const nameOf = v => runs.some(r => r.name === v) ? v : null;
+  const defaultA = nameOf(qp.get("a")) ||
+    (runs.find(r => r.name === "train_e0_plain_ensemble_eqc_seed0")?.name) || runs[0].name;
+  const defaultB = nameOf(qp.get("b")) ||
+    (runs.find(r => r.name === "train_e1_weights_passes_eqc_seed0")?.name) ||
+    (runs.find(r => r.name !== defaultA) || runs[1]).name;
+
+  const selA = h("select", {}, runs.map(r =>
+    h("option", { value: r.name, selected: r.name === defaultA ? "" : null }, r.name)));
+  const selB = h("select", {}, runs.map(r =>
+    h("option", { value: r.name, selected: r.name === defaultB ? "" : null }, r.name)));
+  const swap = h("button", { title: "swap A and B" }, "⇄ swap");
+  const view = h("div", {});
+  root.append(h("div", { class: "toolbar" },
+    h("label", { class: "muted" }, "A ", selA), swap,
+    h("label", { class: "muted" }, "B ", selB)), view);
+
+  const show = async () => {
+    view.innerHTML = "";
+    view.append(h("div", { class: "loading" }, "· · ·"));
+    let d;
+    try { d = await api(`/api/compare?a=${encodeURIComponent(selA.value)}&b=${encodeURIComponent(selB.value)}`); }
+    catch (e) { view.innerHTML = ""; errbox(view, e); return; }
+    view.innerHTML = "";
+    if (d.error) { errbox(view, d.error); return; }
+    syncHash();
+    // vocab honesty banner
+    if (d.vocab_mismatch === true) {
+      warnbox(view, h("b", {}, "Different vocabularies — compare with care. "),
+        "A runs ", h("code", {}, d.a.vocab_file || d.a.vocab_sha256?.slice(0, 12) + "…"),
+        " while B runs ", h("code", {}, d.b.vocab_file || d.b.vocab_sha256?.slice(0, 12) + "…"),
+        " (declared in configs / eval vocab_sha256). bpc across different tokenizers is NOT directly comparable.");
+    } else if (d.vocab_mismatch === null) {
+      warnbox(view, "vocab identity unknown for at least one of these runs (no eval vocab_sha256 and the committed configs declare no vocab_file) — the curves are plotted without a vocab claim.");
+    } else {
+      view.append(h("p", { class: "legend" }, "same declared vocabulary (",
+        h("code", {}, d.a.vocab_file || d.a.vocab_sha256?.slice(0, 12) + "…"), ") — curves are comparable."));
+    }
+    if (!d.n_matched) {
+      warnbox(view, "These two runs share no eval steps — no overlay or delta view is possible. ");
+      return;
+    }
+    // overlay chart: bpc_val vs step (B dashed)
+    view.append(chartBox("bpc_val overlay — A solid, B dashed", {
+      datasets: [
+        { label: `A ${d.a.name}`, data: d.a.points.map(([s, v]) => ({ x: s, y: v })),
+          borderColor: "#4fc3f7", pointRadius: 2.5, tension: 0.15 },
+        { label: `B ${d.b.name}`, data: d.b.points.map(([s, v]) => ({ x: s, y: v })),
+          borderColor: "#ffb74d", borderDash: [6, 4], pointRadius: 2.5, tension: 0.15 },
+      ],
+    }, "line", {
+      sub: `at the ${d.n_matched} shared eval step${d.n_matched === 1 ? "" : "s"}`,
+      scales: { x: { type: "linear", ...AXIS_GRID, border: { color: "#26304a" },
+                     title: { display: true, text: "step", color: "#8a95ad" } },
+                y: { ...AXIS_GRID, border: { color: "#26304a" },
+                     title: { display: true, text: "bpc", color: "#8a95ad" } } } }));
+    // summary
+    view.append(h("div", { class: "cards" },
+      card(fmt(d.mean_a, 5), "mean bpc_val over matched steps — A"),
+      card(fmt(d.mean_b, 5), "mean bpc_val over matched steps — B"),
+      card(fmt(d.mean_delta, 5),
+        `mean Δ (B−A) — ${d.better === "b" ? "B lower (better)" : d.better === "a" ? "A lower (better)" : "tie"}`,
+        d.better === "b" ? "" : d.better === "a" ? "" : "")));
+    // delta lollipop/bar per matched step
+    view.append(chartBox("Δ bpc at matched steps (B − A; below 0 = B better)", {
+      datasets: [{ label: "Δ (B−A)",
+        data: d.deltas.map(t => ({ x: t.step, y: t.delta })),
+        backgroundColor: d.deltas.map(t => t.delta <= 0 ? "#81c784cc" : "#e57373cc"),
+        borderColor: d.deltas.map(t => t.delta <= 0 ? "#81c784" : "#e57373"),
+        borderWidth: 1, borderRadius: 4, maxBarThickness: 26 }],
+    }, "bar", {
+      sub: `matched steps: ${d.matched_steps.join(", ")}`,
+      scales: { x: { type: "linear", ...AXIS_GRID, border: { color: "#26304a" },
+                     title: { display: true, text: "step", color: "#8a95ad" } },
+                y: { ...AXIS_GRID, border: { color: "#26304a" },
+                     title: { display: true, text: "Δ bpc (B−A)", color: "#8a95ad" } } },
+      legend: false }));
+    // matched table
+    view.append(h("h2", {}, "Matched steps"),
+      h("table", {}, h("thead", {}, h("tr", {}, h("th", {}, "step"),
+        h("th", {}, `A — ${d.a.name}`), h("th", {}, `B — ${d.b.name}`), h("th", {}, "Δ (B−A)"))),
+        h("tbody", {}, d.deltas.map(t => h("tr", { class: t.delta <= 0 ? "best" : "" },
+          h("td", { class: "num" }, String(t.step)),
+          h("td", { class: "num" }, fmt(t.a)),
+          h("td", { class: "num" }, fmt(t.b)),
+          h("td", { class: "num" }, fmt(t.delta, 3)))))));
+  };
+  const syncHash = () => history.replaceState(null, "",
+    `#/compare?a=${encodeURIComponent(selA.value)}&b=${encodeURIComponent(selB.value)}`);
+  selA.addEventListener("change", show);
+  selB.addEventListener("change", show);
+  swap.addEventListener("click", () => {
+    const t = selA.value; selA.value = selB.value; selB.value = t; show();
+  });
+  await show();
+}
+
 /* ===================================================== ARCHITECTURE ======= */
 const NS = "http://www.w3.org/2000/svg";
 function svgEl(tag, attrs = {}, text) {
@@ -1076,6 +1191,117 @@ async function pageArchitecture(root) {
   };
   sel.addEventListener("change", () => refresh(sel.value));
   refresh(arch.config);
+  await replayPanel(root);
+}
+
+/* ---- replay: pass-by-pass animation over real viz-export data -----------
+   Uses the committed results/viz/*.json sample positions (real per-pass
+   dot weights/gamma/predictions from the checkpoint) — no synthetic data.
+   With prefers-reduced-motion there is no autoplay; the slider works. */
+async function replayPanel(root) {
+  let list = [];
+  try { list = (await api("/api/viz")).exports || []; } catch { list = []; }
+  const sec = h("div", {});
+  root.append(h("h2", {}, "Replay — pass-by-pass forward pass"), sec);
+  if (!list.length) {
+    warnbox(sec, "No checkpoint viz exports yet (results/viz/*.json) — the replay needs a real per-pass export. ",
+      h("code", {}, "gh workflow run viz.yml -f artifact=<checkpoint artifact>"),
+      " commits one and this panel fills in.");
+    return;
+  }
+  const sel = h("select", {}, list.map(n => h("option", { value: n }, n)));
+  sec.append(h("p", { class: "legend" },
+    "Animate the sample text through the real checkpoint: each position runs pass 1 → pass 3, showing what the dots read, weigh and predict at each pass; the pooled consensus is revealed at the last pass."),
+    h("div", { class: "toolbar" }, h("label", { class: "muted" }, "export: "), sel));
+  const stage = h("div", {});
+  sec.append(stage);
+  const reduceMotion = window.matchMedia &&
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const showExport = async () => {
+    stage.innerHTML = "";
+    stage.append(h("div", { class: "loading" }, "· · ·"));
+    let v;
+    try { v = state.vizData[sel.value] || await api(`/api/viz/${sel.value}`); }
+    catch (e) { stage.innerHTML = ""; errbox(stage, e); return; }
+    state.vizData[sel.value] = v;
+    stage.innerHTML = "";
+    const S = v.sample;
+    if (!S || !Array.isArray(S.positions) || !S.positions.length) {
+      warnbox(stage, "this export has no sample.positions payload — nothing to replay"); return;
+    }
+    const positions = S.positions, P = (S.passes || ["pass 1", "pass 2", "pass 3"]).length;
+    const total = positions.length * P;
+    const slider = h("input", { type: "range", class: "posbar", min: "0",
+      max: String(total - 1), value: "0", "aria-label": "replay step (position × pass)" });
+    const play = h("button", { title: reduceMotion ?
+      "autoplay disabled by prefers-reduced-motion" : "play the replay" },
+      reduceMotion ? "▶ (motion off)" : "▶ play");
+    const stopLbl = h("span", { class: "muted" });
+    const board = h("div", {});
+    stage.append(h("div", { class: "toolbar" }, slider, play, stopLbl), board);
+    let timer = null;
+    const draw = () => {
+      const t = +slider.value;
+      const pi = Math.floor(t / P), pass = t % P;
+      const Pd = positions[Math.min(pi, positions.length - 1)];
+      stopLbl.textContent = `position ${pi + 1}/${positions.length} · ${S.passes?.[pass] || "pass " + (pass + 1)}`;
+      board.innerHTML = "";
+      // pass-by-pass: the dots' weights/gamma so far, predictions revealed per pass
+      const dots = Array.isArray(Pd.dots) ? Pd.dots : [];
+      const grid = h("div", { class: "dotgrid" });
+      const wMax = Math.max(1e-9, ...dots.map(d => d.weights?.[pass] ?? 0));
+      dots.forEach((d, k) => {
+        const w = d.weights?.[pass] ?? 0, g = d.gamma?.[pass] ?? 0;
+        const top = (d.top || [])[pass] || [];
+        grid.append(h("div", { class: "dotcard" + (w / wMax > 0.75 ? " hit" : "") },
+          h("div", { class: "hd" },
+            h("strong", { style: `color:${PALETTE[k % PALETTE.length]}` }, `dot ${k}`),
+            h("span", { class: "muted" }, `γ ${fmt(g, 3)}`)),
+          h("div", { class: "replaybar" },
+            h("div", { style: `width:${Math.round(100 * w / wMax)}%;background:${HEAT(w / wMax)}`,
+                       title: `w = ${fmt(w, 4)}` })),
+          h("div", { class: "muted" }, top.length ?
+            `p${pass + 1} top: ` + top.slice(0, 3).map(([tok, pr]) =>
+              `${tokDisp(tok)} ${fmt(pr * 100, 0)}%`).join(" · ") :
+            "(no predictions logged for this pass)")));
+      });
+      board.append(grid);
+      // pooled answer revealed only at the final pass
+      if (pass === P - 1) {
+        const pool = Pd.pooled_top || [];
+        board.append(h("div", { class: "explain" },
+          h("b", {}, "pooled consensus — "),
+          pool.map(([tok, prob]) =>
+            h("span", { class: "pill" + (tok === Pd.next ? " ok" : "") },
+              `${tokDisp(tok)} ${fmt(prob * 100, 1)}%`)).slice(0, 4),
+          h("span", { class: "muted" },
+            pool[0] && pool[0][0] === Pd.next
+              ? "  ✓ matches the target" : `  ✗ target was “${tokDisp(Pd.next)}”`)));
+      } else {
+        board.append(h("p", { class: "muted" },
+          `pass ${pass + 2} and the pooled consensus come next — keep playing or scrub the slider`));
+      }
+    };
+    play.addEventListener("click", () => {
+      if (timer) { clearInterval(timer); timer = null; play.textContent = "▶ play"; return; }
+      if (reduceMotion) {                    // honour prefers-reduced-motion
+        stopLbl.textContent = "autoplay disabled by prefers-reduced-motion — use the slider";
+        return;
+      }
+      let t = +slider.value;
+      if (t >= total - 1) { t = 0; slider.value = "0"; draw(); }
+      timer = setInterval(() => {
+        t = +slider.value + 1;
+        if (t >= total) { clearInterval(timer); timer = null; play.textContent = "▶ replay"; return; }
+        slider.value = String(t);
+        draw();
+      }, 700);
+    });
+    slider.addEventListener("input", draw);
+    draw();
+  };
+  sel.addEventListener("change", showExport);
+  await showExport();
 }
 
 /* ======================================================= CHECKPOINTS ====== */
@@ -1223,6 +1449,34 @@ async function renderViz(root, v) {
   const zone = h("div", {});
   root.append(bar, posLabel, zone);
 
+  // ---- linked dot focus: clicking a dot chip highlights that dot's traces
+  // across ALL charts on this page (weights heat cells, γ line, per-pass
+  // weight trace, per-dot prediction cards)
+  let focusDot = null;
+  const dotCount = (S.positions[0]?.dots || []).length;
+  const dotChips = h("div", { class: "chips", role: "group",
+    "aria-label": "focus a dot across all charts" });
+  const chipEls = [];
+  for (let k = 0; k < dotCount; k++) {
+    const b = h("button", { class: "chip", "aria-pressed": "false",
+      title: `highlight dot ${k} across the weights, γ and prediction charts` },
+      h("span", { class: "dot", style: `background:${PALETTE[k % PALETTE.length]}` }),
+      `dot ${k}`);
+    b.addEventListener("click", () => {
+      focusDot = focusDot === k ? null : k;
+      chipEls.forEach((c, j) => {
+        c.classList.toggle("on", focusDot === j);
+        c.setAttribute("aria-pressed", String(focusDot === j));
+      });
+      redraw();
+      drawGamma();
+    });
+    chipEls.push(b);
+    dotChips.append(b);
+  }
+  root.append(h("div", { class: "muted", style: "margin:2px 0 -6px" },
+    "focus a dot — its traces light up in every chart below:"), dotChips);
+
   const redraw = () => {
     const i = Math.min(+bar.value, nPos - 1), P = S.positions[i];
     if (!P) return;
@@ -1276,7 +1530,9 @@ async function renderViz(root, v) {
       dots.forEach((d, k) => {
         const w = d.weights?.[pi] ?? 0, g = d.gamma?.[pi] ?? 0;
         const held = heldCells.has(`${k}:${pi}`);
-        tr.append(h("td", {}, h("div", { class: "cell" + (held ? " heldc" : ""),
+        const dimmed = focusDot !== null && focusDot !== k;
+        tr.append(h("td", {}, h("div", { class: "cell" + (held ? " heldc" : "") +
+            (dimmed ? " dim" : "") + (focusDot === k ? " focused" : ""),
           style: `background:${HEAT(w / rowMax[pi])}`,
           title: `w=${fmt(w, 4)} γ=${fmt(g, 3)} (row-normalised ${fmt(w / rowMax[pi], 2)})` +
             (held ? " ← this dot held the correct next token" : "")
@@ -1307,7 +1563,9 @@ async function renderViz(root, v) {
       dots.forEach((d, k) => {
         const top = (d.top || [])[pl] || [];
         const hit = top.some(t => t[0] === P.next);
-        cardsBox.append(h("div", { class: "dotcard" + (hit ? " hit" : "") },
+        const dimmed = focusDot !== null && focusDot !== k;
+        cardsBox.append(h("div", { class: "dotcard" + (hit ? " hit" : "") +
+            (dimmed ? " dim" : "") + (focusDot === k ? " focused" : "") },
           h("div", { class: "hd" },
             h("strong", {}, `dot ${k}`, hit ? "  ✓" : ""),
             h("span", { class: "muted" }, `w=${fmt(d.weights?.[pl], 3)} γ=${fmt(d.gamma?.[pl], 3)}`)),
@@ -1351,17 +1609,43 @@ async function renderViz(root, v) {
       }, "line", { xlabel: "token position", ylabel: "ω" }));
     }
   }
-  // gamma + weight trajectory chart per dot
-  if (S.positions[0]?.dots?.length) {
+  // gamma + weight trajectory chart per dot — rebuilt on dot focus so the
+  // focused dot's traces stay highlighted across the page's charts
+  const gammaHost = h("div", {});
+  const drawGamma = () => {
+    gammaHost.innerHTML = "";
+    if (!S.positions[0]?.dots?.length) return;
     const nd = S.positions[0].dots.length;
     const gsets = [];
-    for (let k = 0; k < nd; k++)
-      gsets.push({ label: `γ dot ${k}`, data: S.positions.map(P => P.dots[k]?.gamma?.[0] ?? null),
-                   borderColor: PALETTE[k % PALETTE.length], pointRadius: 0, tension: .2 });
-    root.append(chartBox("dot confidence γ (pass 1) along the sample", {
+    for (let k = 0; k < nd; k++) {
+      const focused = focusDot === k, dimmed = focusDot !== null && !focused;
+      gsets.push({ label: `γ dot ${k}`,
+        data: S.positions.map(P => P.dots[k]?.gamma?.[0] ?? null),
+        borderColor: PALETTE[k % PALETTE.length],
+        borderWidth: focused ? 3 : dimmed ? 1 : 1.6,
+        pointRadius: focused ? 2.5 : 0,
+        backgroundColor: focused ? PALETTE[k % PALETTE.length] : "transparent",
+        tension: .2 });
+    }
+    gammaHost.append(chartBox("dot confidence γ (pass 1) along the sample" +
+      (focusDot !== null ? ` — dot ${focusDot} focused` : ""), {
       labels: nChart, datasets: gsets,
     }, "line", { xlabel: "token position", ylabel: "γ" }));
-  }
+    if (focusDot !== null) {
+      // the focused dot's weight per pass along the whole sample
+      gammaHost.append(chartBox(
+        `dot ${focusDot} — weight per pass along the sample`, {
+        labels: nChart,
+        datasets: passes.map((pn, pi) => ({
+          label: esc(pn),
+          data: S.positions.map(P => P.dots[focusDot]?.weights?.[pi] ?? null),
+          borderColor: PASS_COLORS[pi % PASS_COLORS.length],
+          pointRadius: 0, tension: .2 })),
+      }, "line", { xlabel: "token position", ylabel: "weight" }));
+    }
+  };
+  root.append(gammaHost);
+  drawGamma();
 }
 
 /* ========================================================= SCORES ========= */
@@ -1853,6 +2137,42 @@ function pagePlayground(root) {
       h("pre", { class: "genprompt" }, esc(res.prompt ?? "")));
     out.append(h("h3", {}, "generated continuation"),
       h("pre", { class: "gentext" }, esc(res.generated ?? "(empty)")));
+    // ---- token timeline ------------------------------------------------
+    // color = which dot produced the token (expert_dots per-token index),
+    // when the export carries it. Per-token CONFIDENCE coloring needs
+    // per-token logprobs in the generation JSON, which the committed
+    // generate.py does not write — stub noted below, generate.py untouched.
+    const ids = Array.isArray(res.generated_ids) ? res.generated_ids : null;
+    if (ids && ids.length) {
+      const dots = Array.isArray(res.expert_dots) ? res.expert_dots : null;
+      const strip = h("div", { class: "tl" });
+      ids.forEach((id, i) => {
+        const k = dots ? dots[i] : null;
+        strip.append(h("span", {
+          class: "tl-chip" + (k == null ? "" : " hasdot"),
+          style: k != null ? `border-color:${PALETTE[k % PALETTE.length]};color:${PALETTE[k % PALETTE.length]}`
+            : `background:rgba(79,195,247,${(0.12 + 0.55 * (i % 6) / 5).toFixed(2)})`,
+          title: `token ${i + 1}/${ids.length} · id ${id}` +
+            (k != null ? ` · dot ${k}` : "") },
+          String(id)));
+      });
+      out.append(h("h3", {}, "token timeline"),
+        h("p", { class: "legend" },
+          "each chip is one generated token id",
+          dots ? " — colored by the dot that produced it (expert_dots)." : "."),
+        strip);
+      if (dots) {
+        const legend = h("div", { class: "chips" });
+        [...new Set(dots)].sort((a, b) => a - b).forEach(k =>
+          legend.append(h("span", { class: "chip on" },
+            h("span", { class: "dot", style: `background:${PALETTE[k % PALETTE.length]}` }),
+            `dot ${k}`)));
+        out.append(legend);
+      }
+      out.append(h("p", { class: "muted stub" },
+        "Note: coloring chips by model confidence (per-token logprob) is not possible yet — the committed generate.py writes no per-token logprobs into results/generation/*.json. Adding `logprobs` per token there is a generate.py change (not made in this dashboard-only task); the position coloring above uses the expert_dots index the export already carries.",
+        dots ? "" : " This export also has no expert_dots — chips are plain position-tinted."));
+    }
   };
 
   /* ---- history: locally committed generations ---- */
