@@ -2,6 +2,29 @@
 
 Newest entry at the top.
 
+## 2026-11-14 (~08:10) — E6 first dispatch failed (latent loss bug), fixed, re-dispatched
+
+- **E6 pilot crash on step 1**: `decorrelation_penalty` — a loss never
+  executed since E4 (λ_c=0.0 on every rung; its tests were skip-stubs) —
+  had two shape bugs. Fixed pairwise covariance, replaced stubs with real
+  tests + a one-step all-losses smoke test. Second CI iteration also caught
+  `std[:, :]` (1-D indexing) in the same function. **CI green at 0a985b4.**
+- **train.yml commit-step syntax error found before it bit**: the union-merge
+  heredoc's indented terminator broke the shell (`case` swallowed to EOF).
+  All chunks dispatched *before* the fix (E1 warm chunk 3 @9880d3f, vocab4
+  pilot @ce7d711) will fail their results-commit but keep training — rows
+  ride along in artifacts; E1's chain control fires BEFORE commit, so its
+  chunk 4 (dispatched from fixed main) commits everything.
+- **E1 warm chunk 2 failed on the OLD commit-order race** (it checked out at
+  02:36, hours before the fix): same untracked-vs-incoming collision as E0
+  chunk 2. Chain survived — chunk 3 running, expected to carry chunk 2's
+  rows via artifact.
+- **Re-dispatched E6 pilot** (run 43574563660, from 0a985b4) ~08:10 UTC.
+- Expert-sampling Playground demo (gen-20261114-073248) landed and reviewed:
+  mechanism works (dot histogram matches trust structure, leaders get the
+  vote, muted dots nearly silent), generation still incoherent at pilot
+  scale as expected — honest A/B pending.
+
 ## 2026-11-14 (morning) — E6 "consensus-v2" built; expert-of-the-moment decoding shipped
 
 - **E6 implemented** (Tolu green-lit): per-region verifier head
