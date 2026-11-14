@@ -590,3 +590,20 @@ at that exposure is healthy learning, not a defect. Generation samples from
 word-salad as expected. **The coherence lever is more steps, and more steps
 per hour is exactly the speed goal** — every 1.84x from the fused consensus
 core directly doubles the epochs the plateau chains can burn per day.
+
+## Speed ledger (14:05 UTC, paired same-runner A/B where marked)
+| optimization | s/step | evidence |
+|---|---|---|
+| recorded baseline (fp32, pre-optimization) | 12.81 | committed bench_baseline_vocab2.json |
+| bf16 + fast paths + batched eval | 5.43 (2.36x) | committed; judge Round-1 PASSED |
+| + fused consensus core (opt 5, torch.compile) | 7.0644 -> 3.8373 = **x1.841 paired** | bench_ab_compile_consensus.json (recovered from artifact) |
+| + torch_threads 4 (Tolu's cores hint) | 7.9854 -> 7.1166 = **x1.122 paired** | bench_ab_compile_threads4.json |
+| + copy-free head layout (opt 6) | pending | ab_head_layout dispatched 14:02 |
+| + shared-attention cache (opt 7) | pending | ab_attn_cache dispatched 14:03 |
+
+Chain projection: 12.81 -> 5.43 -> (x1.841) 2.95 -> (x1.122) 2.63 -> 5x needs <= 2.562:
+the two pending paired A/Bs (both attacking avoidable bandwidth, per Tolu's
+hints) need a combined ~x1.03 to cross the line. Cautious: ratios from
+different runner instances multiply only under a stable-bandwidth assumption;
+if the pair lands short, one more paired bench (all-off vs all-on) gives the
+definitive single-runner end-to-end number.
