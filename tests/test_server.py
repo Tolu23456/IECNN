@@ -729,6 +729,64 @@ def test_generations_carry_timeline_fields():
         assert [x["expert_dots"] for x in gens] == [None, [3, None]]
 
 
+# -------------------------------------- accessibility & responsive (step 4) --
+def test_a11y_keyboard_charts_and_button_chips():
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    # charts are keyboard-operable: focusable canvas, arrow-key data cursor,
+    # Enter toggles a series, Escape clears
+    for bit in ("function wireChartKeys", 'cv.tabIndex = 0',
+                '"aria-label"', '"Enter"', '"Escape"'):
+        assert bit in js, bit
+    # clickable chips are real buttons with pressed state
+    assert '"aria-pressed"' in js
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    # skip link + hamburger exposes its state to AT
+    assert 'id="skiplink"' in html
+    assert 'aria-controls="sidebar"' in html
+    assert 'aria-expanded' in html
+    # reduced motion is honoured globally (chart animation off) as well as
+    # in the replay panel
+    assert "prefers-reduced-motion" in js
+    assert "REDUCE_MOTION" in js
+    # series carry a non-color cue: dash pattern constant is applied
+    assert "const DASHES" in js and "DASHES[i % DASHES.length]" in js
+
+
+def test_responsive_sidebar_overlay_and_skip_link_css():
+    css = (STATIC / "style.css").read_text(encoding="utf-8")
+    assert "@media (max-width: 800px)" in css
+    # the sidebar overlays on small screens instead of shifting content
+    assert "transform: translateX(-100%)" in css
+    assert "position: fixed" in css
+    # skip link is hidden until focused (not display:none — it must be
+    # reachable by keyboard)
+    assert "#skiplink" in css and "#skiplink:focus" in css
+    # tables scroll horizontally on small screens instead of clipping
+    assert "overflow-x: auto" in css
+
+
+def test_every_page_has_empty_state_with_next_action():
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    # page → substring that must appear in its empty-state guidance
+    checks = {
+        "dashboard": "gh workflow run train.yml",
+        "runs": "results/train_<rung>_seed<seed>.csv",
+        "compare": "Need at least two committed training CSVs",
+        "scores": "gh workflow run eval.yml",
+        "architecture": "configs/*.yaml",
+        "checkpoints": "gh workflow run viz.yml",
+        "diagnosis": "gh workflow run diagnose.yml",
+        "vocab": "gh workflow run vocab.yml",
+        "corpus": "data/split_info.json",
+        "playground": "gh workflow run generate.yml",
+    }
+    for page, bit in checks.items():
+        assert bit in js, (page, bit)
+    # the router shows a loading indicator and a real error state
+    assert 'role: "status"' in js
+    assert "Could not build this page" in js
+
+
 # ------------------------------------------------------------- static ------
 def test_static_pages_served():
     srv, base = _start()

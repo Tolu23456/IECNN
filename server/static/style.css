@@ -28,6 +28,11 @@ body {
 ::selection { background: #4fc3f74d; }
 
 /* ------------------------------------------------------------- topbar -- */
+#skiplink { position: absolute; left: -9999px; top: 4px; z-index: 100;
+  background: var(--accent); color: #06121c; padding: 6px 12px;
+  border-radius: 6px; font-size: 12.5px; text-decoration: none; }
+#skiplink:focus { left: 8px; }
+#page:focus { outline: none; }
 #topbar {
   position: sticky; top: 0; z-index: 50;
   display: flex; align-items: center; gap: 14px;
@@ -104,6 +109,27 @@ pre { background: var(--bg2); border: 1px solid var(--line); padding: 10px 12px;
 .chartbox canvas { max-height: 330px; }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 13px; }
 @media (max-width: 1150px) { .grid2 { grid-template-columns: 1fr; } }
+
+/* ------- small screens: sidebar becomes an overlay, tables scroll ------- */
+@media (max-width: 800px) {
+  #sidebar {
+    position: fixed; left: 0; top: 46px; z-index: 60;
+    height: calc(100vh - 46px);
+    box-shadow: 8px 0 24px #000a;
+    margin-left: 0;
+    transform: translateX(0);
+    transition: transform .15s ease;
+  }
+  #sidebar.hidden { margin-left: 0; transform: translateX(-100%); }
+  #main { min-width: 0; }
+  body { overflow-x: hidden; }
+  .cards, .gates { grid-template-columns: 1fr; }
+  .tablewrap, table { display: block; overflow-x: auto; max-width: 100%; }
+  .toolbar { flex-wrap: wrap; row-gap: 6px; }
+  .chips { max-height: 30vh; overflow-y: auto; }
+  #topbar { padding: 0 10px; gap: 8px; }
+  #repolink { display: none; }
+}
 
 /* sparkline strip */
 .sparkrow { display: flex; flex-wrap: wrap; gap: 12px; margin: 14px 0; }

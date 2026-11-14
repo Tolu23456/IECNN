@@ -69,6 +69,9 @@ const idDisp = (i, labels) =>
 const PALETTE = ["#4fc3f7", "#ffb74d", "#81c784", "#e57373", "#ba68c8", "#4db6ac",
                  "#f06292", "#fff176", "#64b5f6", "#aed581"];
 const PASS_COLORS = ["#7986cb", "#4fc3f7", "#ffd54f"];   // pass 1/2/3 traces
+/* non-color series cue (a11y): dash pattern per series ordinal, so series
+   remain distinguishable without relying on hue alone */
+const DASHES = [[], [6, 3], [2, 2], [8, 2, 2, 2], [5, 5]];
 function rungColor(rung) {
   const r = String(rung || "");
   if (/nolambda/.test(r)) return "#e57373";
@@ -89,6 +92,10 @@ const HEAT = w => {
 
 /* ---------------- chart.js theme (guarded: page still renders without it) -- */
 const HAS_CHART = typeof Chart !== "undefined";
+/* honour prefers-reduced-motion everywhere: no chart animations, no replay
+   autoplay (replayPanel checks this too), no smooth scrolling */
+const REDUCE_MOTION = typeof window !== "undefined" &&
+  window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 if (HAS_CHART) {
   Chart.defaults.color = "#8a95ad";
   Chart.defaults.borderColor = "#26304a";
@@ -98,6 +105,10 @@ if (HAS_CHART) {
   Chart.defaults.plugins.legend.labels.usePointStyle = true;
   Chart.defaults.plugins.tooltip.backgroundColor = "#1d2431";
   Chart.defaults.plugins.tooltip.borderColor = "#2a3345";
+  if (REDUCE_MOTION) {
+    Chart.defaults.animation = false;
+    Chart.defaults.transitions = { active: { animation: { duration: 0 } } };
+  }
   Chart.defaults.plugins.tooltip.borderWidth = 1;
   Chart.defaults.plugins.tooltip.titleColor = "#dce3f2";
 }
@@ -121,6 +132,56 @@ const crosshairPlugin = {
     ctx.restore();
   },
 };
+
+/* keyboard access for charts (a11y): the canvas is focusable; ←/→ move a
+   data cursor that shows the same crosshair + tooltip the mouse gets,
+   Enter toggles the next series on/off (what a legend click does),
+   Escape clears the cursor. Labels travel in aria-label, not color. */
+function wireChartKeys(chart, title) {
+  if (!chart || !chart.canvas) return;
+  const cv = chart.canvas;
+  cv.tabIndex = 0;
+  cv.setAttribute("role", "img");
+  cv.setAttribute("aria-label", `${title} — series: ` +
+    (chart.data.datasets || []).map(d => d.label).filter(Boolean).join("; "));
+  let cur = null, toggleIdx = 0;
+  const setCursor = () => {
+    chart.tooltip.setActiveElements(cur ?
+      [{ datasetIndex: cur.di, index: cur.index }] : [], { x: 0, y: 0 });
+    chart.update();
+  };
+  cv.addEventListener("keydown", e => {
+    const nDS = chart.data.datasets.length;
+    if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
+      e.preventDefault();
+      const dir = e.key === "ArrowRight" ? 1 : -1;
+      if (cur === null) {
+        const di = chart.data.datasets.findIndex((d, k) =>
+          (d.data || []).length && !chart.getDatasetMeta(k).hidden);
+        if (di < 0) return;
+        cur = { di, index: dir < 0 ? chart.data.datasets[di].data.length - 1 : 0 };
+      } else {
+        const n = chart.data.datasets[cur.di].data.length;
+        cur.index = Math.min(n - 1, Math.max(0, cur.index + dir));
+      }
+      setCursor();
+    } else if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();                    // legend toggle via keyboard
+      for (let tried = 0; tried < nDS; tried++, toggleIdx++) {
+        const k = toggleIdx % nDS;
+        const meta = chart.getDatasetMeta(k);
+        if (chart.data.datasets[k].label) {
+          meta.hidden = !meta.hidden;
+          toggleIdx++;
+          chart.update();
+          return;
+        }
+      }
+    } else if (e.key === "Escape") {
+      cur = null; setCursor();
+    }
+  });
+}
 
 const HAS_ZOOM = typeof Chart !== "undefined" && typeof Hammer !== "undefined"
   && !!Chart.registry && !!(Chart.registry.getPlugin &&
@@ -229,6 +290,7 @@ function chartBox(title, data, type = "line", opts = {}) {
         },
       }});
       box._chart = chart;
+      wireChartKeys(chart, title);
       if (HAS_ZOOM) cv.addEventListener("dblclick", () => chart.resetZoom());
       if (opts.after) opts.after(chart);
     } catch (e) { box.append(h("p", { class: "err" }, "chart error: " + e)); }
@@ -278,12 +340,16 @@ function route() {
   $("#pgtitle").textContent = PAGES[name].title;
   const page = $("#page");
   page.innerHTML = "";
-  page.append(h("div", { class: "loading" }, "· · ·"));
-  Promise.resolve(PAGES[name].fn(page, parts[1])).catch(e => {
+  page.setAttribute("aria-busy", "true");
+  page.append(h("div", { class: "loading", role: "status" }, "· · ·"));
+  Promise.resolve(PAGES[name].fn(page, parts[1])).then(() =>
+    page.removeAttribute("aria-busy")).catch(e => {
+    page.removeAttribute("aria-busy");
     page.innerHTML = "";
     page.append(h("h1", {}, PAGES[name].title),
       h("div", { class: "errbox" }, "Could not build this page: ",
-        h("code", {}, String(e && e.message || e))));
+        h("code", {}, String(e && e.message || e))),
+      h("p", { class: "muted" }, "the API may be down or the committed data moved — reload, or check ", h("code", {}, "/api/runs"), "."));
   });
 }
 window.addEventListener("hashchange", route);
@@ -410,6 +476,12 @@ async function pageDashboard(root) {
   root.append(h("h1", {}, "Dashboard"),
     h("p", {}, "Gates scoreboard — every status and number below is computed at request time from committed files (results/ CSVs + eval/summary/viz JSONs), never hardcoded. ",
       "No training happens on this machine — all torch compute runs on GitHub Actions."));
+  if (!runs.runs.length) {
+    warnbox(root, "No committed training CSVs in results/ yet — expected files look like results/train_<rung>_seed0.csv. ",
+      "Dispatch a run from the runner pool: ",
+      h("code", {}, "gh workflow run train.yml -f config=e0_plain_ensemble.yaml"),
+      " (the workflow commits the CSV back to results/).");
+  }
 
   // headline: E1 vs E0 at equal wall compute (from G2, same numbers as the table)
   const g2 = (gates.gates || []).find(g => g.id === "G2");
@@ -474,7 +546,14 @@ async function pageRuns(root, preselect) {
   root.innerHTML = "";
   root.append(h("h1", {}, "Training runs"),
     h("p", {}, "Curves come from the committed results/*.csv. Click chips to toggle runs. ",
-      "Scroll to zoom a chart's x-axis, drag to pan, double-click to reset. Grad-norm columns (gn_*) only exist on runs trained after 2026-11-13 — the chart appears automatically when the selected runs have them."));
+      "Scroll to zoom a chart's x-axis, drag to pan, double-click to reset. Charts are keyboard-accessible: focus a chart and use ←/→ to move a data cursor, Enter to toggle a series, Esc to clear. Grad-norm columns (gn_*) only exist on runs trained after 2026-11-13 — the chart appears automatically when the selected runs have them."));
+  if (!runs.length) {
+    warnbox(root, "No committed training CSVs in results/ yet. ",
+      "Dispatch one: ",
+      h("code", {}, "gh workflow run train.yml -f config=e1_weights_passes_pilot.yaml"),
+      " — the workflow commits results/train_<rung>_seed<seed>.csv and this page fills in.");
+    return;
+  }
 
   const chips = h("div", { class: "chips" });
   for (const r of runs) {
@@ -703,6 +782,7 @@ async function pageRuns(root, preselect) {
                          ...(HAS_ZOOM ? { zoom: ZOOM_OPTS.zoom } : {}) },
               scales } });
           box._chart = chart;
+          wireChartKeys(chart, title);
           if (HAS_ZOOM) cv.addEventListener("dblclick", () => chart.resetZoom());
         } catch (e) { box.append(h("p", { class: "err" }, "chart error: " + e)); }
       });
@@ -727,17 +807,21 @@ async function pageRuns(root, preselect) {
     const has = (d, k) => Array.isArray(d.series?.[k]) && d.series[k].some(v => v !== null);
     const pp = datasets.filter(d => has(d, "bpc_p1"));
     if (pp.length) {
-      mkBox("Per-pass bpc (later passes should beat earlier ones)", pp.flatMap(d => [
-        { label: `p1 ${d.rung}`, pts: points(d, "bpc_p1"), color: "#7986cb" },
-        { label: `p2 ${d.rung}`, pts: points(d, "bpc_p2"), color: "#4fc3f7" },
-        { label: `p3 ${d.rung}`, pts: points(d, "bpc_p3"), color: "#ffd54f" },
-      ]), "bpc");
+      mkBox("Per-pass bpc (later passes should beat earlier ones)", pp.flatMap((d, i) => [
+        { label: `p1 ${d.rung}`, pts: points(d, "bpc_p1"), color: "#7986cb",
+          dash: DASHES[i % DASHES.length] },
+        { label: `p2 ${d.rung}`, pts: points(d, "bpc_p2"), color: "#4fc3f7",
+          dash: DASHES[i % DASHES.length] },
+        { label: `p3 ${d.rung}`, pts: points(d, "bpc_p3"), color: "#ffd54f",
+          dash: DASHES[i % DASHES.length] },
+      ]), "bpc", { sub: "pass color · dash pattern per run" });
     }
     // tau0 + weight entropy
     const ie = datasets.filter(d => has(d, "tau0"));
     if (ie.length) {
-      mkBox("τ0 (left) and weight entropy (right axis)", ie.flatMap(d => [
-        { label: `tau0 ${d.rung}`, pts: points(d, "tau0"), color: rungColor(d.rung) },
+      mkBox("τ0 (left) and weight entropy (right axis)", ie.flatMap((d, i) => [
+        { label: `tau0 ${d.rung}`, pts: points(d, "tau0"), color: rungColor(d.rung),
+          dash: DASHES[i % DASHES.length] },
         { label: `w-entropy ${d.rung}`, pts: points(d, "weight_entropy"),
           color: rungColor(d.rung), dash: [4, 4], yAxisID: "y1" },
       ]), "tau0", { rightAxis: "entropy (nats)" });
@@ -745,11 +829,13 @@ async function pageRuns(root, preselect) {
     // grad norms (only when the columns exist)
     const gn = datasets.filter(d => has(d, "gn_total"));
     if (gn.length) {
-      mkBox("Pre-clip gradient norms per component", gn.flatMap(d =>
+      mkBox("Pre-clip gradient norms per component", gn.flatMap((d, i) =>
         ["gn_emb", "gn_regions", "gn_chain", "gn_gate", "gn_messages", "gn_other"]
           .filter(k => has(d, k)).map(k => ({
             label: `${d.rung} ${k.slice(3)}`, pts: points(d, k),
-            color: rungColor(d.rung) }))), "L2 norm");
+            color: rungColor(d.rung),
+            dash: DASHES[i % DASHES.length] }))), "L2 norm",
+        { sub: "component color · dash pattern per run" });
     }
 
     // best-point table for the selection
@@ -803,7 +889,7 @@ async function pageCompare(root) {
       "Every number is computed at request time from the committed CSVs in results/."));
   if (runs.length < 2) {
     warnbox(root, "Need at least two committed training CSVs in results/ to compare. ",
-      "Runs land there via the training workflow: ", h("code", {}, "gh workflow run run_rung.yml -f config=<rung>"));
+      "Runs land there via the training workflow: ", h("code", {}, "gh workflow run train.yml -f config=<rung>.yaml"));
     return;
   }
 
@@ -1130,6 +1216,11 @@ async function pageArchitecture(root) {
     h("option", { value: c, selected: c === arch.config ? "" : null }, c)));
   root.append(h("div", { class: "toolbar" },
     h("label", { class: "muted", for: "rungsel" }, "rung config: "), sel));
+  if (!(arch.configs || []).length) {
+    warnbox(root, "No committed configs parsed yet — expected configs/*.yaml in the repo. ",
+      "Architecture views are built from those files; commit a config (e.g. configs/base.yaml) and reload.");
+    return;
+  }
 
   const refresh = name => {
     const r = (arch.resolved || {})[name] || arch.active;
@@ -1622,6 +1713,7 @@ async function renderViz(root, v) {
       gsets.push({ label: `γ dot ${k}`,
         data: S.positions.map(P => P.dots[k]?.gamma?.[0] ?? null),
         borderColor: PALETTE[k % PALETTE.length],
+        borderDash: focused ? [] : DASHES[k % DASHES.length],
         borderWidth: focused ? 3 : dimmed ? 1 : 1.6,
         pointRadius: focused ? 2.5 : 0,
         backgroundColor: focused ? PALETTE[k % PALETTE.length] : "transparent",
@@ -1662,7 +1754,7 @@ async function pageScores(root) {
   const entries = Object.entries(evals);
   if (!entries.length) {
     warnbox(root, "No eval_*.json reports in results/ yet — they are produced runner-side by the re-score/diagnose workflows; committed files land in results/ and this page fills in. ",
-      h("code", {}, "gh workflow run diagnose_reload.yml"));
+      h("code", {}, "gh workflow run eval.yml -f artifact=<checkpoint artifact> -f corpus_config=<rung>_pilot.yaml"));
     return;
   }
 
@@ -1854,6 +1946,14 @@ async function pageDiagnosis(root) {
   root.innerHTML = "";
   root.append(h("h1", {}, "Diagnosis — reload & causality probes"),
     h("p", {}, "Runner-side probe tables: the live model and a save→reload roundtrip are evaluated on identical windows to prove the checkpoint reload is bit-exact and that eval-mode/seq-len/fast-math do not move the numbers."));
+  if (!Object.keys(diag.data || {}).length &&
+      !Object.keys(profiles.data || {}).length) {
+    warnbox(root, "No committed diagnosis files yet (results/diagnosis/*.json + results/profiles/*). ",
+      "Dispatch a reload probe: ",
+      h("code", {}, "gh workflow run diagnose.yml -f artifact=e1_weights_passes_pilot.yaml-seeds-0-pilot"),
+      " — the tables land in results/ and this page fills in.");
+    return;
+  }
 
   for (const [name, d] of Object.entries(diag.data || {})) {
     const meta = d.meta || {};
@@ -1949,6 +2049,12 @@ async function pageVocab(root) {
   const c = rep.vocab_v1_compression || {};
   const st = Object.fromEntries((c.stats || []).map(x => [x.split, x]));
   const comp = voc.composition || {};
+  if (!comp.bases && !(voc.bases || []).length) {
+    warnbox(root, "No committed vocabulary yet (expected UBM/vocab_v1.json + the compression history in results/). ",
+      "Build it runner-side: ", h("code", {}, "gh workflow run vocab.yml"),
+      " — the vocab file and stats are committed back and this page fills in.");
+    return;
+  }
   const nByte = comp.byte ?? (voc.bases || []).filter(b => b.kind === "byte").length;
   const nSpec = comp.special ?? 8;
   const nMerge = comp.merge ?? (voc.bases || []).filter(b => b.kind === "merge").length;
@@ -2049,6 +2155,11 @@ async function pageCorpus(root) {
   root.append(h("h1", {}, "Corpus & evaluation split"),
     h("p", {}, "Corpus v1 split = whole held-out books (no book in two parts; dedup by id and body sha16; boilerplate stripped)."));
   const sp = rep.split_info || {};
+  if (!(sp.parts || {}).train) {
+    warnbox(root, "No data/split_info.json committed yet — the corpus split is produced by the vocab workflow and committed back to data/. ",
+      h("code", {}, "gh workflow run vocab.yml"));
+    return;
+  }
   const partsBox = h("div", { class: "cards" });
   const colorFor = { train: "var(--good)", val: "var(--accent)", test: "var(--accent2)" };
   for (const [name, d] of Object.entries(sp.parts || {})) {
@@ -2187,7 +2298,9 @@ function pagePlayground(root) {
       const items = g.generations || [];
       if (!items.length) {
         hist.append(h("p", { class: "muted" },
-          "no committed generations yet — generate one, or git-pull if the workflow already committed"));
+          "no committed generations yet (expected results/generation/gen-*.json) — generate one above, or run ",
+          h("code", {}, "gh workflow run generate.yml -f prompt='…' -f artifact=<checkpoint artifact>"),
+          " and pull once it commits."));
         return;
       }
       for (const it of items) {
@@ -2266,7 +2379,21 @@ function pagePlayground(root) {
 }
 
 /* ---------------- boot ---------------- */
-$("#navtoggle").addEventListener("click", () => $("#sidebar").classList.toggle("hidden"));
+$("#navtoggle").addEventListener("click", () => {
+  const hidden = $("#sidebar").classList.toggle("hidden");
+  $("#navtoggle").setAttribute("aria-expanded", String(!hidden));
+});
+/* mobile: the sidebar is an overlay; a nav click or Escape dismisses it */
+const closeMobileNav = () => {
+  if (window.matchMedia && window.matchMedia("(max-width: 800px)").matches)
+    $("#sidebar").classList.add("hidden");
+  $("#navtoggle").setAttribute("aria-expanded", "false");
+};
+$$(".nav", $("#sidebar")).forEach(a =>
+  a.addEventListener("click", closeMobileNav));
+window.addEventListener("keydown", e => {
+  if (e.key === "Escape") closeMobileNav();
+});
 (function boot() {
   try {
     const head = $("#git-head");

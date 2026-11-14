@@ -8,8 +8,10 @@
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
+<a id="skiplink" href="#page">skip to page content</a>
 <header id="topbar">
-  <button id="navtoggle" title="toggle sidebar">☰</button>
+  <button id="navtoggle" title="toggle sidebar" aria-controls="sidebar"
+          aria-expanded="true" aria-label="toggle the navigation sidebar">☰</button>
   <div class="crumb">IECNN<span class="sep">/</span><span id="pgtitle">Dashboard</span></div>
   <div id="headmeta"></div>
   <a id="repolink" href="https://github.com/Tolu23456/IECNN" target="_blank" rel="noopener">repo ↗</a>
@@ -39,7 +41,7 @@
     </div>
   </nav>
   <main id="main">
-    <section id="page"></section>
+    <section id="page" tabindex="-1"></section>
   </main>
 </div>
 <script src="/chart.umd.js"></script>
