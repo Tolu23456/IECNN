@@ -134,7 +134,8 @@ class DotPopulation(nn.Module):
 
     # ----- one pass --------------------------------------------------------
     def forward(self, wind_k, wind_v, valid_mask, h_pool, err_feat,
-                round_idx: int, msg_in, state, emb_table) -> DotOutputs:
+                round_idx: int, msg_in, state, emb_table,
+                attn_cache: dict | None = None) -> DotOutputs:
         """One pass for all dots at all positions simultaneously.
 
         wind_k    [B, T, w, d_q]   windowed, rel-distance-added keys
@@ -145,11 +146,21 @@ class DotPopulation(nn.Module):
         msg_in    [B, T, N, d_m]   or None
         state     [B, T, N, d_s]   s_prev
         emb_table [V, d]           tied embedding, shared by the whole model
+        attn_cache dict           speed opt 7 (Tolu's "don't compute the same
+                                  operation twice"): when shared pass params +
+                                  static queries make the attention block
+                                  IDENTICAL across passes, the caller passes
+                                  a fresh dict per region-forward and pass 1
+                                  stores ctx; later passes reuse it (gradients
+                                  accumulate exactly as with recompute — the
+                                  same shared nodes get the sum of all pass
+                                  contributions). Only valid when the caller
+                                  guarantees same wind_k/wind_v/valid + q.
         """
         if getattr(self, "fast_math", True):
             return self._forward_fast(wind_k, wind_v, valid_mask, h_pool,
                                       err_feat, round_idx, msg_in, state,
-                                      emb_table)
+                                      emb_table, attn_cache)
         return self._forward_reference(wind_k, wind_v, valid_mask, h_pool,
                                        err_feat, round_idx, msg_in, state,
                                        emb_table)
@@ -209,7 +220,8 @@ class DotPopulation(nn.Module):
     # vs the reference are last-bit floating-point (summation order inside a
     # GEMM); pinned by test_pyi_fast_math_matches_reference.
     def _forward_fast(self, wind_k, wind_v, valid_mask, h_pool, err_feat,
-                      round_idx: int, msg_in, state, emb_table) -> DotOutputs:
+                      round_idx: int, msg_in, state, emb_table,
+                      attn_cache: dict | None = None) -> DotOutputs:
         b, t, w = wind_k.shape[0], wind_k.shape[1], wind_k.shape[2]
         f = b * t
         n = self.N
@@ -220,25 +232,42 @@ class DotPopulation(nn.Module):
         wv = wind_v.reshape(f, w, self.d_v)                              # [f, 1?, w, d_v]
 
         # ---- queries + reads ---------------------------------------------
-        if self.dynamic_query:
-            s_f = state.reshape(f, n, self.d_s)
-            q_dyn = torch.bmm(
-                s_f.transpose(0, 1),                                    # [N, f, d_s]
-                self._sel(round_idx, self.u_q))                         # [N, d_s, d_q]
-            q_dyn = (q_dyn.transpose(0, 1)                              # [f, N, d_q]
-                     + self._sel(round_idx, self.q).unsqueeze(0))
-            # read by query: scores[n, f?, w] per position: contract d_q
-            scores = torch.einsum("fwj,fnj->fnw", wk, q_dyn)
+        # speed opt 7 (Tolu's "don't compute the same op twice"): with shared
+        # pass params + static queries the whole attention block is
+        # bit-identical on every pass — compute it ONCE per region-forward
+        # (pass 1 stores ctx in the caller's fresh cache dict) and reuse it
+        # on later passes. Gradients accumulate identically: the same shared
+        # nodes receive the sum of all pass contributions, exactly like three
+        # separate recomputations summed. Only valid when the caller feeds
+        # one cache dict with the same wind_k/wind_v/valid + q (region
+        # forward does; per-call dicts never leak across steps).
+        cacheable = attn_cache is not None and not self.dynamic_query
+        cache_hit = cacheable and "ctx" in attn_cache
+        if cache_hit:
+            ctx = attn_cache["ctx"]                                     # [f, N, d_v]
         else:
-            # one GEMM: [f*w, d_q] @ [d_q, N] -> [f, w, N]
-            scores = torch.tensordot(wk, self._sel(round_idx, self.q), dims=([2], [1]))
-            scores = scores.permute(0, 2, 1)                            # [f, N, w]
-        scores = scores / math.sqrt(self.d_q)
-        if valid_mask is not None:
-            vm = valid_mask.unsqueeze(0).expand(b, t, w).reshape(f, 1, w)
-            scores = scores.masked_fill(~vm, float("-inf"))             # [f, N, w]
-        attn = torch.nan_to_num(F.softmax(scores, dim=-1), nan=0.0)     # [f, N, w]
-        ctx = torch.matmul(attn.unsqueeze(-2), wv.unsqueeze(1)).squeeze(-2)  # [f, N, d_v]
+            if self.dynamic_query:
+                s_f = state.reshape(f, n, self.d_s)
+                q_dyn = torch.bmm(
+                    s_f.transpose(0, 1),                                # [N, f, d_s]
+                    self._sel(round_idx, self.u_q))                     # [N, d_s, d_q]
+                q_dyn = (q_dyn.transpose(0, 1)                          # [f, N, d_q]
+                         + self._sel(round_idx, self.q).unsqueeze(0))
+                # read by query: scores[n, f?, w] per position: contract d_q
+                scores = torch.einsum("fwj,fnj->fnw", wk, q_dyn)
+            else:
+                # one GEMM: [f*w, d_q] @ [d_q, N] -> [f, w, N]
+                scores = torch.tensordot(wk, self._sel(round_idx, self.q),
+                                         dims=([2], [1]))
+                scores = scores.permute(0, 2, 1)                        # [f, N, w]
+            scores = scores / math.sqrt(self.d_q)
+            if valid_mask is not None:
+                vm = valid_mask.unsqueeze(0).expand(b, t, w).reshape(f, 1, w)
+                scores = scores.masked_fill(~vm, float("-inf"))         # [f, N, w]
+            attn = torch.nan_to_num(F.softmax(scores, dim=-1), nan=0.0)  # [f, N, w]
+            ctx = torch.matmul(attn.unsqueeze(-2), wv.unsqueeze(1)).squeeze(-2)  # [f, N, d_v]
+            if cacheable:
+                attn_cache["ctx"] = ctx
 
         # ---- GRU step (batched GEMM per dot over merged [B*T]) ------------
         parts = [ctx, h_pool.reshape(f, n, self.d_s), err_feat.reshape(f, n, 3),

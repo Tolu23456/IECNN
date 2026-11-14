@@ -231,3 +231,24 @@ def test_compiled_consensus_matches_eager_with_verifier():
         p_c = dict(model_c.named_parameters())[n]
         assert p_c.grad is not None, f"{n} got no gradient under compile"
         assert torch.allclose(p_e.grad, p_c.grad, atol=1e-4), n
+
+
+def test_cached_attention_is_bit_exact():
+    """speed opt 7: with share_pass_params + static queries the attention
+    block is identical across passes; caching ctx (pass 1 computes, later
+    passes reuse) must be BIT-EXACT vs recomputing every pass — same tensor,
+    same ops. cache_attention: false restores the recompute path."""
+    x = torch.randint(0, 512, (2, 24))
+    y = torch.randint(0, 512, (2, 24))
+
+    outs = []
+    for cached in (True, False):
+        set_seed(0)
+        cfg = load_config("configs/e1_weights_passes.yaml", "tiny.yaml")
+        cfg["model"]["cache_attention"] = cached
+        m = build_iecnn(cfg, 512)
+        m.eval()
+        with torch.no_grad():
+            outs.append(m(x)["final_log_probs"])
+    assert torch.equal(outs[0], outs[1]), \
+        (outs[0] - outs[1]).abs().max().item()

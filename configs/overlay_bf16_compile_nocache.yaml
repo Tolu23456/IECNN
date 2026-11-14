@@ -1,0 +1,6 @@
+# A/B overlay: attention recomputed every pass (pre-opt-7) for pairing
+# against the shared-attention cache. Both sides compiled consensus +
+# shared_gemm head; only the cache knob differs.
+base: overlay_bf16_compile.yaml
+model:
+  cache_attention: false

@@ -68,6 +68,13 @@ class Region(nn.Module):
             seed=1000 + region_index,
             fast_math=bool(m.get("fast_dot_math", True)))
         self.dots.head_layout = str(m.get("head_layout", "shared_gemm"))
+        # speed opt 7 (Tolu's "don't compute the same op twice"): with
+        # share_pass_params + static queries the attention block is
+        # bit-identical across passes; one fresh dict per region-forward
+        # lets pass 1 compute it and later passes reuse ctx. Default ON;
+        # model.cache_attention: false restores the recompute-every-pass
+        # behavior (paired A/B knob).
+        self.cache_attention = bool(m.get("cache_attention", True))
         self.w_k = nn.Linear(d, d_q, bias=False)
         self.w_v = nn.Linear(d, d_v, bias=False)
         self.rel_emb = nn.Embedding(self.span, d_q)
@@ -238,6 +245,7 @@ class Region(nn.Module):
         n = self.n_dots
 
         state = self.dots.initial_state((b, t))
+        attn_cache = {} if self.cache_attention else None
         trust = None
         w_prev = None
         state_prev = None
@@ -282,7 +290,7 @@ class Region(nn.Module):
                 # ^ every dot reads the SAME pooled opinion (spec 01, input table)
             out = self.dots(wind_k, wind_v, valid, h_pool, err, round_idx=p - 1,
                             msg_in=msg_read if p > 1 else None, state=state,
-                            emb_table=emb_table)
+                            emb_table=emb_table, attn_cache=attn_cache)
             state_prev = out.state
 
             # ---- consensus + pooling, chunked over rows (speed opt 4) ----
