@@ -283,11 +283,10 @@ class Region(nn.Module):
         if hard_mode and self.use_weights:
             w_hard = consensus.hard_top_m(w_final, self.hard_top_m)
             log_final = consensus.pool_log_linear(per_pass[-1]["log_pi"], w_hard)
-            log_b_prev = log_final
             w_out = w_hard
         else:
-            log_final = log_b_prev
-            w_out = w_final
+            log_final = per_pass[-1]["log_b"]   # [B, T, V] (log_b_prev is the
+            w_out = w_final                     # chunk-layout [f, V] twin)
 
         return {"log_b": log_final,              # [B, T, V] region consensus
                 "region_summary": summary,       # [B, T, d_s] for the next memory
