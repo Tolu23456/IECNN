@@ -48,6 +48,9 @@ def main() -> None:
     ap.add_argument("--warmup", type=int, default=5)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", default="")
+    ap.add_argument("--profile", type=int, default=0,
+                    help="after timing, profile N steps with torch.profiler "
+                         "and attach the top ops by self CPU time to the JSON")
     args = ap.parse_args()
 
     overlays = [args.overlay] if args.overlay else []
@@ -196,6 +199,25 @@ def main() -> None:
     except Exception:
         sha = "unknown"
 
+    # ---- optional torch.profiler pass (where does the step time go?) -----
+    profile_ops = None
+    if args.profile > 0:
+        from torch.profiler import profile, ProfilerActivity
+        model.train()
+        with profile(activities=[ProfilerActivity.CPU],
+                     record_shapes=False) as prof:
+            for step in range(args.profile):
+                run_step(args.warmup + args.steps + step)
+        table = prof.key_averages().table(sort_by="self_cpu_time_total",
+                                          row_limit=25)
+        print(table)
+        profile_ops = [
+            {"op": e.key, "self_cpu_s": round(e.self_cpu_time_total / 1e6, 4),
+             "calls": e.count}
+            for e in sorted(prof.key_averages(),
+                            key=lambda e: -e.self_cpu_time_total)[:25]
+        ]
+
     result = {
         "tag": args.tag,
         "config": args.config,
@@ -221,6 +243,8 @@ def main() -> None:
         "step_times_s": [round(t, 4) for t in step_times],
         "date_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
+    if profile_ops is not None:
+        result["profile_ops"] = profile_ops
     out = Path(args.out) if args.out else Path(f"results/bench_{args.tag}.json")
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(result, indent=1))
