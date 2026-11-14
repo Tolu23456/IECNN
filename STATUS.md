@@ -607,3 +607,18 @@ hints) need a combined ~x1.03 to cross the line. Cautious: ratios from
 different runner instances multiply only under a stable-bandwidth assumption;
 if the pair lands short, one more paired bench (all-off vs all-on) gives the
 definitive single-runner end-to-end number.
+
+## opt-6/7 verdicts (14:20 UTC, paired) + end-to-end dispatch
+| optimization | paired ratio | committed |
+|---|---|---|
+| copy-free head layout (opt 6) | 3.3933 -> 3.197 = **x1.061** | bench_ab_head_layout.json |
+| shared-attention cache (opt 7) | 3.5639 -> 3.3576 = **x1.061** | bench_ab_attn_cache.json |
+| FULL stack direct measurement (B sides, threads 2) | 3.197 / 3.3576 s/step | both A/Bs |
+
+Multiplicative chain 12.81->5.43->x1.841->x1.122->x1.061->x1.061 => ~2.33 s/step
+(~5.5x), but that chain mixes ratios across runner instances (the B sides of
+the last two A/Bs — identical configs — differ 5% between instances). The
+honest end-to-end verdict is now in flight: ab_end_to_end_5x pairs ORIGINAL
+fp32 baseline code (no overlay) vs the full optimized stack (compiled
+consensus + threads 4 + opt 6/7) in ONE process. Ratio >= 5.0 = goal met,
+judge invoked immediately on the committed JSON.
