@@ -127,7 +127,7 @@ jobs:
           OUTV="UBM/vocab_promoted_${RUN%%_seed*}.json"
           python scripts/promote_vocab.py --ckpt-dir "$CKPT_DIR" \
             --vocab "${{ github.event.inputs.vocab }}" \
-            --config-fallback "${{ github.event.inputs.corpus_config }}" \
+            --config-fallback "configs/${{ github.event.inputs.corpus_config }}" \
             --out-vocab "$OUTV" \
             --out-report "results/promotion_${RUN}.json" \
             --top-k "${{ github.event.inputs.top_k }}" \
