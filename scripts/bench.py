@@ -153,9 +153,9 @@ def build_setup(config: dict, seed: int) -> dict:
 
     return {
         "config": config, "model": model, "opt": opt, "batcher": batcher,
-        "ubm": ubm, "vocab_size": su_a["vocab_size"], "train_text": train_text,
+        "ubm": ubm, "vocab_size": vocab_size, "train_text": train_text,
         "val_text": val_text, "seq_len": seq_len,
-        "batch_size": su_a["batch_size"], "precision": su_a["precision"],
+        "batch_size": batcher.batch_size, "precision": precision,
         "run_step": run_step, "is_iecnn": is_iecnn,
         "tau_max": tau_max, "tau_min": tau_min, "tau_warmup": tau_warmup,
         "total_steps": total_steps,
