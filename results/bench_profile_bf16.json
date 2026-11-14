@@ -3,7 +3,7 @@
  "config": "configs/e1_weights_passes_vocab2.yaml",
  "overlay": "overlay_bf16.yaml",
  "precision": "bf16",
- "git_sha": "3883e3e152ffc21a35ccd378c6dafea8c08c1016",
+ "git_sha": "03531f6571ffa675ea1154ea8ec366641365eda9",
  "torch_version": "2.15.0+cpu",
  "torch_threads": 2,
  "params": 1454532,
@@ -12,45 +12,172 @@
  "vocab_size": 2048,
  "steps_timed": 30,
  "warmup_steps": 5,
- "s_per_step_mean": 8.5852,
- "s_per_step_median": 8.5901,
- "s_per_step_min": 8.3547,
- "s_per_step_p90": 8.7218,
- "tokens_per_s": 477.1,
- "eval_pair_s": 56.15,
- "projected_wall_600_steps_s": 5488.0,
- "projected_wall_600_steps_min": 91.5,
+ "s_per_step_mean": 5.9164,
+ "s_per_step_median": 5.9157,
+ "s_per_step_min": 5.7152,
+ "s_per_step_p90": 6.0365,
+ "tokens_per_s": 692.3,
+ "eval_pair_s": 51.01,
+ "projected_wall_600_steps_s": 3855.9,
+ "projected_wall_600_steps_min": 64.3,
  "step_times_s": [
-  8.5632,
-  8.4516,
-  8.4544,
-  8.4712,
-  8.4347,
-  8.4102,
-  8.3547,
-  8.456,
-  8.5319,
-  8.6485,
-  8.7313,
-  8.7004,
-  8.6445,
-  8.5764,
-  8.6525,
-  8.6809,
-  8.7218,
-  8.6027,
-  8.7276,
-  8.5736,
-  8.6688,
-  8.6656,
-  8.6532,
-  8.7221,
-  8.6127,
-  8.4901,
-  8.5775,
-  8.639,
-  8.5753,
-  8.5636
+  5.8255,
+  5.7846,
+  6.0586,
+  5.8914,
+  5.9019,
+  5.9844,
+  6.0084,
+  6.0934,
+  6.0458,
+  5.938,
+  5.8263,
+  5.8892,
+  6.0365,
+  5.888,
+  5.9947,
+  5.9962,
+  5.8853,
+  5.8711,
+  5.8825,
+  5.9597,
+  5.9365,
+  5.9824,
+  5.8879,
+  5.9294,
+  5.9744,
+  5.9499,
+  5.8661,
+  5.7152,
+  5.7586,
+  5.7301
  ],
- "date_utc": "2026-11-14T12:35:41Z"
+ "date_utc": "2026-11-14T13:58:37Z",
+ "profile_ops": [
+  {
+   "op": "aten::mul",
+   "self_cpu_s": 6.3799,
+   "calls": 678
+  },
+  {
+   "op": "aten::copy_",
+   "self_cpu_s": 3.6923,
+   "calls": 2886
+  },
+  {
+   "op": "aten::argmax",
+   "self_cpu_s": 1.9758,
+   "calls": 24
+  },
+  {
+   "op": "aten::div",
+   "self_cpu_s": 1.9676,
+   "calls": 342
+  },
+  {
+   "op": "aten::bmm",
+   "self_cpu_s": 1.7753,
+   "calls": 504
+  },
+  {
+   "op": "aten::mm",
+   "self_cpu_s": 1.4824,
+   "calls": 162
+  },
+  {
+   "op": "aten::where",
+   "self_cpu_s": 1.4342,
+   "calls": 72
+  },
+  {
+   "op": "aten::log",
+   "self_cpu_s": 1.1375,
+   "calls": 42
+  },
+  {
+   "op": "aten::add_",
+   "self_cpu_s": 1.0785,
+   "calls": 636
+  },
+  {
+   "op": "aten::gt",
+   "self_cpu_s": 1.0677,
+   "calls": 72
+  },
+  {
+   "op": "autograd::engine::evaluate_function: ClampMinBackward0",
+   "self_cpu_s": 1.0024,
+   "calls": 54
+  },
+  {
+   "op": "aten::fill_",
+   "self_cpu_s": 0.97,
+   "calls": 612
+  },
+  {
+   "op": "aten::clamp_min",
+   "self_cpu_s": 0.937,
+   "calls": 66
+  },
+  {
+   "op": "aten::add",
+   "self_cpu_s": 0.904,
+   "calls": 444
+  },
+  {
+   "op": "aten::_log_softmax_backward_data",
+   "self_cpu_s": 0.8672,
+   "calls": 24
+  },
+  {
+   "op": "aten::sum",
+   "self_cpu_s": 0.7263,
+   "calls": 402
+  },
+  {
+   "op": "autograd::engine::evaluate_function: MulBackward0",
+   "self_cpu_s": 0.722,
+   "calls": 222
+  },
+  {
+   "op": "aten::_log_softmax",
+   "self_cpu_s": 0.6146,
+   "calls": 36
+  },
+  {
+   "op": "autograd::engine::evaluate_function: LogBackward0",
+   "self_cpu_s": 0.6028,
+   "calls": 42
+  },
+  {
+   "op": "aten::exp",
+   "self_cpu_s": 0.567,
+   "calls": 24
+  },
+  {
+   "op": "aten::sub",
+   "self_cpu_s": 0.4889,
+   "calls": 84
+  },
+  {
+   "op": "autograd::engine::evaluate_function: ExpBackward0",
+   "self_cpu_s": 0.4777,
+   "calls": 18
+  },
+  {
+   "op": "aten::neg",
+   "self_cpu_s": 0.3853,
+   "calls": 246
+  },
+  {
+   "op": "aten::max",
+   "self_cpu_s": 0.3707,
+   "calls": 18
+  },
+  {
+   "op": "autograd::engine::evaluate_function: SubBackward0",
+   "self_cpu_s": 0.3245,
+   "calls": 42
+  }
+ ]
 }
