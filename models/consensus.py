@@ -75,6 +75,54 @@ def compute_scores(pi: torch.Tensor, gamma: torch.Tensor, trust_term: torch.Tens
     return scores
 
 
+def js_from_parts_fast(pi: torch.Tensor, log_pi: torch.Tensor,
+                       loo: torch.Tensor) -> torch.Tensor:
+    """JS(p, q) with q = loo via the entropy identity JS = H(m) - 0.5(H(p)+H(q)).
+
+    Same math as `js_divergence(pi, loo)` for the caller's situation (q IS the
+    leave-one-out mean and p = exp(log_pi) is already materialized), but it
+    reuses log_pi for H(p) instead of recomputing log(p) over [., N, V], and
+    needs no clamped copies of p. Differences vs the reference `js_divergence`
+    are last-bit floating point: the eps clamp only affected p values below
+    1e-9, whose contribution to JS is ~1e-12 (recorded in the speed-goal note,
+    DECISIONS.md 2026-11-14). Pinned by test_js_fast_matches_reference.
+    """
+    n = pi.shape[-2]
+    if n <= 1:
+        return torch.zeros_like(pi[..., 0])
+    logq = loo.clamp_min(_EPS).log()
+    m = 0.5 * (pi + loo)
+    logm = m.clamp_min(_EPS).log()
+    hm = -(m * logm).sum(-1)
+    hp = -(pi * log_pi).sum(-1)
+    hq = -(loo * logq).sum(-1)
+    return hm - 0.5 * (hp + hq)
+
+
+def compute_scores_fast(pi: torch.Tensor, log_pi: torch.Tensor,
+                        gamma: torch.Tensor, trust_term: torch.Tensor,
+                        alpha: float | torch.Tensor, beta: float | torch.Tensor,
+                        return_parts: bool = False):
+    """Optimized `compute_scores` for the dots path where pi = exp(log_pi).
+
+    Same math (u_k = alpha*(-JS) + beta*gamma + gate_k), two changes, both
+    last-bit only: (1) JS via `js_from_parts_fast` (reuses log_pi), (2) the
+    leave-one-out mean divides in place on a fresh tensor. Returns
+    (scores, loo, js) when return_parts, mirroring compute_scores.
+    """
+    n = pi.shape[-2]
+    total = pi.sum(dim=-2, keepdim=True)                   # [..., 1, V]
+    if n <= 1:
+        loo = total.expand_as(pi).clone() * 0.0 + 1.0 / max(n, 1)
+    else:
+        loo = (total - pi) / (n - 1)
+    js = js_from_parts_fast(pi, log_pi, loo)
+    scores = alpha * (-js) + beta * gamma + trust_term
+    if return_parts:
+        return scores, loo, js
+    return scores
+
+
 def error_features_from_parts(pi: torch.Tensor, loo_mean: torch.Tensor,
                               js: torch.Tensor) -> torch.Tensor:
     """Same as `error_features` but reusing already-computed loo/JS tensors."""
@@ -108,8 +156,12 @@ def pool_log_linear(log_pi: torch.Tensor, weights: torch.Tensor) -> torch.Tensor
     """log b(v) proportional to sum_k w_k log pi_k(v), renormalized (spec 04, section 4).
 
     log_pi [..., N, V], weights [..., N] -> log_b [..., V].
+    Implemented as a batched matmul ([..., 1, N] @ [..., N, V]) so the
+    weighted sum never materializes a [..., N, V] product tensor (the old
+    (w.unsqueeze(-1) * log_pi).sum(-2) did — one extra full-size temp per
+    pass per region). Same math; GEMM reassociation is last-bit only.
     """
-    agg = (weights.unsqueeze(-1) * log_pi).sum(-2)
+    agg = torch.matmul(weights.unsqueeze(-2), log_pi).squeeze(-2)
     return F.log_softmax(agg, dim=-1)
 
 

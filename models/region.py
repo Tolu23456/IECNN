@@ -174,10 +174,12 @@ class Region(nn.Module):
             if self.use_weights:
                 # loo/JS are computed ONCE here and reused for the error
                 # feature of the next pass (spec 04 = same numbers either way;
-                # computing them twice cost ~30% of the forward).
-                scores, loo, js = consensus.compute_scores(
-                    pi, out.gamma, out.trust_term, self.alpha, self.beta,
-                    return_parts=True, log_pi=out.log_pi)
+                # computing them twice cost ~30% of the forward). The _fast
+                # variant reuses log_pi for the JS entropy terms (last-bit
+                # differences only; see models/consensus.py docstrings).
+                scores, loo, js = consensus.compute_scores_fast(
+                    pi, out.log_pi, out.gamma, out.trust_term,
+                    self.alpha, self.beta, return_parts=True)
                 v_out = None
                 if self.verifier is not None:
                     # E6: the verifier's trust judgment joins the consensus
@@ -194,7 +196,7 @@ class Region(nn.Module):
                 w = consensus.uniform_weights(n, pi)          # rung E0: plain ensemble
                 if p < self.n_passes:      # only a LATER pass needs these numbers
                     crowd = consensus.leave_one_out_mean(pi)
-                    js_own = consensus.js_divergence(pi, crowd)
+                    js_own = consensus.js_from_parts_fast(pi, out.log_pi, crowd)
                 else:
                     crowd = js_own = None
 
