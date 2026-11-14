@@ -2,6 +2,46 @@
 
 Newest entry at the top.
 
+## 2026-11-14 (night) — Pilot wave 2 landed: vocab 2048 wins big, E2 fails at pilot scale
+
+All three 2h-wall pilots completed success and were re-scored corpus-verified
+(val sha256 vs each run's own split_info; best-step tau; FULL val = Oz
+207,823 chars):
+
+| config | best full-val bpc | step | tau0 | verdict |
+|---|---|---|---|---|
+| **E1 + vocab_v2 @2048** | **2.59667** | 780 | 0.891 | **still descending at cap** |
+| E1 @512 seed 0 (ref) | 3.20294 | 540 | 0.954 | still descending at cap |
+| E1 @512 seed 1 | 3.49401 | 360 | 0.985 | still descending at cap |
+| E2 regions @ batch 8 | 3.54218 | 180 | 1.000 | loss flat ~12.0 — staging does not help at pilot scale |
+| (E1 @512 no-lambdas, from earlier) | 3.47421 | 360 | 0.985 | aux lambdas ≈ 0.27 bpc |
+
+- **Vocab is the biggest lever found so far**: 2048-token vocab cuts E1's
+  full-val bpc by **0.61** (2.59667 vs 3.20294) at the same 2h wall class —
+  bigger than the aux-lambda effect (0.27) and much bigger than any rung
+  delta measured so far. Fertility curve: 512 → 2.00, 2048 → 2.86,
+  4096 → 3.20 chars/token (2048 is the sweet spot on the curve).
+- **Seed variance at EQUAL step is tiny**: seed 0 @360 in-loop = 3.50881,
+  seed 1 @360 = 3.50789 (Δ 0.001). The apparent 3.21-vs-3.49 gap between
+  seeds was purely step count (540 vs 360 at the wall cap), not noise.
+  Equal-step comparisons are the honest basis for ladder criteria.
+- **E2 verdict (pilot)**: 3.54218 with train loss flat at ~12.0 (vs E1's
+  ~5.2) — 4-region staging at batch_size 8 learned almost nothing in 2h.
+  Fails the spec's E2 criterion (must beat E1 by 2 seed SDs). Confound to
+  record: batch 8 vs E1's 64, and ~4x per-token compute meant ~360 steps vs
+  E1's 540. Next step if pursued: larger batch via memory work (gradient
+  checkpointing / per-pass frees), not more wall time.
+- **E0 warm-protocol (patience-only) chunk 1**: 6000 steps, bpc 2.29172
+  @6240 and still descending at the 320-min chunk cap — auto-chained into
+  chunk 2 (run 43537908132). E0's plateau is forming below 2.3.
+- **Playground demo from the vocab2 checkpoint** ("Dorothy followed the
+  yellow brick road", 160 tokens @ T 0.8/top-k 40/seed 0):
+  results/generation/gen-20261114-005810.json. Still incoherent — 2.6 bpc
+  is far above the ~1.5–2.0 needed for readable text. Coherence is a
+  plateau-run outcome, not a pilot outcome. Honest caveat recorded:
+  same-seed generations from different prompts stayed near-identical —
+  consistent with unigram-dominated early training.
+
 ## 2026-11-14 (early morning) — Playground: send prompts, get model output
 
 - **Tolu asked for "a space for sending prompts and receiving outputs from
