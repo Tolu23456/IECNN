@@ -66,6 +66,7 @@ def build_setup(config: dict, seed: int) -> dict:
     lr_fn = lr_at_constant if lr_sched == "constant" else lr_at
     precision = str(tcfg.get("precision", "fp32")).lower()
     use_bf16 = precision == "bf16"
+    batch_size = int(tcfg.get("batch_size", 16))
 
     batcher = Batcher(train_ids, seq_len, batch_size, seed=seed, shuffle=True)
     model = build_model(config, vocab_size)
@@ -282,7 +283,7 @@ def main() -> None:
         "torch_threads": torch.get_num_threads(),
         "params": int(sum(p.numel() for p in model.parameters())),
         "batch_size": su_a["batch_size"],
-        "seq_len": seq_len,
+        "seq_len": su_a["seq_len"],
         "vocab_size": su_a["vocab_size"],
         "steps_timed": args.steps,
         "warmup_steps": args.warmup,
