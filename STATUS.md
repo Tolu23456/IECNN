@@ -17,7 +17,9 @@ committed, vocab2-class / batch 16 / seq 256 / V=2048, same config throughout):
 | baseline (8ed2490) | 12.81 | 319 | 131.8 min | 1.00× |
 | opt1 fp32: consensus fast paths (9c0e077) | 12.33 | 332 | 127.6 min | 1.04× |
 | opt1+2+3 bf16 autocast + batched eval (9c0e077) | **5.43** | **756** | **58.3 min** | **2.36×** |
+| bf16 + torch threads 4 (84f6c37) | **5.00** | **820** | **54.2 min** | **2.56×** |
 | opt4 chunked consensus (default 64) | 10.13 | 406 | 102.7 min | 0.79× — SLOWDOWN, default now off (40d029e) |
+| chunk 32 A/B | 25.50 | 161 | 257 min | smaller chunks = far worse |
 
 Merged optimizations (all bit-guarded by tests, defaults unchanged → results identical):
 1. Consensus fast paths — JS identity `JS = H(m) − ½(H(p)+H(q))` reusing log_pi, matmul
@@ -28,13 +30,30 @@ Merged optimizations (all bit-guarded by tests, defaults unchanged → results i
 4. Chunked consensus (`IECNN_CONS_CHUNK`, default **0 = off**) — landed, then
    measured a 1.9× SLOWDOWN at chunk 64 (10.13 vs 5.43 s/step: the 268 MB
    temporaries fit RAM, so slicing only breaks GEMM batching); default
-   flipped to off in 40d029e, knob kept for GB-scale blocks. Thread-count
-   A/B (bf16 + threads 4) is the next cheap lever being measured. (First version had a real bug — `log_final` grabbed the chunk-layout `[f,V]`
-   tensor instead of `[B,T,V]`; caught by CI shape tests, fixed in e1e0ad7.)
+   flipped to off in 40d029e, knob kept for GB-scale blocks. A/B curve:
+   chunk 32 = 25.5, chunk 64 = 10.13, chunk 128 = 8.18 s/step — all worse
+   than unchunked ≈ 5.0-5.4. (First version had a real bug — `log_final`
+   grabbed the chunk-layout `[f,V]` tensor instead of `[B,T,V]`; caught by
+   CI shape tests, fixed in e1e0ad7.)
 
 Eval-pair timing is noisy across runner instances (19.3 vs 43.6 s for identical
-code) — `bench.yml` takes `env_extra` (31952fd) for same-runner A/Bs: CONS_CHUNK
-16/32/128 and EVAL_BATCH=1 benches dispatched; bf16+threads-4 overlay queued.
+code) — `bench.yml` takes `env_extra` (31952fd) for same-runner A/Bs.
+
+**Thread-count reversal under bf16**: the 2026-11-01 threads=2 optimum was measured
+in the fp32 GEMM-bound world. Under bf16 the step is bandwidth-bound, and 4 threads
+stream memory better: **5.00 s/step vs 5.43 (threads2), 820 tok/s — 2.56× over
+baseline** (cross-runner comparison; a same-HEAD threads2 confirmation bench is in
+flight). Default stays 2 (bit-identical continuity with all previous runs — thread
+count changes GEMM reduction order); new rungs can opt into 4 via
+`training.torch_threads: 4`.
+
+**Eval-batch A/B verdict**: the 19.3s vs 43.6s eval-pair spread was RUNNER variance,
+not EVAL_BATCH — evalbatch1 (19.11s) matches evalbatch4 on the same runner class.
+EVAL_BATCH default 4 stands.
+
+**Chunk verdict is decisive**: chunk 32 = 25.5 s/step, chunk 64 = 10.13, chunk 128
+= 8.18 → converging to unchunked ≈ 5.0. Chunking only pays when the temporaries
+actually pressure RAM (GB-scale vocab runs), which vocab2/batch16 is nowhere near.
 
 **Provenance note (judge, Round 1)**: the 2.27685 bpc "vocab3 plateau" figure and
 the other vocab-curve numbers (3.20294 / 2.59667 / 2.44863) are the training
