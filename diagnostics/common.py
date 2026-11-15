@@ -41,7 +41,15 @@ def load_run(ckpt_path, config_path=None, vocab=None,
     ck = torch.load(d / "checkpoint.pt" if p.is_dir() else p,
                     map_location="cpu", weights_only=False)
     if config_path:
-        config = json.loads(Path(config_path).read_text())
+        # The "fallback" CLI arg is a YAML rung config (diagnose_all passes
+        # --config-fallback here); json.loads would die on its first char.
+        # Route by extension (2026-11-15: this YAML-as-JSON bug was latent
+        # behind the corpus-guard failures that died earlier in CI).
+        if str(config_path).endswith((".yaml", ".yml")):
+            from config import load_config
+            config = load_config(config_path, "tiny.yaml")
+        else:
+            config = json.loads(Path(config_path).read_text())
     else:
         cu = d / "config_used.json"
         if cu.exists():

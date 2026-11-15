@@ -39,6 +39,9 @@ def main() -> None:
     text = text[: args.max_chars * 4]          # raw char headroom for expand
 
     results = {}
+    out_dir = Path(args.out)
+    out_dir.mkdir(parents=True, exist_ok=True)   # summary.json needs the dir
+                                        # even when every module errors
     print(f"diagnose-all on {args.ckpt_dir} "
           f"(<= {args.max_chars} chars per diagnostic)", flush=True)
     for name in MODULES:
