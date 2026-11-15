@@ -198,6 +198,8 @@ def train_one(config: dict, seed: int, out_dir: Path, max_steps: int | None = No
                 f"(point it back at the original vocab file)")
         model.load_state_dict(state["model"])
         opt.load_state_dict(state["opt"])
+        if scaler is not None and state.get("scaler"):
+            scaler.load_state_dict(state["scaler"])
         batcher._pos = int(state["batcher_pos"])
         batcher._order = np.asarray(state["batcher_order"])
         batcher.epoch = int(state["batcher_epoch"])
@@ -265,12 +267,21 @@ def train_one(config: dict, seed: int, out_dir: Path, max_steps: int | None = No
     lr_sched = str(tcfg.get("lr_schedule", "cosine"))
     lr_fn = lr_at_constant if lr_sched == "constant" else lr_at
     # training.precision (speed goal opt 2): "bf16" = CPU autocast around
-    # forward+loss; "fp32" (default) = exactly the old path.
+    # forward+loss; "fp32" (default) = exactly the old path. "fp16" (GPU
+    # speed pack, 2026-11-15) = fp16 autocast + GradScaler — Turing GPUs
+    # (T4) emulate bf16 but HAVE fp16 tensor cores, so fp16 is the fast
+    # half-precision there; bf16 stays the CPU/Ampere choice.
     precision = str(tcfg.get("precision", "fp32")).lower()
-    if precision not in ("fp32", "bf16"):
+    if precision not in ("fp32", "bf16", "fp16"):
         raise ValueError(
-            f"training.precision must be 'fp32' or 'bf16', got '{precision!r}'")
+            f"training.precision must be 'fp32', 'bf16' or 'fp16', got '{precision!r}'")
     use_bf16 = precision == "bf16"
+    use_fp16 = precision == "fp16"
+    if use_fp16 and device != "cuda":
+        raise ValueError(
+            "training.precision 'fp16' needs a CUDA device (GradScaler is "
+            "CUDA-only); use 'bf16' on CPU")
+    scaler = torch.amp.GradScaler(device, enabled=use_fp16) if use_fp16 else None
 
     context = min(seq_len, getattr(model, "context_length", seq_len))
     smooth: float | None = None
@@ -292,16 +303,21 @@ def train_one(config: dict, seed: int, out_dir: Path, max_steps: int | None = No
             floor = weight_floor_at(step, steps, weight_floor_fraction / _iecnn_n_dots(model))
             hard = use_hard_batch(step, steps, hard_start, hard_frac, hard_rng)
             kwargs = {"tau0": tau0, "hard_mode": bool(hard), "floor": floor}
-        # training.precision = "bf16" runs forward+loss under bf16 autocast
-        # (speed goal opt 2, 2026-11-14): the [B,T,N,V] blocks are
-        # memory-bound, so halved bytes ~ halved time on those ops. Default
-        # "fp32" = autocast disabled = bit-identical to before. Evals always
-        # run in fp32 so recorded scores keep a single precision story.
+        # training.precision runs forward+loss under autocast: "bf16" on
+        # CPU/Ampere, "fp16" (+GradScaler) on Turing/Ampere GPUs (speed
+        # pack, 2026-11-15). Default "fp32" = autocast disabled =
+        # bit-identical to before. Evals always run in fp32 so recorded
+        # scores keep a single precision story.
         # Autocast follows training.device (GPU port: was hard-coded "cpu").
-        with torch.autocast(device, dtype=torch.bfloat16, enabled=use_bf16):
+        _actype = torch.bfloat16 if use_bf16 else torch.float16
+        with torch.autocast(device, dtype=_actype,
+                            enabled=use_bf16 or use_fp16):
             out = model(xb, **kwargs)
             loss = main_loss(out["final_log_probs"], yb)
-            aux_parts = {"main": float(loss.item())}
+            # aux parts stay as DETACHED GPU tensors: float() forces a
+            # device sync per term, and they are only read at eval steps
+            # (GPU speed pack, 2026-11-15).
+            aux_parts = {"main": loss.detach()}
 
             if is_iecnn and any(v != 0 for k, v in lambdas.items()
                                 if k not in ("gamma_b", "lambda_w_cut_frac")):
@@ -314,47 +330,60 @@ def train_one(config: dict, seed: int, out_dir: Path, max_steps: int | None = No
                     stack = torch.stack([ro["log_b"] for ro in out["region_outputs"]])
                     lr_term = region_loss(stack, yb)
                     loss = loss + lambdas["lambda_r"] * lr_term
-                    aux_parts["L_region"] = float(lr_term.detach())
+                    aux_parts["L_region"] = lr_term.detach()
                 if lambdas["lambda_d"] > 0:
                     ld = boosted_dot_loss(last_pass["log_pi"], out["final_log_probs"],
                                           yb, lambdas["gamma_b"])
                     loss = loss + lambdas["lambda_d"] * ld
-                    aux_parts["L_dot"] = float(ld.detach())
+                    aux_parts["L_dot"] = ld.detach()
                 if lambdas["lambda_c"] > 0:
                     lc_val = correlation_lambda(step, lam_ramp, lambdas["lambda_c"])
                     lc = decorrelation_penalty(last_pass["log_pi"],
                                                out["final_log_probs"], yb)
                     loss = loss + lc_val * lc
-                    aux_parts["L_corr"] = float(lc.detach()) * lc_val
+                    aux_parts["L_corr"] = lc.detach() * lc_val
                 if lambdas["lambda_k"] > 0:
                     lk = confidence_loss(last_pass["gamma"], last_pass["log_pi"], yb)
                     loss = loss + lambdas["lambda_k"] * lk
-                    aux_parts["L_conf"] = float(lk.detach())
+                    aux_parts["L_conf"] = lk.detach()
                 if lambdas["lambda_w"] > 0:
                     lw_val = weight_entropy_lambda(step, steps,
                                                    lambdas["lambda_w"],
                                                    lambdas["lambda_w_cut_frac"])
                     lw = weight_entropy_bonus(last_pass["weights"])
                     loss = loss - lw_val * lw
-                    aux_parts["L_w"] = -float(lw.detach()) * lw_val
+                    aux_parts["L_w"] = -(lw.detach() * lw_val)
                 if lambdas["lambda_o"] > 0:
                     lo = oracle_dot_loss(last_pass["log_pi"], out["final_log_probs"],
                                          yb, outvote_weight)
                     loss = loss + lambdas["lambda_o"] * lo
-                    aux_parts["L_oracle"] = float(lo.detach())
+                    aux_parts["L_oracle"] = lo.detach()
                 if lambdas["lambda_v"] > 0 and last_pass.get("verifier") is not None:
                     lv = verifier_loss(last_pass["verifier"], last_pass["log_pi"],
                                        out["final_log_probs"], yb, outvote_weight)
                     loss = loss + lambdas["lambda_v"] * lv
-                    aux_parts["L_verif"] = float(lv.detach())
+                    aux_parts["L_verif"] = lv.detach()
 
         opt.zero_grad(set_to_none=True)
-        loss.backward()
-        gn = grad_norms_by_component(model)          # pre-clip, per component
+        if scaler is not None:
+            scaler.scale(loss).backward()
+            scaler.unscale_(opt)          # grads back to true scale pre-clip
+        else:
+            loss.backward()
+        # per-component grad norms are only READ on eval steps — computing
+        # them every step forces a GPU sync per bucket (GPU speed pack)
+        if (step > 0 and step % eval_every == 0) or step == steps - 1:
+            gn = grad_norms_by_component(model)
+        else:
+            gn = {"emb": 0.0, "regions": 0.0, "chain": 0.0, "gate": 0.0,
+                  "messages": 0.0, "other": 0.0}
         gn_total = torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-        opt.step()
+        if scaler is not None:
+            scaler.step(opt)
+            scaler.update()
+        else:
+            opt.step()
         tokens_seen += int(x.shape[0]) * int(x.shape[1])
-        smooth = _ema(float(loss.item()), smooth)
         train_seconds += time.perf_counter() - t_step
         last_step = step
 
@@ -380,11 +409,13 @@ def train_one(config: dict, seed: int, out_dir: Path, max_steps: int | None = No
             p3 = (ev["passes"] + [""] * 3)[:3]
             gn7 = [round(gn.get(b, 0.0), 4) for b in
                    ("emb", "regions", "chain", "gate", "messages", "other")]
+            smooth = _ema(float(aux_parts["main"]), smooth)
             log.row([step, lr, round(smooth, 5), round(bpc, 5),
                      p3[0], p3[1], p3[2], round(bpc_tr, 5),
                      round(kwargs.get("tau0", 1.0), 5) if is_iecnn else "",
                      ev["weight_entropy"] if is_iecnn else "",
-                     round(aux_parts.get("L_w", 0.0), 5) if "L_w" in aux_parts else "",
+                     round(float(aux_parts.get("L_w", 0.0)), 5)
+                     if "L_w" in aux_parts else "",
                      round(elapsed, 1),
                      round(float(gn_total), 4), *gn7])
             if e6_metrics_on:
@@ -449,6 +480,7 @@ def train_one(config: dict, seed: int, out_dir: Path, max_steps: int | None = No
                     "opt": opt.state_dict(), "best_val": best_val,
                     "best_step": best_step, "best_state": best_state,
                     "vocab_sha256": vocab_sha,
+                    "scaler": scaler.state_dict() if scaler is not None else None,
                     "batcher_pos": batcher._pos, "batcher_order": batcher._order,
                     "batcher_epoch": batcher.epoch,
                     "batcher_rng": batcher.rng.bit_generator.state,
@@ -475,6 +507,7 @@ def train_one(config: dict, seed: int, out_dir: Path, max_steps: int | None = No
                 "tokens_seen": tokens_seen,
                 "train_seconds": train_seconds,
                 "since_best_evals": since_best_evals,
+                "scaler": scaler.state_dict() if scaler is not None else None,
             })
             # summary/config snapshot rides with every checkpoint so a
             # timeout-killed chunk still leaves a self-describing artifact

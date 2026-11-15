@@ -23,7 +23,10 @@ import torch
 # per row), so batching them changes nothing per token — pinned by
 # test_batched_eval_matches_batch1. Keep the default small: activations at
 # [B*T, N, V] are the memory class; 4 keeps ~1.1 GB at vocab2.
-EVAL_BATCH = int(os.environ.get("IECNN_EVAL_BATCH", "4"))
+_EVAL_BATCH_ENV = os.environ.get("IECNN_EVAL_BATCH", "")
+EVAL_BATCH = int(_EVAL_BATCH_ENV) if _EVAL_BATCH_ENV else (
+    16 if torch.cuda.is_available() else 4)   # GPU speed pack: bigger eval
+    # batches on CUDA cut the 100k-char eval cost; CPU keeps the RAM-safe 4
 
 
 def prepare_text(ubm, text: str) -> tuple[list[int], list[int]]:
