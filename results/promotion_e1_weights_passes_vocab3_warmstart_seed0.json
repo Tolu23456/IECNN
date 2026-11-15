@@ -1,0 +1,189 @@
+{
+ "bpc_before": 2.131691,
+ "bpc_after": 2.13171,
+ "bpc_final": 2.13171,
+ "bpc_delta": 1.9e-05,
+ "rollback_epsilon": 0.002,
+ "rolled_back": false,
+ "promoted": [
+  {
+   "id": 4096,
+   "text": "\n\u201c",
+   "parts": [
+    10,
+    338
+   ],
+   "count": 581,
+   "mean_plurality_agreement": 0.75624,
+   "mean_confidence": 0.80528,
+   "score": 3.877068
+  }
+ ],
+ "promoted_ids": [
+  4096
+ ],
+ "tombstoned_ids": [],
+ "skipped": [
+  {
+   "candidate": [
+    10,
+    338,
+    58
+   ],
+   "reason": "encodes to 3 bases, need exactly 2"
+  },
+  {
+   "candidate": [
+    10,
+    338,
+    58,
+    51
+   ],
+   "reason": "encodes to 4 bases, need exactly 2"
+  },
+  {
+   "candidate": [
+    10,
+    338,
+    58,
+    51,
+    469
+   ],
+   "reason": "encodes to 5 bases, need exactly 2"
+  },
+  {
+   "candidate": [
+    10,
+    338,
+    58,
+    51,
+    469,
+    268
+   ],
+   "reason": "encodes to 6 bases, need exactly 2"
+  },
+  {
+   "candidate": [
+    10,
+    10,
+    338
+   ],
+   "reason": "encodes to 3 bases, need exactly 2"
+  },
+  {
+   "candidate": [
+    10,
+    10,
+    338,
+    58
+   ],
+   "reason": "encodes to 4 bases, need exactly 2"
+  },
+  {
+   "candidate": [
+    10,
+    10,
+    338,
+    58,
+    51
+   ],
+   "reason": "encodes to 5 bases, need exactly 2"
+  },
+  {
+   "candidate": [
+    10,
+    338,
+    58,
+    51,
+    469,
+    305
+   ],
+   "reason": "encodes to 6 bases, need exactly 2"
+  },
+  {
+   "candidate": [
+    10,
+    10,
+    338,
+    58,
+    51,
+    469
+   ],
+   "reason": "encodes to 6 bases, need exactly 2"
+  },
+  {
+   "candidate": [
+    10,
+    338,
+    58,
+    51,
+    469,
+    58
+   ],
+   "reason": "encodes to 6 bases, need exactly 2"
+  },
+  {
+   "candidate": [
+    10,
+    338,
+    58,
+    51,
+    10
+   ],
+   "reason": "encodes to 5 bases, need exactly 2"
+  },
+  {
+   "candidate": [
+    10,
+    338,
+    58,
+    51,
+    469,
+    44
+   ],
+   "reason": "encodes to 6 bases, need exactly 2"
+  },
+  {
+   "candidate": [
+    10,
+    338,
+    58,
+    51,
+    58
+   ],
+   "reason": "encodes to 5 bases, need exactly 2"
+  },
+  {
+   "candidate": [
+    10,
+    338,
+    58,
+    51,
+    50
+   ],
+   "reason": "encodes to 4 bases, need exactly 2"
+  },
+  {
+   "candidate": [
+    10,
+    338,
+    58,
+    51,
+    58,
+    268
+   ],
+   "reason": "encodes to 6 bases, need exactly 2"
+  }
+ ],
+ "settle_steps": 500,
+ "settle_skipped": false,
+ "note": "promotion = spec 07 6.2: candidates from region-1 agreement, mean-of-parts init, settle new rows only, batch rollback test on held-out bpc",
+ "harvest": {
+  "n_windows": 31,
+  "n_chars": 100057
+ },
+ "source_vocab": "UBM/vocab_v3.json",
+ "ckpt_dir": "checkpoints/e1_weights_passes_vocab3_warmstart_seed0",
+ "vocab_version_after": 2,
+ "vocab_file": "UBM/vocab_promoted_e1_weights_passes_vocab3_warmstart.json"
+}
