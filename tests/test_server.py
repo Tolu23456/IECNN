@@ -225,7 +225,7 @@ def test_viz_export_structure_for_inspector_page():
 
 
 # ------------------------------------------------- /api/viz/build (POST) ---
-def _post(base: str, path: str, body: dict):
+def _post_json(base: str, path: str, body: dict):
     import urllib.request
     req = urllib.request.Request(
         base + path, data=json.dumps(body).encode(),
@@ -239,25 +239,44 @@ def _post(base: str, path: str, body: dict):
 
 def test_viz_build_validates_local_checkpoint():
     """/api/viz/build reads LOCAL weights; validation must be clean without
-    needing a real checkpoint (the happy path = a normal export_viz run)."""
+    needing a real checkpoint (the happy path = a normal export_viz run).
+
+    NOTE (2026-11-16): this test used to call a helper named `_post` that a
+    LATER token-authenticated `_post` (line ~1121) shadowed — the test then
+    indexed raw bytes and crashed with TypeError instead of asserting. The
+    two helpers are now `_post_json` (parses JSON) and `_post_authed`
+    (returns raw bytes; token/header kwargs). Validation order in
+    api_viz_build: torch probe -> ckpt_dir -> checkpoint.pt exists -> name.
+    """
+    import importlib.util
     srv, base = _start()
+    tmp_ckpt = None
     try:
-        code, out = _post(base, "/api/viz/build", {})
-        assert code == 400 and "ckpt_dir" in out["error"]
-        code, out = _post(base, "/api/viz/build",
-                          {"ckpt_dir": "no/such/dir"})
-        assert code == 404 and "checkpoint.pt" in out["error"]
-        code, out = _post(base, "/api/viz/build",
-                          {"ckpt_dir": "checkpoints", "name": "bad name!"})
-        assert code == 400 and "name" in out["error"]
-        # torch may or may not exist where the server runs; if absent the
-        # endpoint must say so instead of faking success
+        # torch probe runs FIRST: on a torch-less machine EVERY request
+        # answers with the torch message, so the deeper validation order
+        # can only be exercised where torch exists (CI installs it)
+        code, out = _post_json(base, "/api/viz/build", {})
         if importlib.util.find_spec("torch") is None:
-            code, out = _post(base, "/api/viz/build",
-                              {"ckpt_dir": "checkpoints/nothing_here"})
             assert code == 400 and "torch" in out["error"]
+            return
+        assert code == 400 and "ckpt_dir" in out["error"]
+        code, out = _post_json(base, "/api/viz/build",
+                               {"ckpt_dir": "no/such/dir"})
+        assert code == 404 and "checkpoint.pt" in out["error"]
+        # name validation sits AFTER the checkpoint.pt existence check, so
+        # exercise it against a real (dummy) checkpoint directory
+        import tempfile
+        tmp_ckpt = Path(tempfile.mkdtemp(prefix="vizbuild_ckpt_"))
+        (tmp_ckpt / "checkpoint.pt").write_bytes(b"dummy")
+        code, out = _post_json(base, "/api/viz/build",
+                               {"ckpt_dir": str(tmp_ckpt),
+                                "name": "bad name!"})
+        assert code == 400 and "name" in out["error"], (code, out)
     finally:
         srv.shutdown()
+        if tmp_ckpt is not None:
+            import shutil
+            shutil.rmtree(tmp_ckpt, ignore_errors=True)
 
 
 # ------------------------------------------------------------ /api/arch ----
@@ -861,7 +880,7 @@ def test_post_requires_session_token():
         assert st == 200
         # POST without / with a wrong token → 401
         for tok in (None, "wrong-token-123"):
-            st, raw = _post(base, "/api/generate", {"prompt": "hi"}, token=tok)
+            st, raw = _post_authed(base, "/api/generate", {"prompt": "hi"}, token=tok)
             d = json.loads(raw)
             assert st == 401, (tok, st, d)
             assert "X-IECNN-Session" in d["error"]
@@ -877,23 +896,23 @@ def test_post_rejects_foreign_host_and_cross_origin():
         port = base.rsplit(":", 1)[1]
         try:
             # DNS-rebinding guard: a foreign Host header is 403
-            st, raw = _post(base, "/api/generate", {"prompt": "hi"},
+            st, raw = _post_authed(base, "/api/generate", {"prompt": "hi"},
                             headers={"Host": "evil.example"})
             assert st == 403 and "Host" in json.loads(raw)["error"]
             # browser-style cross-origin POST is 403
-            st, raw = _post(base, "/api/generate", {"prompt": "hi"},
+            st, raw = _post_authed(base, "/api/generate", {"prompt": "hi"},
                             headers={"Origin": "https://evil.example"})
             assert st == 403 and "origin" in json.loads(raw)["error"].lower()
             # same-origin Origin (what the real page sends) passes the
             # gate — with the faked GH layer the dispatch goes through
-            st, raw = _post(base, "/api/generate", {"prompt": "hi"},
+            st, raw = _post_authed(base, "/api/generate", {"prompt": "hi"},
                             headers={"Origin": f"http://127.0.0.1:{port}"})
             d = json.loads(raw)
             assert st == 200 and d.get("ok") is True, d
             # allowed host spellings all pass the Host check
             for host in (f"localhost:{port}", "127.0.0.1",
                          f"127.0.0.1:{port}", f"[::1]:{port}"):
-                st, raw = _post(base, "/api/generate", {"prompt": "hi"},
+                st, raw = _post_authed(base, "/api/generate", {"prompt": "hi"},
                                 headers={"Host": host})
                 d = json.loads(raw)
                 assert st == 200 and d.get("ok") is True, (host, d)
@@ -929,7 +948,7 @@ def test_post_generate_rate_limited():
     with _FakeGH(routes={"dispatches": (204, None)}):
         srv, base = _start()
         try:
-            st, raw = _post(base, "/api/generate", {"prompt": "after"})
+            st, raw = _post_authed(base, "/api/generate", {"prompt": "after"})
             assert st == 200, json.loads(raw)
         finally:
             srv.shutdown()
@@ -940,7 +959,7 @@ def test_host_header_check_is_shared_by_all_posts():
     inherit it."""
     srv, base = _start()
     try:
-        st, raw = _post(base, "/api/generate", {"prompt": "hi"},
+        st, raw = _post_authed(base, "/api/generate", {"prompt": "hi"},
                         headers={"Host": "evil.example"})
         assert st == 403
         # GETs are unaffected by any of the POST guards
@@ -1118,7 +1137,7 @@ def test_viz_endpoint_carries_consensus_audit():
 
 
 # ----------------------------------------------------------- playground ----
-def _post(base: str, path: str, body, token: str = "auto",
+def _post_authed(base: str, path: str, body, token: str = "auto",
           headers: dict | None = None) -> tuple[int, bytes]:
     h = {"Content-Type": "application/json"}
     if token == "auto":                      # behave like the real page
@@ -1194,13 +1213,13 @@ def test_playground_validation_clamps():
                 ("not-a-dict", "JSON object"),
             ]
             for body, frag in bad:
-                st, raw = _post(base, "/api/generate", body)
+                st, raw = _post_authed(base, "/api/generate", body)
                 d = json.loads(raw)
                 assert st == 400, (body, st, d)
                 assert frag in d["error"], d
             assert fake.calls == [], "invalid requests must not reach GitHub"
             # edge values are accepted exactly, defaults applied
-            st, raw = _post(base, "/api/generate",
+            st, raw = _post_authed(base, "/api/generate",
                             {"prompt": "p", "max_new_tokens": 800,
                              "temperature": 2.0, "top_k": 0, "seed": -5})
             d = json.loads(raw)
@@ -1223,7 +1242,7 @@ def test_playground_no_credential_and_github_errors():
     with _FakeGH(token=None) as fake:
         srv, base = _start()
         try:
-            st, raw = _post(base, "/api/generate", {"prompt": "hi"})
+            st, raw = _post_authed(base, "/api/generate", {"prompt": "hi"})
             d = json.loads(raw)
             assert st == 401 and "no GitHub credential" in d["error"]
             assert fake.calls == [], "must not touch GitHub without a credential"
@@ -1232,7 +1251,7 @@ def test_playground_no_credential_and_github_errors():
     with _FakeGH(routes={"dispatches": (401, None)}) as fake:
         srv, base = _start()
         try:
-            st, raw = _post(base, "/api/generate", {"prompt": "hi"})
+            st, raw = _post_authed(base, "/api/generate", {"prompt": "hi"})
             d = json.loads(raw)
             assert st == 502 and "401" in d["error"]
             # the request DID go out with the ambient token in the header…
