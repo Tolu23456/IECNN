@@ -188,6 +188,8 @@ def train_one(config: dict, seed: int, out_dir: Path, max_steps: int | None = No
     stop_kind = None            # "patience" | "wall_cap" | None (target reached)
     last_step = start_step - 1  # ACTUAL last step executed (early stop makes
                                 # the loop range a ceiling, not the truth)
+    pending_scaler_state = None       # set by the resume branch below; loaded
+                                      # after the scaler is created (line ~309)
     if resume and ckpt_path.exists():
         state = torch.load(ckpt_path, map_location="cpu", weights_only=False)
         if str(state.get("vocab_sha256", "")) != vocab_sha:
@@ -198,8 +200,10 @@ def train_one(config: dict, seed: int, out_dir: Path, max_steps: int | None = No
                 f"(point it back at the original vocab file)")
         model.load_state_dict(state["model"])
         opt.load_state_dict(state["opt"])
-        if scaler is not None and state.get("scaler"):
-            scaler.load_state_dict(state["scaler"])
+        # scaler is created later in this function (after precision parsing),
+        # so defer the load instead of touching it here (UnboundLocalError
+        # fix, 2026-11-16 — hit by the resumed E6 CPU warmstart)
+        pending_scaler_state = state.get("scaler")
         batcher._pos = int(state["batcher_pos"])
         batcher._order = np.asarray(state["batcher_order"])
         batcher.epoch = int(state["batcher_epoch"])
@@ -305,6 +309,9 @@ def train_one(config: dict, seed: int, out_dir: Path, max_steps: int | None = No
             "training.precision 'fp16' needs a CUDA device (GradScaler is "
             "CUDA-only); use 'bf16' on CPU")
     scaler = torch.amp.GradScaler(device, enabled=use_fp16) if use_fp16 else None
+    if scaler is not None and pending_scaler_state:
+        scaler.load_state_dict(pending_scaler_state)
+        pending_scaler_state = None
 
     context = min(seq_len, getattr(model, "context_length", seq_len))
     smooth: float | None = None
