@@ -1,0 +1,49 @@
+{
+ "dispersion_mean": 0.08676,
+ "dispersion_std": 0.0369,
+ "auroc_dispersion_vs_final_wrong": 0.45664,
+ "spearman_dispersion_vs_final_nll": -0.13252,
+ "fraction_consensus1_wrong": 0.93855,
+ "halting_simulation": [
+  {
+   "stop_below_percentile": 10,
+   "dispersion_threshold": 0.05529,
+   "fraction_halted": 0.0998,
+   "nll_halted_pass1": 6.76136,
+   "nll_halted_passlast": 5.69014,
+   "nll_blended": 5.37723,
+   "region1_passes_saved": 0.0665
+  },
+  {
+   "stop_below_percentile": 25,
+   "dispersion_threshold": 0.06209,
+   "fraction_halted": 0.2498,
+   "nll_halted_pass1": 6.72302,
+   "nll_halted_passlast": 5.64539,
+   "nll_blended": 5.53956,
+   "region1_passes_saved": 0.1665
+  },
+  {
+   "stop_below_percentile": 50,
+   "dispersion_threshold": 0.07395,
+   "fraction_halted": 0.5,
+   "nll_halted_pass1": 6.71939,
+   "nll_halted_passlast": 5.58198,
+   "nll_blended": 5.83907,
+   "region1_passes_saved": 0.3333
+  },
+  {
+   "stop_below_percentile": 75,
+   "dispersion_threshold": 0.09777,
+   "fraction_halted": 0.7498,
+   "nll_halted_pass1": 6.70347,
+   "nll_halted_passlast": 5.43094,
+   "nll_blended": 6.22451,
+   "region1_passes_saved": 0.4999
+  }
+ ],
+ "n_positions": 2506,
+ "note": "dispersion = mean JS(pi_k, crowd mean) over region-1 dots at pass 1; AUROC predicts FINAL-output errors (healthy > 0.7)",
+ "ckpt_dir": "checkpoints/e1_weights_passes_vocab3_warmstart_seed0",
+ "best_step": 3120
+}

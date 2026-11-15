@@ -3,28 +3,126 @@
  "max_chars": 8000,
  "results": {
   "ablation": {
-   "error": "RuntimeError: Error(s) in loading state_dict for IECNN:\n\tsize mismatch for embed.weight: copying a param with shape torch.Size([4096, 128]) from checkpoint, the shape in current model is torch.Size([4096, 64]).\n\tsize mismatch for regions.0.dots.q: copying a param with shape torch.Size([1, 8, 32]) from checkpoint, the shape in current model is torch.Size([1, 4, 16]).\n\tsize mismatch for regions.0.dots.s0: copying a param with shape torch.Size([1, 8, 128]) from checkpoint, the shape in current model is torch.Size([1, 4, 64]).\n\tsize mismatch for regions.0.dots.w_ih: copying a param with shape torch.Size([1, 8, 211, 384]) from checkpoint, the shape in current model is torch.Size([1, 4, 115, 192]).\n\tsize mismatch for regions.0.dots.b_ih: copying a param with shape torch.Size([1, 8, 384]) from checkpoint, the shape in current model is torch.Size([1, 4, 192]).\n\tsize mismatch for regions.0.dots.w_hh: copying a param with shape torch.Size([1, 8, 128, 384]) from checkpoint, the shape in current model is torch.Size([1, 4, 64, 192]).\n\tsize mismatch for regions.0.dots.p_out: copying a param with shape torch.Size([1, 8, 128, 128]) from checkpoint, the shape in current model is torch.Size([1, 4, 64, 64]).\n\tsize mismatch for regions.0.dots.c_w: copying a param with shape torch.Size([1, 8, 128]) from checkpoint, the shape in current model is torch.Size([1, 4, 64]).\n\tsize mismatch for regions.0.dots.c_b: copying a param with shape torch.Size([1, 8]) from checkpoint, the shape in current model is torch.Size([1, 4]).\n\tsize mismatch for regions.0.dots.g_w: copying a param with shape torch.Size([1, 8, 128]) from checkpoint, the shape in current model is torch.Size([1, 4, 64]).\n\tsize mismatch for regions.0.dots.g_b: copying a param with shape torch.Size([1, 8]) from checkpoint, the shape in current model is torch.Size([1, 4]).\n\tsize mismatch for regions.0.w_k.weight: copying a param with shape torch.Size([32, 128]) from checkpoint, the shape in current model is torch.Size([16, 64]).\n\tsize mismatch for regions.0.w_v.weight: copying a param with shape torch.Size([64, 128]) from checkpoint, the shape in current model is torch.Size([32, 64]).\n\tsize mismatch for regions.0.rel_emb.weight: copying a param with shape torch.Size([32, 32]) from checkpoint, the shape in current model is torch.Size([32, 16]).\n\tsize mismatch for region_gate.0.weight: copying a param with shape torch.Size([1, 128]) from checkpoint, the shape in current model is torch.Size([1, 64])."
+   "error": "KeyError: None"
   },
   "calibration": {
-   "error": "RuntimeError: Error(s) in loading state_dict for IECNN:\n\tsize mismatch for embed.weight: copying a param with shape torch.Size([4096, 128]) from checkpoint, the shape in current model is torch.Size([4096, 64]).\n\tsize mismatch for regions.0.dots.q: copying a param with shape torch.Size([1, 8, 32]) from checkpoint, the shape in current model is torch.Size([1, 4, 16]).\n\tsize mismatch for regions.0.dots.s0: copying a param with shape torch.Size([1, 8, 128]) from checkpoint, the shape in current model is torch.Size([1, 4, 64]).\n\tsize mismatch for regions.0.dots.w_ih: copying a param with shape torch.Size([1, 8, 211, 384]) from checkpoint, the shape in current model is torch.Size([1, 4, 115, 192]).\n\tsize mismatch for regions.0.dots.b_ih: copying a param with shape torch.Size([1, 8, 384]) from checkpoint, the shape in current model is torch.Size([1, 4, 192]).\n\tsize mismatch for regions.0.dots.w_hh: copying a param with shape torch.Size([1, 8, 128, 384]) from checkpoint, the shape in current model is torch.Size([1, 4, 64, 192]).\n\tsize mismatch for regions.0.dots.p_out: copying a param with shape torch.Size([1, 8, 128, 128]) from checkpoint, the shape in current model is torch.Size([1, 4, 64, 64]).\n\tsize mismatch for regions.0.dots.c_w: copying a param with shape torch.Size([1, 8, 128]) from checkpoint, the shape in current model is torch.Size([1, 4, 64]).\n\tsize mismatch for regions.0.dots.c_b: copying a param with shape torch.Size([1, 8]) from checkpoint, the shape in current model is torch.Size([1, 4]).\n\tsize mismatch for regions.0.dots.g_w: copying a param with shape torch.Size([1, 8, 128]) from checkpoint, the shape in current model is torch.Size([1, 4, 64]).\n\tsize mismatch for regions.0.dots.g_b: copying a param with shape torch.Size([1, 8]) from checkpoint, the shape in current model is torch.Size([1, 4]).\n\tsize mismatch for regions.0.w_k.weight: copying a param with shape torch.Size([32, 128]) from checkpoint, the shape in current model is torch.Size([16, 64]).\n\tsize mismatch for regions.0.w_v.weight: copying a param with shape torch.Size([64, 128]) from checkpoint, the shape in current model is torch.Size([32, 64]).\n\tsize mismatch for regions.0.rel_emb.weight: copying a param with shape torch.Size([32, 32]) from checkpoint, the shape in current model is torch.Size([32, 16]).\n\tsize mismatch for region_gate.0.weight: copying a param with shape torch.Size([1, 128]) from checkpoint, the shape in current model is torch.Size([1, 64])."
+   "error": "KeyError: None"
   },
   "dispersion": {
-   "error": "RuntimeError: Error(s) in loading state_dict for IECNN:\n\tsize mismatch for embed.weight: copying a param with shape torch.Size([4096, 128]) from checkpoint, the shape in current model is torch.Size([4096, 64]).\n\tsize mismatch for regions.0.dots.q: copying a param with shape torch.Size([1, 8, 32]) from checkpoint, the shape in current model is torch.Size([1, 4, 16]).\n\tsize mismatch for regions.0.dots.s0: copying a param with shape torch.Size([1, 8, 128]) from checkpoint, the shape in current model is torch.Size([1, 4, 64]).\n\tsize mismatch for regions.0.dots.w_ih: copying a param with shape torch.Size([1, 8, 211, 384]) from checkpoint, the shape in current model is torch.Size([1, 4, 115, 192]).\n\tsize mismatch for regions.0.dots.b_ih: copying a param with shape torch.Size([1, 8, 384]) from checkpoint, the shape in current model is torch.Size([1, 4, 192]).\n\tsize mismatch for regions.0.dots.w_hh: copying a param with shape torch.Size([1, 8, 128, 384]) from checkpoint, the shape in current model is torch.Size([1, 4, 64, 192]).\n\tsize mismatch for regions.0.dots.p_out: copying a param with shape torch.Size([1, 8, 128, 128]) from checkpoint, the shape in current model is torch.Size([1, 4, 64, 64]).\n\tsize mismatch for regions.0.dots.c_w: copying a param with shape torch.Size([1, 8, 128]) from checkpoint, the shape in current model is torch.Size([1, 4, 64]).\n\tsize mismatch for regions.0.dots.c_b: copying a param with shape torch.Size([1, 8]) from checkpoint, the shape in current model is torch.Size([1, 4]).\n\tsize mismatch for regions.0.dots.g_w: copying a param with shape torch.Size([1, 8, 128]) from checkpoint, the shape in current model is torch.Size([1, 4, 64]).\n\tsize mismatch for regions.0.dots.g_b: copying a param with shape torch.Size([1, 8]) from checkpoint, the shape in current model is torch.Size([1, 4]).\n\tsize mismatch for regions.0.w_k.weight: copying a param with shape torch.Size([32, 128]) from checkpoint, the shape in current model is torch.Size([16, 64]).\n\tsize mismatch for regions.0.w_v.weight: copying a param with shape torch.Size([64, 128]) from checkpoint, the shape in current model is torch.Size([32, 64]).\n\tsize mismatch for regions.0.rel_emb.weight: copying a param with shape torch.Size([32, 32]) from checkpoint, the shape in current model is torch.Size([32, 16]).\n\tsize mismatch for region_gate.0.weight: copying a param with shape torch.Size([1, 128]) from checkpoint, the shape in current model is torch.Size([1, 64])."
+   "dispersion_mean": 0.08676,
+   "dispersion_std": 0.0369,
+   "auroc_dispersion_vs_final_wrong": 0.45664,
+   "spearman_dispersion_vs_final_nll": -0.13252,
+   "fraction_consensus1_wrong": 0.93855,
+   "halting_simulation": [
+    {
+     "stop_below_percentile": 10,
+     "dispersion_threshold": 0.05529,
+     "fraction_halted": 0.0998,
+     "nll_halted_pass1": 6.76136,
+     "nll_halted_passlast": 5.69014,
+     "nll_blended": 5.37723,
+     "region1_passes_saved": 0.0665
+    },
+    {
+     "stop_below_percentile": 25,
+     "dispersion_threshold": 0.06209,
+     "fraction_halted": 0.2498,
+     "nll_halted_pass1": 6.72302,
+     "nll_halted_passlast": 5.64539,
+     "nll_blended": 5.53956,
+     "region1_passes_saved": 0.1665
+    },
+    {
+     "stop_below_percentile": 50,
+     "dispersion_threshold": 0.07395,
+     "fraction_halted": 0.5,
+     "nll_halted_pass1": 6.71939,
+     "nll_halted_passlast": 5.58198,
+     "nll_blended": 5.83907,
+     "region1_passes_saved": 0.3333
+    },
+    {
+     "stop_below_percentile": 75,
+     "dispersion_threshold": 0.09777,
+     "fraction_halted": 0.7498,
+     "nll_halted_pass1": 6.70347,
+     "nll_halted_passlast": 5.43094,
+     "nll_blended": 6.22451,
+     "region1_passes_saved": 0.4999
+    }
+   ],
+   "n_positions": 2506,
+   "note": "dispersion = mean JS(pi_k, crowd mean) over region-1 dots at pass 1; AUROC predicts FINAL-output errors (healthy > 0.7)",
+   "ckpt_dir": "checkpoints/e1_weights_passes_vocab3_warmstart_seed0",
+   "best_step": 3120
   },
   "error_correlation": {
-   "error": "RuntimeError: Error(s) in loading state_dict for IECNN:\n\tsize mismatch for embed.weight: copying a param with shape torch.Size([4096, 128]) from checkpoint, the shape in current model is torch.Size([4096, 64]).\n\tsize mismatch for regions.0.dots.q: copying a param with shape torch.Size([1, 8, 32]) from checkpoint, the shape in current model is torch.Size([1, 4, 16]).\n\tsize mismatch for regions.0.dots.s0: copying a param with shape torch.Size([1, 8, 128]) from checkpoint, the shape in current model is torch.Size([1, 4, 64]).\n\tsize mismatch for regions.0.dots.w_ih: copying a param with shape torch.Size([1, 8, 211, 384]) from checkpoint, the shape in current model is torch.Size([1, 4, 115, 192]).\n\tsize mismatch for regions.0.dots.b_ih: copying a param with shape torch.Size([1, 8, 384]) from checkpoint, the shape in current model is torch.Size([1, 4, 192]).\n\tsize mismatch for regions.0.dots.w_hh: copying a param with shape torch.Size([1, 8, 128, 384]) from checkpoint, the shape in current model is torch.Size([1, 4, 64, 192]).\n\tsize mismatch for regions.0.dots.p_out: copying a param with shape torch.Size([1, 8, 128, 128]) from checkpoint, the shape in current model is torch.Size([1, 4, 64, 64]).\n\tsize mismatch for regions.0.dots.c_w: copying a param with shape torch.Size([1, 8, 128]) from checkpoint, the shape in current model is torch.Size([1, 4, 64]).\n\tsize mismatch for regions.0.dots.c_b: copying a param with shape torch.Size([1, 8]) from checkpoint, the shape in current model is torch.Size([1, 4]).\n\tsize mismatch for regions.0.dots.g_w: copying a param with shape torch.Size([1, 8, 128]) from checkpoint, the shape in current model is torch.Size([1, 4, 64]).\n\tsize mismatch for regions.0.dots.g_b: copying a param with shape torch.Size([1, 8]) from checkpoint, the shape in current model is torch.Size([1, 4]).\n\tsize mismatch for regions.0.w_k.weight: copying a param with shape torch.Size([32, 128]) from checkpoint, the shape in current model is torch.Size([16, 64]).\n\tsize mismatch for regions.0.w_v.weight: copying a param with shape torch.Size([64, 128]) from checkpoint, the shape in current model is torch.Size([32, 64]).\n\tsize mismatch for regions.0.rel_emb.weight: copying a param with shape torch.Size([32, 32]) from checkpoint, the shape in current model is torch.Size([32, 16]).\n\tsize mismatch for region_gate.0.weight: copying a param with shape torch.Size([1, 128]) from checkpoint, the shape in current model is torch.Size([1, 64])."
+   "error": "KeyError: None"
   },
   "message_influence": {
-   "error": "RuntimeError: Error(s) in loading state_dict for IECNN:\n\tsize mismatch for embed.weight: copying a param with shape torch.Size([4096, 128]) from checkpoint, the shape in current model is torch.Size([4096, 64]).\n\tsize mismatch for regions.0.dots.q: copying a param with shape torch.Size([1, 8, 32]) from checkpoint, the shape in current model is torch.Size([1, 4, 16]).\n\tsize mismatch for regions.0.dots.s0: copying a param with shape torch.Size([1, 8, 128]) from checkpoint, the shape in current model is torch.Size([1, 4, 64]).\n\tsize mismatch for regions.0.dots.w_ih: copying a param with shape torch.Size([1, 8, 211, 384]) from checkpoint, the shape in current model is torch.Size([1, 4, 115, 192]).\n\tsize mismatch for regions.0.dots.b_ih: copying a param with shape torch.Size([1, 8, 384]) from checkpoint, the shape in current model is torch.Size([1, 4, 192]).\n\tsize mismatch for regions.0.dots.w_hh: copying a param with shape torch.Size([1, 8, 128, 384]) from checkpoint, the shape in current model is torch.Size([1, 4, 64, 192]).\n\tsize mismatch for regions.0.dots.p_out: copying a param with shape torch.Size([1, 8, 128, 128]) from checkpoint, the shape in current model is torch.Size([1, 4, 64, 64]).\n\tsize mismatch for regions.0.dots.c_w: copying a param with shape torch.Size([1, 8, 128]) from checkpoint, the shape in current model is torch.Size([1, 4, 64]).\n\tsize mismatch for regions.0.dots.c_b: copying a param with shape torch.Size([1, 8]) from checkpoint, the shape in current model is torch.Size([1, 4]).\n\tsize mismatch for regions.0.dots.g_w: copying a param with shape torch.Size([1, 8, 128]) from checkpoint, the shape in current model is torch.Size([1, 4, 64]).\n\tsize mismatch for regions.0.dots.g_b: copying a param with shape torch.Size([1, 8]) from checkpoint, the shape in current model is torch.Size([1, 4]).\n\tsize mismatch for regions.0.w_k.weight: copying a param with shape torch.Size([32, 128]) from checkpoint, the shape in current model is torch.Size([16, 64]).\n\tsize mismatch for regions.0.w_v.weight: copying a param with shape torch.Size([64, 128]) from checkpoint, the shape in current model is torch.Size([32, 64]).\n\tsize mismatch for regions.0.rel_emb.weight: copying a param with shape torch.Size([32, 32]) from checkpoint, the shape in current model is torch.Size([32, 16]).\n\tsize mismatch for region_gate.0.weight: copying a param with shape torch.Size([1, 128]) from checkpoint, the shape in current model is torch.Size([1, 64])."
+   "skipped": true,
+   "reason": "use_messages is off in this run's config"
   },
   "mode_gap": {
-   "error": "RuntimeError: Error(s) in loading state_dict for IECNN:\n\tsize mismatch for embed.weight: copying a param with shape torch.Size([4096, 128]) from checkpoint, the shape in current model is torch.Size([4096, 64]).\n\tsize mismatch for regions.0.dots.q: copying a param with shape torch.Size([1, 8, 32]) from checkpoint, the shape in current model is torch.Size([1, 4, 16]).\n\tsize mismatch for regions.0.dots.s0: copying a param with shape torch.Size([1, 8, 128]) from checkpoint, the shape in current model is torch.Size([1, 4, 64]).\n\tsize mismatch for regions.0.dots.w_ih: copying a param with shape torch.Size([1, 8, 211, 384]) from checkpoint, the shape in current model is torch.Size([1, 4, 115, 192]).\n\tsize mismatch for regions.0.dots.b_ih: copying a param with shape torch.Size([1, 8, 384]) from checkpoint, the shape in current model is torch.Size([1, 4, 192]).\n\tsize mismatch for regions.0.dots.w_hh: copying a param with shape torch.Size([1, 8, 128, 384]) from checkpoint, the shape in current model is torch.Size([1, 4, 64, 192]).\n\tsize mismatch for regions.0.dots.p_out: copying a param with shape torch.Size([1, 8, 128, 128]) from checkpoint, the shape in current model is torch.Size([1, 4, 64, 64]).\n\tsize mismatch for regions.0.dots.c_w: copying a param with shape torch.Size([1, 8, 128]) from checkpoint, the shape in current model is torch.Size([1, 4, 64]).\n\tsize mismatch for regions.0.dots.c_b: copying a param with shape torch.Size([1, 8]) from checkpoint, the shape in current model is torch.Size([1, 4]).\n\tsize mismatch for regions.0.dots.g_w: copying a param with shape torch.Size([1, 8, 128]) from checkpoint, the shape in current model is torch.Size([1, 4, 64]).\n\tsize mismatch for regions.0.dots.g_b: copying a param with shape torch.Size([1, 8]) from checkpoint, the shape in current model is torch.Size([1, 4]).\n\tsize mismatch for regions.0.w_k.weight: copying a param with shape torch.Size([32, 128]) from checkpoint, the shape in current model is torch.Size([16, 64]).\n\tsize mismatch for regions.0.w_v.weight: copying a param with shape torch.Size([64, 128]) from checkpoint, the shape in current model is torch.Size([32, 64]).\n\tsize mismatch for regions.0.rel_emb.weight: copying a param with shape torch.Size([32, 32]) from checkpoint, the shape in current model is torch.Size([32, 16]).\n\tsize mismatch for region_gate.0.weight: copying a param with shape torch.Size([1, 128]) from checkpoint, the shape in current model is torch.Size([1, 64])."
+   "soft_bpc": 2.176835373319761,
+   "hard_bpc": 2.175434504424247,
+   "mode_gap": -0.0014008688955140514,
+   "ckpt_dir": "checkpoints/e1_weights_passes_vocab3_warmstart_seed0",
+   "best_step": 3120,
+   "n_chars": 32000,
+   "note": "hard top-m bpc minus soft bpc on the same text"
   },
   "region_weights": {
-   "error": "RuntimeError: Error(s) in loading state_dict for IECNN:\n\tsize mismatch for embed.weight: copying a param with shape torch.Size([4096, 128]) from checkpoint, the shape in current model is torch.Size([4096, 64]).\n\tsize mismatch for regions.0.dots.q: copying a param with shape torch.Size([1, 8, 32]) from checkpoint, the shape in current model is torch.Size([1, 4, 16]).\n\tsize mismatch for regions.0.dots.s0: copying a param with shape torch.Size([1, 8, 128]) from checkpoint, the shape in current model is torch.Size([1, 4, 64]).\n\tsize mismatch for regions.0.dots.w_ih: copying a param with shape torch.Size([1, 8, 211, 384]) from checkpoint, the shape in current model is torch.Size([1, 4, 115, 192]).\n\tsize mismatch for regions.0.dots.b_ih: copying a param with shape torch.Size([1, 8, 384]) from checkpoint, the shape in current model is torch.Size([1, 4, 192]).\n\tsize mismatch for regions.0.dots.w_hh: copying a param with shape torch.Size([1, 8, 128, 384]) from checkpoint, the shape in current model is torch.Size([1, 4, 64, 192]).\n\tsize mismatch for regions.0.dots.p_out: copying a param with shape torch.Size([1, 8, 128, 128]) from checkpoint, the shape in current model is torch.Size([1, 4, 64, 64]).\n\tsize mismatch for regions.0.dots.c_w: copying a param with shape torch.Size([1, 8, 128]) from checkpoint, the shape in current model is torch.Size([1, 4, 64]).\n\tsize mismatch for regions.0.dots.c_b: copying a param with shape torch.Size([1, 8]) from checkpoint, the shape in current model is torch.Size([1, 4]).\n\tsize mismatch for regions.0.dots.g_w: copying a param with shape torch.Size([1, 8, 128]) from checkpoint, the shape in current model is torch.Size([1, 4, 64]).\n\tsize mismatch for regions.0.dots.g_b: copying a param with shape torch.Size([1, 8]) from checkpoint, the shape in current model is torch.Size([1, 4]).\n\tsize mismatch for regions.0.w_k.weight: copying a param with shape torch.Size([32, 128]) from checkpoint, the shape in current model is torch.Size([16, 64]).\n\tsize mismatch for regions.0.w_v.weight: copying a param with shape torch.Size([64, 128]) from checkpoint, the shape in current model is torch.Size([32, 64]).\n\tsize mismatch for regions.0.rel_emb.weight: copying a param with shape torch.Size([32, 32]) from checkpoint, the shape in current model is torch.Size([32, 16]).\n\tsize mismatch for region_gate.0.weight: copying a param with shape torch.Size([1, 128]) from checkpoint, the shape in current model is torch.Size([1, 64])."
+   "mean_omega_by_token_type": {
+    "capitalized": [
+     1.0
+    ],
+    "digit": [
+     1.0
+    ],
+    "long_word": [
+     1.0
+    ],
+    "punct": [
+     1.0
+    ],
+    "short_word": [
+     1.0
+    ],
+    "whitespace": [
+     1.0
+    ],
+    "word": [
+     1.0
+    ]
+   },
+   "counts_by_token_type": {
+    "whitespace": 175,
+    "punct": 207,
+    "capitalized": 294,
+    "short_word": 1258,
+    "word": 560,
+    "long_word": 8,
+    "digit": 4
+   },
+   "dominant_region_by_token_type": {
+    "whitespace": "0",
+    "punct": "0",
+    "capitalized": "0",
+    "short_word": "0",
+    "word": "0",
+    "long_word": "0",
+    "digit": "0"
+   },
+   "n_regions": 1,
+   "n_positions": 2506,
+   "note": "omega = cross-region weights (D5); row order = region 1..R",
+   "ckpt_dir": "checkpoints/e1_weights_passes_vocab3_warmstart_seed0",
+   "best_step": 3120
   },
   "win_map": {
-   "error": "RuntimeError: Error(s) in loading state_dict for IECNN:\n\tsize mismatch for embed.weight: copying a param with shape torch.Size([4096, 128]) from checkpoint, the shape in current model is torch.Size([4096, 64]).\n\tsize mismatch for regions.0.dots.q: copying a param with shape torch.Size([1, 8, 32]) from checkpoint, the shape in current model is torch.Size([1, 4, 16]).\n\tsize mismatch for regions.0.dots.s0: copying a param with shape torch.Size([1, 8, 128]) from checkpoint, the shape in current model is torch.Size([1, 4, 64]).\n\tsize mismatch for regions.0.dots.w_ih: copying a param with shape torch.Size([1, 8, 211, 384]) from checkpoint, the shape in current model is torch.Size([1, 4, 115, 192]).\n\tsize mismatch for regions.0.dots.b_ih: copying a param with shape torch.Size([1, 8, 384]) from checkpoint, the shape in current model is torch.Size([1, 4, 192]).\n\tsize mismatch for regions.0.dots.w_hh: copying a param with shape torch.Size([1, 8, 128, 384]) from checkpoint, the shape in current model is torch.Size([1, 4, 64, 192]).\n\tsize mismatch for regions.0.dots.p_out: copying a param with shape torch.Size([1, 8, 128, 128]) from checkpoint, the shape in current model is torch.Size([1, 4, 64, 64]).\n\tsize mismatch for regions.0.dots.c_w: copying a param with shape torch.Size([1, 8, 128]) from checkpoint, the shape in current model is torch.Size([1, 4, 64]).\n\tsize mismatch for regions.0.dots.c_b: copying a param with shape torch.Size([1, 8]) from checkpoint, the shape in current model is torch.Size([1, 4]).\n\tsize mismatch for regions.0.dots.g_w: copying a param with shape torch.Size([1, 8, 128]) from checkpoint, the shape in current model is torch.Size([1, 4, 64]).\n\tsize mismatch for regions.0.dots.g_b: copying a param with shape torch.Size([1, 8]) from checkpoint, the shape in current model is torch.Size([1, 4]).\n\tsize mismatch for regions.0.w_k.weight: copying a param with shape torch.Size([32, 128]) from checkpoint, the shape in current model is torch.Size([16, 64]).\n\tsize mismatch for regions.0.w_v.weight: copying a param with shape torch.Size([64, 128]) from checkpoint, the shape in current model is torch.Size([32, 64]).\n\tsize mismatch for regions.0.rel_emb.weight: copying a param with shape torch.Size([32, 32]) from checkpoint, the shape in current model is torch.Size([32, 16]).\n\tsize mismatch for region_gate.0.weight: copying a param with shape torch.Size([1, 128]) from checkpoint, the shape in current model is torch.Size([1, 64])."
+   "error": "KeyError: None"
   }
  }
 }

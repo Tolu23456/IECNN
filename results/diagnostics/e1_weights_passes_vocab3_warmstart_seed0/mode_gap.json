@@ -1,0 +1,9 @@
+{
+ "soft_bpc": 2.176835373319761,
+ "hard_bpc": 2.175434504424247,
+ "mode_gap": -0.0014008688955140514,
+ "ckpt_dir": "checkpoints/e1_weights_passes_vocab3_warmstart_seed0",
+ "best_step": 3120,
+ "n_chars": 32000,
+ "note": "hard top-m bpc minus soft bpc on the same text"
+}

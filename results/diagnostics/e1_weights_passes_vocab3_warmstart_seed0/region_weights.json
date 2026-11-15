@@ -1,0 +1,48 @@
+{
+ "mean_omega_by_token_type": {
+  "capitalized": [
+   1.0
+  ],
+  "digit": [
+   1.0
+  ],
+  "long_word": [
+   1.0
+  ],
+  "punct": [
+   1.0
+  ],
+  "short_word": [
+   1.0
+  ],
+  "whitespace": [
+   1.0
+  ],
+  "word": [
+   1.0
+  ]
+ },
+ "counts_by_token_type": {
+  "whitespace": 175,
+  "punct": 207,
+  "capitalized": 294,
+  "short_word": 1258,
+  "word": 560,
+  "long_word": 8,
+  "digit": 4
+ },
+ "dominant_region_by_token_type": {
+  "whitespace": "0",
+  "punct": "0",
+  "capitalized": "0",
+  "short_word": "0",
+  "word": "0",
+  "long_word": "0",
+  "digit": "0"
+ },
+ "n_regions": 1,
+ "n_positions": 2506,
+ "note": "omega = cross-region weights (D5); row order = region 1..R",
+ "ckpt_dir": "checkpoints/e1_weights_passes_vocab3_warmstart_seed0",
+ "best_step": 3120
+}
