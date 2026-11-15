@@ -165,6 +165,13 @@ def train_one(config: dict, seed: int, out_dir: Path, max_steps: int | None = No
         device = "cuda"
     else:
         device = "cpu"
+    # training.cpu_threads (CPU lanes, 2026-11-16 bench): torch defaulted to
+    # ONE thread on the Colab CPU VM and the bench's threads=2 variant was
+    # 17% faster (23.8 vs 27.8 s/step); Actions runners have 4 vCPU. 0 =
+    # leave torch's default untouched. GPU runs ignore it.
+    cpu_threads = int(tcfg.get("cpu_threads", 0) or 0)
+    if cpu_threads > 0 and device == "cpu":
+        torch.set_num_threads(cpu_threads)
     model.to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=peak_lr, betas=betas,
                             weight_decay=weight_decay)

@@ -1,0 +1,10 @@
+# CPU-lane overlay (2026-11-16): the GPU speed pack knobs are CUDA-only and
+# hard-fail on CPU runners (Actions: "training.precision 'fp16' needs a CUDA
+# device" — E7 dispatch 2026-11-16). The bench on the Colab CPU VM
+# (DECISIONS.md) says bf16 autocast is ~4x SLOWER on CPU for this op mix, so
+# CPU lanes stay fp32 with the fused core off. Pair with training.cpu_threads
+# when the runner has >1 vCPU.
+model: {}
+training:
+  precision: fp32
+  compile_consensus: false
