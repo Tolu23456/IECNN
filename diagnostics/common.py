@@ -187,7 +187,10 @@ def collect(model, ubm, text, *, region="last", passes="last", need=(),
         "n_positions": n_counted,
         "n_chars": chars,
         "region": region,
-        "pass_index": pidx[0] if isinstance(sel, list) else None,
+        # pass_index: numeric even for passes="last" — ablation/calibration/
+        # error_correlation/win_map index per_pass[pass_index]; None crashed
+        # them with KeyError None (8th-try CI diagnosis, 2026-11-15)
+        "pass_index": pidx[0] if isinstance(sel, list) else len(pp) - 1,
     }
     if "final" in need:
         res["final"] = torch.cat(final_a)[:n_counted]
