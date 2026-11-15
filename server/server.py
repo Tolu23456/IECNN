@@ -486,6 +486,63 @@ def consensus_audit(positions):
             "per_position": per_position}
 
 
+def api_viz_build(body: dict):
+    """Build a viz export from LOCAL weights (Tolu, 2026-11-15).
+
+    viz.yml on CI can only consume GitHub checkpoint artifacts; this endpoint
+    reads any checkpoint directory on the machine the server runs on — e.g.
+    a checkpoint downloaded from a Colab session. Needs torch locally; on a
+    torch-less box it says so instead of pretending. The built JSON lands in
+    results/viz/ exactly like a CI-built one, so /api/viz/<name> serves it
+    and the UI list picks it up automatically.
+    """
+    import importlib.util
+    if importlib.util.find_spec("torch") is None:
+        return {"status": 400,
+                "error": "torch is not installed on this machine — the local "
+                         "build path needs it. Either dispatch the viz "
+                         "workflow on CI (needs a GitHub artifact) or run "
+                         "the export on a torch box (e.g. the Colab VM)."}
+    ck = str(body.get("ckpt_dir") or "").strip()
+    if not ck:
+        return {"status": 400, "error": "ckpt_dir required (a checkpoint "
+                                        "directory containing checkpoint.pt)"}
+    root = ROOT.resolve()
+    p = Path(ck).expanduser()
+    if not p.is_absolute():
+        p = root / p
+    p = p.resolve()
+    if not (p / "checkpoint.pt").is_file():
+        return {"status": 404, "error": f"no checkpoint.pt under {p}"}
+    name = str(body.get("name") or p.name).strip()
+    if not re.fullmatch(r"[\w.\-]+", name):
+        return {"status": 400, "error": "name must match [\\w.-]+"}
+    out = VIZ / f"{name}.json"
+    if out.exists() and not body.get("overwrite"):
+        return {"status": 409, "error": f"viz '{name}' already exists — pass "
+                                        "overwrite: true to rebuild it"}
+    cmd = [sys.executable, str(root / "scripts" / "export_viz.py"),
+           "--ckpt-dir", str(p), "--out", str(out)]
+    vocab = str(body.get("vocab") or "").strip()
+    if vocab:
+        cmd += ["--vocab", vocab]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=900,
+                           cwd=str(root))
+    except subprocess.TimeoutExpired:
+        return {"status": 500, "error": "export timed out after 900 s"}
+    if r.returncode != 0:
+        return {"status": 500, "error": "export_viz failed",
+                "stderr": (r.stderr or r.stdout or "")[-1000:]}
+    d = _read_json(out)
+    if d is None:
+        return {"status": 500, "error": f"export wrote an unreadable {out}"}
+    sample = d.get("sample") if isinstance(d.get("sample"), dict) else {}
+    if isinstance(sample.get("positions"), list):
+        d["audit"] = consensus_audit(sample["positions"])
+    return {"status": 200, "name": name, "path": str(out), "export": d}
+
+
 def api_viz(name: str):
     p = VIZ / f"{name}.json"
     if not p.exists() or not p.is_file():
@@ -1427,6 +1484,23 @@ class Handler(BaseHTTPRequestHandler):
                 # "status" here is an HTTP code only on error payloads
                 code = out["status"] if isinstance(out.get("status"), int) else 200
                 return self._send_json(code, out)
+            if path == "/api/viz/build":
+                try:
+                    n = int(self.headers.get("Content-Length") or 0)
+                except ValueError:
+                    n = 0
+                if n > 2000:
+                    return self._send_json(400, {"error": "body too large"})
+                raw = self.rfile.read(n) if n else b""
+                try:
+                    body = json.loads(raw) if raw else {}
+                except Exception:                            # noqa: BLE001
+                    return self._send_json(400,
+                                           {"error": "body is not valid JSON"})
+                if not isinstance(body, dict):
+                    return self._send_json(400, {"error": "body must be a JSON object"})
+                out = api_viz_build(body)
+                return self._send_json(out.get("status", 200), out)
             return self._send_json(404, {"error": f"unknown endpoint {path}"})
         except Exception as e:                                   # noqa: BLE001
             return self._send_json(500, {"error": repr(e)})

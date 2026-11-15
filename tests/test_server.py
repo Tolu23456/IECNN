@@ -224,6 +224,42 @@ def test_viz_export_structure_for_inspector_page():
     assert len(v["weight_entropy_over_positions"]) in (len(pos), len(pos) + 1)
 
 
+# ------------------------------------------------- /api/viz/build (POST) ---
+def _post(base: str, path: str, body: dict):
+    import urllib.request
+    req = urllib.request.Request(
+        base + path, data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return r.status, json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read())
+
+
+def test_viz_build_validates_local_checkpoint():
+    """/api/viz/build reads LOCAL weights; validation must be clean without
+    needing a real checkpoint (the happy path = a normal export_viz run)."""
+    srv, base = _start()
+    try:
+        code, out = _post(base, "/api/viz/build", {})
+        assert code == 400 and "ckpt_dir" in out["error"]
+        code, out = _post(base, "/api/viz/build",
+                          {"ckpt_dir": "no/such/dir"})
+        assert code == 404 and "checkpoint.pt" in out["error"]
+        code, out = _post(base, "/api/viz/build",
+                          {"ckpt_dir": "checkpoints", "name": "bad name!"})
+        assert code == 400 and "name" in out["error"]
+        # torch may or may not exist where the server runs; if absent the
+        # endpoint must say so instead of faking success
+        if importlib.util.find_spec("torch") is None:
+            code, out = _post(base, "/api/viz/build",
+                              {"ckpt_dir": "checkpoints/nothing_here"})
+            assert code == 400 and "torch" in out["error"]
+    finally:
+        srv.shutdown()
+
+
 # ------------------------------------------------------------ /api/arch ----
 def test_arch_resolves_config_inheritance_chain():
     srv, base = _start()
