@@ -17,18 +17,31 @@ from models.dot import DotPopulation
 from models.memory import gather_windows
 
 _COMPILED_CORE = None
+_COMPILE_MODE = None
 
 
-def _compiled_consensus_core(*args):
+def _compiled_consensus_core(*args, mode=None):
     """Lazily compiled consensus_core (torch.compile/inductor). The whole
     per-pass [., N, V] chain — exp, leave-one-out, JS identity, scores,
     trust, floor-softmax, error features, matmul pooling — as one graph so
     inductor can fuse the bandwidth-bound elementwise chain. dynamic=False:
-    shapes are fixed per config; recompiles only on (rare) shape changes."""
-    global _COMPILED_CORE
-    if _COMPILED_CORE is None:
+    shapes are fixed per config; recompiles only on (rare) shape changes.
+
+    mode (GPU speed pack, 2026-11-15): None = default inductor; "cuda_graphs"
+    wraps the compiled core in torch.cuda.graphs-style reduce-overhead
+    (kills kernel-launch overhead — the suspected bottleneck on small-SM
+    GPUs like the T4); "max-autotune-no-cudnn" = inductor autotuning.
+    """
+    global _COMPILED_CORE, _COMPILE_MODE
+    if _COMPILED_CORE is None or _COMPILE_MODE != mode:
+        kw = {}
+        if mode == "cuda_graphs":
+            kw["mode"] = "reduce-overhead"
+        elif mode:
+            kw["mode"] = mode
         _COMPILED_CORE = torch.compile(consensus.consensus_core,
-                                       dynamic=False, fullgraph=False)
+                                       dynamic=False, fullgraph=False, **kw)
+        _COMPILE_MODE = mode
     return _COMPILED_CORE(*args)
 
 
@@ -55,6 +68,11 @@ class Region(nn.Module):
         # — eager stays the bit-for-bit reference path.
         self.compile_consensus = bool(config.get("training", {})
                                       .get("compile_consensus", False))
+        # GPU speed pack (2026-11-15): torch.compile mode for the fused core
+        # ("cuda_graphs" -> reduce-overhead, i.e. CUDA graphs, for
+        # launch-bound small-SM GPUs; any other string passes to inductor).
+        self.compile_mode = str(config.get("training", {})
+                                .get("compile_mode", "")) or None
         self.hard_top_m = int(m.get("hard_top_m", 4))
         self.dynamic_query = bool(m.get("dynamic_query", False))
         self.share_pass_params = bool(m.get("share_pass_params", True))
@@ -190,7 +208,8 @@ class Region(nn.Module):
                     log_pi_c, gamma_c, trust_term_c, trust_in,
                     self.alpha, self.beta, v_scale_t, v_out_t,
                     self.rho, tau_t, floor_t, self.n_dots,
-                    pi if self.verifier is not None else None)
+                    pi if self.verifier is not None else None,
+                    mode=self.compile_mode)
                 return trust_c, w_c, log_b_c, v_out, err_next
             scores, loo, js = consensus.compute_scores_fast(
                 pi, log_pi_c, gamma_c, trust_term_c, self.alpha, self.beta,
