@@ -1,0 +1,38 @@
+# Rung E6-vocab3 warmstart (Tolu, 2026-11-15: "push bpc lower").
+#
+# Oracle-supervised consensus (E6: verifier head + per-dot oracle loss +
+# diversity counter-weight) initialized from the best vocab3 GPU checkpoint
+# (full-val bpc 1.85351 @ step 12240). The viz audit (DECISIONS.md
+# 2026-11-15) is the motivation: pooled top-1 11.0% vs oracle best-dot
+# 32.9% / top-5 55.7%, 114/255 positions OUTVOTED — the dots know ~3x more
+# than the pool admits, and E6's verifier + per-dot teacher (w~1e-4 muted
+# dots get their own gradient line) are the designed fixes.
+#
+# init_from: weights transfer strict=False (verifier heads fresh); opt,
+# batcher, step, best_val all fresh so patience/LR act like a new run.
+# Speed recipe knobs are opt-in for the GPU (CPU path stays bit-identical):
+# fp16 autocast + fused autotuned consensus core (50x-pack, DECISIONS.md).
+base: e6_consensus_v2.yaml
+name: e6_consensus_v2_vocab3_warmstart
+data:
+  corpus: big
+ubm:
+  vocab_file: UBM/vocab_v3.json
+consensus:
+  tau_warmup: 480
+training:
+  batch_size: 8
+  lr_schedule: constant
+  warmup_steps: 500
+  steps: 50000                 # ceiling only; patience governs the stop
+  eval_chars: 100000
+  eval_every: 120
+  checkpoint_every: 120
+  early_stop:
+    patience_evals: 6
+    min_improvement: 0.005
+    wall_hours: 0.0            # NO wall cap: train to a true plateau
+  init_from: checkpoints/vocab3_gpu_seed0_checkpoint.pt
+  precision: fp16              # GPU speed pack (T4 fp16 tensor cores)
+  compile_consensus: true
+  compile_mode: max-autotune-no-cudnn

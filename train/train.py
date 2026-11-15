@@ -212,6 +212,29 @@ def train_one(config: dict, seed: int, out_dir: Path, max_steps: int | None = No
         train_seconds = float(state.get("train_seconds", 0.0))
         since_best_evals = int(state.get("since_best_evals", 0))
         print(f"resumed from {ckpt_path} at step {start_step}")
+    elif str(tcfg.get("init_from", "")):
+        # Warmstart with an architecture change (E6 verifier heads added on
+        # top of an E1 checkpoint, Tolu 2026-11-15 "push bpc lower"): load
+        # the weights that exist, leave the new modules freshly initialized,
+        # and keep EVERYTHING else fresh (optimizer, batcher, step 0,
+        # best_val=inf) so patience/LR behave like a new run. Unlike resume,
+        # this is not reversible to the old run's training state.
+        src = Path(str(tcfg["init_from"]))
+        state = torch.load(src, map_location="cpu", weights_only=False)
+        if str(state.get("vocab_sha256", "")) and \
+                str(state.get("vocab_sha256", "")) != vocab_sha:
+            raise RuntimeError(
+                f"VOCAB MISMATCH, refusing init_from: checkpoint {src} was "
+                f"trained with vocab sha {str(state.get('vocab_sha256', ''))[:16]}…")
+        missing, unexpected = model.load_state_dict(state["model"],
+                                                    strict=False)
+        print(f"init_from {src}: {len(missing)} fresh param tensors "
+              f"(e.g. {missing[:3]}), {len(unexpected)} unexpected, "
+              f"optimizer/batcher/step all fresh", flush=True)
+        if unexpected:
+            raise RuntimeError(
+                f"init_from checkpoint has {len(unexpected)} tensors that do "
+                f"not exist in this model: {unexpected[:5]}")
 
     csv_path = Path(tcfg.get("csv_dir", "results")) / f"train_{name}_seed{seed}.csv"
     csv_path.parent.mkdir(parents=True, exist_ok=True)
