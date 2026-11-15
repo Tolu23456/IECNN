@@ -1,0 +1,47 @@
+# Rung E7 "scale-up" (Tolu, 2026-11-16: "reduce bpc as much as possible").
+#
+# The single biggest bpc lever available: capacity. The 1.7M-param committee
+# (d=128) plateaus at 1.85351 full-val bpc; the published TinyStories ladder
+# shows grammar/coherence quality climbing sharply from 1M -> 8M -> 28M at
+# the SAME architecture, so width is where the next bpc comes from.
+#
+# E7 = E6 consensus-v2 (verifier + per-dot oracle + diversity) at 2x width:
+#   d 128->256, d_s 128->256, d_v 64->128, d_q 32->48. Everything else
+#   IDENTICAL to E6-vocab3-warmstart (same vocab 4096, 8 dots, 3 passes,
+#   4 regions, batch 8, lambdas) so the bpc delta attributes cleanly to
+#   capacity. Fresh training (no init_from): dim changes make every weight
+#   shape-incompatible with the 1.85351 checkpoint.
+#
+# Memory note: the dominant activation block [B,T,N,V] is independent of d,
+# so batch 8 stays in the same retention class as the E6 run. fp16 +
+# fused consensus core are opt-in for the T4 (CPU/Actions overrides them).
+base: e6_consensus_v2.yaml
+name: e7_scale_up
+data:
+  corpus: big
+ubm:
+  vocab_file: UBM/vocab_v3.json
+model:
+  d: 256
+  d_q: 48
+  d_v: 128
+  d_s: 256
+consensus:
+  tau_warmup: 480
+training:
+  batch_size: 8
+  lr: 8.0e-4                 # slightly under the 1e-3 used at d=128: wider
+                             # models want a touch less lr at the same batch
+  lr_schedule: constant
+  warmup_steps: 500
+  steps: 50000
+  eval_chars: 100000
+  eval_every: 120
+  checkpoint_every: 120
+  early_stop:
+    patience_evals: 6
+    min_improvement: 0.005
+    wall_hours: 0.0
+  precision: fp16             # GPU speed pack; CPU paths override to fp32
+  compile_consensus: true
+  compile_mode: max-autotune-no-cudnn
