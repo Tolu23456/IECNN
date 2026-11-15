@@ -30,6 +30,10 @@ import argparse
 ap = argparse.ArgumentParser()
 ap.add_argument("--ckpt", default="checkpoints/vocab3_gpu_seed0_checkpoint.pt")
 ap.add_argument("--config", default="configs/e6_consensus_v2_vocab3_warmstart.yaml")
+ap.add_argument("--overlay", nargs="*", default=["overlay_cpu_fp32.yaml"],
+                help="overlay configs applied on top of --config. Default: "
+                     "the CPU recipe (the GPU compile mode hard-fails on "
+                     "CPU). Pass --overlay with no values for none.")
 ap.add_argument("--tau", type=float, default=0.894)
 ap.add_argument("--windows", type=int, default=200)
 ap.add_argument("--context", type=int, default=256)
@@ -37,7 +41,8 @@ ap.add_argument("--n-random", type=int, default=16)
 ap.add_argument("--out", default="results/selective_topr.json")
 args = ap.parse_args()
 
-cfg = load_config(args.config)
+overlays = [o for o in (args.overlay or []) if o and o != "none"]
+cfg = load_config(args.config, *overlays)
 ubm = UBM.load(cfg["ubm"]["vocab_file"])
 V = len(ubm.bases)
 ck = torch.load(args.ckpt, map_location="cpu", weights_only=False)
@@ -131,6 +136,11 @@ def auroc(pos_sum, neg_sum, npos, nneg):
     if npos == 0 or nneg == 0:
         return None
     return pos_sum / npos - neg_sum / nneg
+
+# the random control is accumulated in rnd_hits_sum (not hits) — fold it in
+# before reporting (first run of the script reported it as all zeros)
+for r in R:
+    hits["random"][r] = rnd_hits_sum[r]
 
 verifier_sep = [auroc(v_correct[k], v_wrong[k], c_correct[k], c_wrong[k])
                 for k in range(N)]
