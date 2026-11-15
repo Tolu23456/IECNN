@@ -1,10 +1,14 @@
 # CPU-lane overlay (2026-11-16): the GPU speed pack knobs are CUDA-only and
 # hard-fail on CPU runners (Actions: "training.precision 'fp16' needs a CUDA
-# device" — E7 dispatch 2026-11-16). The bench on the Colab CPU VM
-# (DECISIONS.md) says bf16 autocast is ~4x SLOWER on CPU for this op mix, so
-# CPU lanes stay fp32 with the fused core off. Pair with training.cpu_threads
-# when the runner has >1 vCPU.
+# device" — E7 dispatch 2026-11-16). CPU bench (DECISIONS.md, Colab CPU VM,
+# E6 model, batch 8/256): fp32 27.8 s/step, fp32+threads2 23.8, bf16 autocast
+# 104 (4x SLOWER — bf16 is a CPU dead end for this op mix), fp32+compile
+# (inductor default) 13.6 — 2x faster than plain fp32, same fusion win as
+# the T4 speed pack. So the CPU recipe = fp32 + compiled consensus core +
+# explicit threads.
 model: {}
 training:
   precision: fp32
-  compile_consensus: false
+  compile_consensus: true
+  compile_mode: default       # the GPU modes are unrecognized on CPU
+  cpu_threads: 2              # Actions = 4 vCPU, Colab CPU VM = 2 vCPU
