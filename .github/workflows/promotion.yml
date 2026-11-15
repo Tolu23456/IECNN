@@ -82,7 +82,6 @@ jobs:
             -o /tmp/artifact.zip
 
       - name: Prepare corpus
-        if: ${{ !hashFiles('data/train.txt') }}
         env:
           CONFIG: ${{ github.event.inputs.corpus_config }}
         run: |

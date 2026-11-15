@@ -75,7 +75,6 @@ jobs:
       # ---- corpus: rebuild only when missing; corpus_config MUST carry
       # data.corpus: big (the *_pilot.yaml files do).
       - name: Prepare corpus
-        if: ${{ !hashFiles('data/val.txt') }}
         env:
           CONFIG: ${{ github.event.inputs.corpus_config }}
         run: |
