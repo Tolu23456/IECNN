@@ -1,0 +1,19 @@
+# Rung E8 "free dots" (Tolu, 2026-11-16: "instead of encouraging
+# specialization just let the dots dot what they want and see if
+# specialization emerges or not").
+#
+# = e7_scale_up (2x width capacity rung) with the specialization pressure
+# REMOVED: lambda_c = 0 (no decorrelation/diversity counter-weight), ramp
+# 0. Everything else identical — lambda_o (per-dot oracle CE) and lambda_v
+# (verifier trust head) stay: they improve/repair the model, they do not
+# push dots apart. If the committee homogenizes, the dot audits will say
+# so (overlap up, per-dot accuracy spread collapses) and that is a result,
+# not a failure.
+#
+# Selective-activation experiment dropped per Tolu (no verifier top-r
+# re-measures scheduled). Memory untouched until E7/E8 land.
+base: e7_scale_up.yaml
+name: e8_free_dots
+training:
+  lambda_c: 0.0
+  lambda_c_ramp_steps: 0
