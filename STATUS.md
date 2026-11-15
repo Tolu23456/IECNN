@@ -622,3 +622,11 @@ honest end-to-end verdict is now in flight: ab_end_to_end_5x pairs ORIGINAL
 fp32 baseline code (no overlay) vs the full optimized stack (compiled
 consensus + threads 4 + opt 6/7) in ONE process. Ratio >= 5.0 = goal met,
 judge invoked immediately on the committed JSON.
+
+## Colab T4 GPU run (2026-11-14/15) — vocab3 warmstart continuation, COMPLETE
+- Session: free-tier Colab T4 via `google-colab-cli` (headless, Tolu's account), torch 2.14.1+cu130.
+- Run: resume of `e1_weights_passes_vocab3_warmstart` from pristine artifact (step 3120, best_val 2.12187) → **best full-val bpc 1.85351 @ step 12240** (tau 0.894), stopped on patience (12 evals) at 13681. Previous anchor: 2.27183 @1680.
+- Speed measured: 10,560 steps in 3,872 s pure training = **0.37 s/step** (incl. 100k-char evals every 120: 0.49 s/step wall). ~22x vs original CPU baseline, ~6x vs optimized CPU stack.
+- Checkpoint: `checkpoints/vocab3_gpu_seed0_checkpoint.pt` (local, 27.9 MB, best_state @12240; also colab_backup). NOT committed to git.
+- Sample generation (fixed sampler, seed 0): coherent sentence structure + corpus-mix (KJV verses); some invented words — expected at 1.85 bpc.
+- Vocab fingerprint 067fe1c2… matches vocab_v3; mode gap 0.00024.
