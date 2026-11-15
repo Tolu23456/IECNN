@@ -45,9 +45,12 @@ def load_run(ckpt_path, config_path=None, vocab=None,
         # --config-fallback here); json.loads would die on its first char.
         # Route by extension (2026-11-15: this YAML-as-JSON bug was latent
         # behind the corpus-guard failures that died earlier in CI).
+        # NO tiny.yaml overlay: load_config MERGES overlays OVER the config,
+        # which silently rebuilt the model with tiny dims (7th-try failure);
+        # rung configs carry their own base: chain.
         if str(config_path).endswith((".yaml", ".yml")):
             from config import load_config
-            config = load_config(config_path, "tiny.yaml")
+            config = load_config(config_path)
         else:
             config = json.loads(Path(config_path).read_text())
     else:
@@ -56,7 +59,9 @@ def load_run(ckpt_path, config_path=None, vocab=None,
             config = json.loads(cu.read_text())
         elif config_fallback:
             from config import load_config
-            config = load_config(config_fallback, "tiny.yaml")
+            # no tiny overlay: overlays MERGE OVER the config and would
+            # rebuild the model with tiny dims (see the 7th-try CI failure)
+            config = load_config(config_fallback)
         else:
             raise FileNotFoundError(
                 f"no config_used.json next to {d} and no fallback given")
