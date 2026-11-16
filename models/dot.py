@@ -330,15 +330,17 @@ class DotPopulation(nn.Module):
                               state=s_new.reshape(b, t, n, self.d_s),
                               e_state=e_state)
         if self.head_layout == "shared_gemm":
-            e_state = e_state.transpose(0, 1).reshape(f * n, self.d)   # small copy
-            logits = e_state.matmul(emb_table.t())                     # [f*N, V]
+            e_state_btnd = e_state.transpose(0, 1).reshape(f * n, self.d)  # small copy
+            logits = e_state_btnd.matmul(emb_table.t())                # [f*N, V]
             log_pi = F.log_softmax(logits, dim=-1).reshape(b, t, n, -1)  # view only
+            e_state_out = e_state_btnd.reshape(b, t, n, self.d)
         else:
             logits = torch.matmul(e_state, emb_table.t())              # [N, f, V]
             log_pi = F.log_softmax(logits, dim=-1).permute(1, 0, 2)    # [f, N, V]
             log_pi = log_pi.reshape(b, t, n, -1)                       # [B, T, N, V]
+            e_state_out = e_state.permute(1, 0, 2).reshape(b, t, n, self.d)
         return DotOutputs(log_pi=log_pi,
                           gamma=gamma.reshape(b, t, n),
                           trust_term=trust.reshape(b, t, n),
                           state=s_new.reshape(b, t, n, self.d_s),
-                          e_state=None)
+                          e_state=e_state_out)
