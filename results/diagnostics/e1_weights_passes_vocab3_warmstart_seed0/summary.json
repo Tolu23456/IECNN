@@ -3,10 +3,176 @@
  "max_chars": 8000,
  "results": {
   "ablation": {
-   "error": "KeyError: None"
+   "n_dots": 8,
+   "damage_nats_per_token": [
+    0.009038420394062996,
+    0.06996218115091324,
+    0.03516414016485214,
+    0.05859368294477463,
+    0.044523123651742935,
+    0.11516877263784409,
+    0.06104526296257973,
+    0.05836295709013939
+   ],
+   "damage_bpc_equivalent": [
+    0.004084681100705099,
+    0.03161760425515898,
+    0.01589152667077366,
+    0.026479904553060946,
+    0.020121077997665333,
+    0.05204755792220186,
+    0.02758783294419581,
+    0.026375633950811505
+   ],
+   "gini": 0.2674232438682982,
+   "most_important_dot": 5,
+   "least_important_dot": 0,
+   "n_positions": 2506,
+   "n_chars": 8000,
+   "note": "mask = zero the dot's consensus weight in the final pool (renormalized); damage in nats/position",
+   "ckpt_dir": "checkpoints/e1_weights_passes_vocab3_warmstart_seed0",
+   "best_step": 3120
   },
   "calibration": {
-   "error": "KeyError: None"
+   "ece": 0.02339,
+   "reliability": [
+    {
+     "range": [
+      0.0,
+      0.1
+     ],
+     "count": 9367,
+     "mean_confidence": 0.05905,
+     "accuracy": 0.0648
+    },
+    {
+     "range": [
+      0.1,
+      0.2
+     ],
+     "count": 8355,
+     "mean_confidence": 0.13844,
+     "accuracy": 0.12651
+    },
+    {
+     "range": [
+      0.2,
+      0.3
+     ],
+     "count": 1291,
+     "mean_confidence": 0.24042,
+     "accuracy": 0.14485
+    },
+    {
+     "range": [
+      0.3,
+      0.4
+     ],
+     "count": 413,
+     "mean_confidence": 0.35104,
+     "accuracy": 0.2155
+    },
+    {
+     "range": [
+      0.4,
+      0.5
+     ],
+     "count": 324,
+     "mean_confidence": 0.44021,
+     "accuracy": 0.29321
+    },
+    {
+     "range": [
+      0.5,
+      0.6
+     ],
+     "count": 230,
+     "mean_confidence": 0.53359,
+     "accuracy": 0.24783
+    },
+    {
+     "range": [
+      0.6,
+      0.7
+     ],
+     "count": 67,
+     "mean_confidence": 0.62551,
+     "accuracy": 0.29851
+    },
+    {
+     "range": [
+      0.7,
+      0.8
+     ],
+     "count": 0,
+     "mean_confidence": 0.0,
+     "accuracy": 0.0
+    },
+    {
+     "range": [
+      0.8,
+      0.9
+     ],
+     "count": 1,
+     "mean_confidence": 0.8727,
+     "accuracy": 0.0
+    },
+    {
+     "range": [
+      0.9,
+      1.0
+     ],
+     "count": 0,
+     "mean_confidence": 0.0,
+     "accuracy": 0.0
+    }
+   ],
+   "per_dot": [
+    {
+     "dot": 0,
+     "mean_confidence": 0.10924,
+     "accuracy": 0.09298
+    },
+    {
+     "dot": 1,
+     "mean_confidence": 0.12218,
+     "accuracy": 0.10415
+    },
+    {
+     "dot": 2,
+     "mean_confidence": 0.12545,
+     "accuracy": 0.10854
+    },
+    {
+     "dot": 3,
+     "mean_confidence": 0.15064,
+     "accuracy": 0.10814
+    },
+    {
+     "dot": 4,
+     "mean_confidence": 0.11801,
+     "accuracy": 0.11333
+    },
+    {
+     "dot": 5,
+     "mean_confidence": 0.13256,
+     "accuracy": 0.10455
+    },
+    {
+     "dot": 6,
+     "mean_confidence": 0.11769,
+     "accuracy": 0.11413
+    },
+    {
+     "dot": 7,
+     "mean_confidence": 0.11117,
+     "accuracy": 0.09697
+    }
+   ],
+   "n_positions": 2506,
+   "note": "confidence = sigmoid(gamma) at the last pass of the last region; correct = dot's argmax equals the true next token",
+   "ckpt_dir": "checkpoints/e1_weights_passes_vocab3_warmstart_seed0",
+   "best_step": 3120
   },
   "dispersion": {
    "dispersion_mean": 0.08676,
@@ -58,16 +224,104 @@
    "best_step": 3120
   },
   "error_correlation": {
-   "error": "KeyError: None"
+   "mean_pairwise_error_correlation": 0.87979,
+   "mean_positive_pairwise_correlation": 0.87979,
+   "max_pairwise_correlation": 0.92573,
+   "matrix": [
+    [
+     1.0,
+     0.88155,
+     0.92573,
+     0.89968,
+     0.89958,
+     0.89289,
+     0.90996,
+     0.89907
+    ],
+    [
+     0.88155,
+     1.0,
+     0.87058,
+     0.8965,
+     0.83937,
+     0.8419,
+     0.87831,
+     0.83936
+    ],
+    [
+     0.92573,
+     0.87058,
+     1.0,
+     0.89105,
+     0.8812,
+     0.8752,
+     0.89075,
+     0.87321
+    ],
+    [
+     0.89968,
+     0.8965,
+     0.89105,
+     1.0,
+     0.87804,
+     0.88182,
+     0.8917,
+     0.87396
+    ],
+    [
+     0.89958,
+     0.83937,
+     0.8812,
+     0.87804,
+     1.0,
+     0.85587,
+     0.86343,
+     0.88151
+    ],
+    [
+     0.89289,
+     0.8419,
+     0.8752,
+     0.88182,
+     0.85587,
+     1.0,
+     0.89983,
+     0.84349
+    ],
+    [
+     0.90996,
+     0.87831,
+     0.89075,
+     0.8917,
+     0.86343,
+     0.89983,
+     1.0,
+     0.8787
+    ],
+    [
+     0.89907,
+     0.83936,
+     0.87321,
+     0.87396,
+     0.88151,
+     0.84349,
+     0.8787,
+     1.0
+    ]
+   ],
+   "n_positions": 2506,
+   "note": "rho_ij weighted by consensus-wrongness (spec 06 2.4); high positive off-diagonals = dots fail together (collapse)",
+   "ckpt_dir": "checkpoints/e1_weights_passes_vocab3_warmstart_seed0",
+   "best_step": 3120
   },
   "message_influence": {
    "skipped": true,
    "reason": "use_messages is off in this run's config"
   },
   "mode_gap": {
-   "soft_bpc": 2.176835373319761,
-   "hard_bpc": 2.175434504424247,
-   "mode_gap": -0.0014008688955140514,
+   "soft_bpc": 2.1768353916339325,
+   "hard_bpc": 2.175434517738164,
+   "mode_gap": -0.001400873895768484,
    "ckpt_dir": "checkpoints/e1_weights_passes_vocab3_warmstart_seed0",
    "best_step": 3120,
    "n_chars": 32000,
@@ -122,7 +376,111 @@
    "best_step": 3120
   },
   "win_map": {
-   "error": "KeyError: None"
+   "win_map": {
+    "capitalized": {
+     "n": 294,
+     "winner_share": [
+      0.0,
+      0.1395,
+      0.0034,
+      0.4592,
+      0.0272,
+      0.2211,
+      0.0,
+      0.1497
+     ],
+     "dominant_dot": 3
+    },
+    "digit": {
+     "n": 4,
+     "winner_share": [
+      0.0,
+      0.5,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.5
+     ],
+     "dominant_dot": 1
+    },
+    "long_word": {
+     "n": 8,
+     "winner_share": [
+      0.0,
+      0.0,
+      0.5,
+      0.375,
+      0.0,
+      0.0,
+      0.0,
+      0.125
+     ],
+     "dominant_dot": 2
+    },
+    "punct": {
+     "n": 207,
+     "winner_share": [
+      0.0145,
+      0.5314,
+      0.1208,
+      0.0097,
+      0.0,
+      0.2367,
+      0.0821,
+      0.0048
+     ],
+     "dominant_dot": 1
+    },
+    "short_word": {
+     "n": 1258,
+     "winner_share": [
+      0.0572,
+      0.217,
+      0.2297,
+      0.1033,
+      0.0779,
+      0.1494,
+      0.0079,
+      0.1574
+     ],
+     "dominant_dot": 2
+    },
+    "whitespace": {
+     "n": 175,
+     "winner_share": [
+      0.1657,
+      0.3257,
+      0.0,
+      0.0,
+      0.0,
+      0.0914,
+      0.4114,
+      0.0057
+     ],
+     "dominant_dot": 6
+    },
+    "word": {
+     "n": 560,
+     "winner_share": [
+      0.1411,
+      0.1054,
+      0.3,
+      0.2393,
+      0.0518,
+      0.0089,
+      0.0679,
+      0.0857
+     ],
+     "dominant_dot": 2
+    }
+   },
+   "n_dots": 8,
+   "n_positions": 2506,
+   "note": "winner = argmax final-pass weight in the LAST region; one dominant dot across all types = no specialization",
+   "ckpt_dir": "checkpoints/e1_weights_passes_vocab3_warmstart_seed0",
+   "best_step": 3120
   }
  }
 }

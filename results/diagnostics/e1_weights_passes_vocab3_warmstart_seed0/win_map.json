@@ -1,0 +1,107 @@
+{
+ "win_map": {
+  "capitalized": {
+   "n": 294,
+   "winner_share": [
+    0.0,
+    0.1395,
+    0.0034,
+    0.4592,
+    0.0272,
+    0.2211,
+    0.0,
+    0.1497
+   ],
+   "dominant_dot": 3
+  },
+  "digit": {
+   "n": 4,
+   "winner_share": [
+    0.0,
+    0.5,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.5
+   ],
+   "dominant_dot": 1
+  },
+  "long_word": {
+   "n": 8,
+   "winner_share": [
+    0.0,
+    0.0,
+    0.5,
+    0.375,
+    0.0,
+    0.0,
+    0.0,
+    0.125
+   ],
+   "dominant_dot": 2
+  },
+  "punct": {
+   "n": 207,
+   "winner_share": [
+    0.0145,
+    0.5314,
+    0.1208,
+    0.0097,
+    0.0,
+    0.2367,
+    0.0821,
+    0.0048
+   ],
+   "dominant_dot": 1
+  },
+  "short_word": {
+   "n": 1258,
+   "winner_share": [
+    0.0572,
+    0.217,
+    0.2297,
+    0.1033,
+    0.0779,
+    0.1494,
+    0.0079,
+    0.1574
+   ],
+   "dominant_dot": 2
+  },
+  "whitespace": {
+   "n": 175,
+   "winner_share": [
+    0.1657,
+    0.3257,
+    0.0,
+    0.0,
+    0.0,
+    0.0914,
+    0.4114,
+    0.0057
+   ],
+   "dominant_dot": 6
+  },
+  "word": {
+   "n": 560,
+   "winner_share": [
+    0.1411,
+    0.1054,
+    0.3,
+    0.2393,
+    0.0518,
+    0.0089,
+    0.0679,
+    0.0857
+   ],
+   "dominant_dot": 2
+  }
+ },
+ "n_dots": 8,
+ "n_positions": 2506,
+ "note": "winner = argmax final-pass weight in the LAST region; one dominant dot across all types = no specialization",
+ "ckpt_dir": "checkpoints/e1_weights_passes_vocab3_warmstart_seed0",
+ "best_step": 3120
+}

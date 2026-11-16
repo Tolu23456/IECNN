@@ -1,0 +1,141 @@
+{
+ "ece": 0.02339,
+ "reliability": [
+  {
+   "range": [
+    0.0,
+    0.1
+   ],
+   "count": 9367,
+   "mean_confidence": 0.05905,
+   "accuracy": 0.0648
+  },
+  {
+   "range": [
+    0.1,
+    0.2
+   ],
+   "count": 8355,
+   "mean_confidence": 0.13844,
+   "accuracy": 0.12651
+  },
+  {
+   "range": [
+    0.2,
+    0.3
+   ],
+   "count": 1291,
+   "mean_confidence": 0.24042,
+   "accuracy": 0.14485
+  },
+  {
+   "range": [
+    0.3,
+    0.4
+   ],
+   "count": 413,
+   "mean_confidence": 0.35104,
+   "accuracy": 0.2155
+  },
+  {
+   "range": [
+    0.4,
+    0.5
+   ],
+   "count": 324,
+   "mean_confidence": 0.44021,
+   "accuracy": 0.29321
+  },
+  {
+   "range": [
+    0.5,
+    0.6
+   ],
+   "count": 230,
+   "mean_confidence": 0.53359,
+   "accuracy": 0.24783
+  },
+  {
+   "range": [
+    0.6,
+    0.7
+   ],
+   "count": 67,
+   "mean_confidence": 0.62551,
+   "accuracy": 0.29851
+  },
+  {
+   "range": [
+    0.7,
+    0.8
+   ],
+   "count": 0,
+   "mean_confidence": 0.0,
+   "accuracy": 0.0
+  },
+  {
+   "range": [
+    0.8,
+    0.9
+   ],
+   "count": 1,
+   "mean_confidence": 0.8727,
+   "accuracy": 0.0
+  },
+  {
+   "range": [
+    0.9,
+    1.0
+   ],
+   "count": 0,
+   "mean_confidence": 0.0,
+   "accuracy": 0.0
+  }
+ ],
+ "per_dot": [
+  {
+   "dot": 0,
+   "mean_confidence": 0.10924,
+   "accuracy": 0.09298
+  },
+  {
+   "dot": 1,
+   "mean_confidence": 0.12218,
+   "accuracy": 0.10415
+  },
+  {
+   "dot": 2,
+   "mean_confidence": 0.12545,
+   "accuracy": 0.10854
+  },
+  {
+   "dot": 3,
+   "mean_confidence": 0.15064,
+   "accuracy": 0.10814
+  },
+  {
+   "dot": 4,
+   "mean_confidence": 0.11801,
+   "accuracy": 0.11333
+  },
+  {
+   "dot": 5,
+   "mean_confidence": 0.13256,
+   "accuracy": 0.10455
+  },
+  {
+   "dot": 6,
+   "mean_confidence": 0.11769,
+   "accuracy": 0.11413
+  },
+  {
+   "dot": 7,
+   "mean_confidence": 0.11117,
+   "accuracy": 0.09697
+  }
+ ],
+ "n_positions": 2506,
+ "note": "confidence = sigmoid(gamma) at the last pass of the last region; correct = dot's argmax equals the true next token",
+ "ckpt_dir": "checkpoints/e1_weights_passes_vocab3_warmstart_seed0",
+ "best_step": 3120
+}

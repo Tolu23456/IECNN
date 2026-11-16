@@ -1,0 +1,31 @@
+{
+ "n_dots": 8,
+ "damage_nats_per_token": [
+  0.009038420394062996,
+  0.06996218115091324,
+  0.03516414016485214,
+  0.05859368294477463,
+  0.044523123651742935,
+  0.11516877263784409,
+  0.06104526296257973,
+  0.05836295709013939
+ ],
+ "damage_bpc_equivalent": [
+  0.004084681100705099,
+  0.03161760425515898,
+  0.01589152667077366,
+  0.026479904553060946,
+  0.020121077997665333,
+  0.05204755792220186,
+  0.02758783294419581,
+  0.026375633950811505
+ ],
+ "gini": 0.2674232438682982,
+ "most_important_dot": 5,
+ "least_important_dot": 0,
+ "n_positions": 2506,
+ "n_chars": 8000,
+ "note": "mask = zero the dot's consensus weight in the final pool (renormalized); damage in nats/position",
+ "ckpt_dir": "checkpoints/e1_weights_passes_vocab3_warmstart_seed0",
+ "best_step": 3120
+}
