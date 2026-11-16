@@ -91,9 +91,15 @@ def enc(s: str) -> list[int]:
     return ubm.encode(s)
 
 def run(name: str, items: list[dict], acc_key: str):
+    # drop degenerate items (no options / empty scored spans score 0 NLL)
+    items = [it for it in items
+             if it["options"] and all(sc for _, sc in it["options"])]
     seqs, meta = [], []
+    # ARC has 3-5 options per question (WG fixed 2, HS fixed 4) — track the
+    # cumulative base per item so item->nll indices never desync.
+    bases = []
     for it in items:
-        base = len(seqs)
+        bases.append(len(seqs))
         for j, (pre, sc) in enumerate(it["options"]):
             seqs.append((pre, sc))
             meta.append((it["answer"], j, len(sc), it.get("chars", [0]*len(it["options"]))[j]))
@@ -102,7 +108,7 @@ def run(name: str, items: list[dict], acc_key: str):
     correct = 0
     correct_norm = 0
     for i, it in enumerate(items):
-        idx = list(range(i * len(it["options"]), (i + 1) * len(it["options"])))
+        idx = list(range(bases[i], bases[i] + len(it["options"])))
         scores = [nlls[j] for j in idx]
         pick = scores.index(min(scores))
         chars = it.get("chars") or [1] * len(scores)
