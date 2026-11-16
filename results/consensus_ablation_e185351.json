@@ -1,0 +1,59 @@
+{
+ "meta": {
+  "ckpt": "checkpoints/vocab3_gpu_seed0_checkpoint.pt",
+  "best_step": 12240,
+  "tau0": 0.89375,
+  "chars": 100002,
+  "positions": 29821,
+  "vocab": 4096,
+  "n_dots": 8
+ },
+ "model_bpc_reference": 1.85599,
+ "rules": {
+  "log_linear": {
+   "bpc": 1.85599,
+   "top1": 0.22085,
+   "top5": 0.41682
+  },
+  "mixture": {
+   "bpc": 1.87584,
+   "top1": 0.21867,
+   "top5": 0.41166
+  },
+  "uniform": {
+   "bpc": 2.0139,
+   "top1": 0.19121,
+   "top5": 0.35968
+  },
+  "argmax_w": {
+   "bpc": 1.92713,
+   "top1": 0.20549,
+   "top5": 0.3972
+  },
+  "sharpen3": {
+   "bpc": 1.88368,
+   "top1": 0.21475,
+   "top5": 0.40964
+  },
+  "oracle": {
+   "bpc": 1.80891,
+   "top1": 0.31374,
+   "top5": 0.431
+  }
+ },
+ "best_fixed_dot": {
+  "dot": 1,
+  "bpc": 2.13788,
+  "top1": 0.17092,
+  "acc_per_dot": [
+   0.16716,
+   0.17092,
+   0.15442,
+   0.16076,
+   0.16797,
+   0.16123,
+   0.16958,
+   0.16002
+  ]
+ }
+}
