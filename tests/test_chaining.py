@@ -84,8 +84,13 @@ def test_train_workflow_restores_artifact_at_repo_root():
     text = wf_path.read_text(encoding="utf-8")
     assert "extractall('checkpoints')" not in text, \
         "restore step extracts INTO checkpoints/ — the 11-03 bug is back"
-    assert "extractall('.')" in text, \
-        "restore step must extract the artifact zip at the repo root"
+    # extracts at the repo root (11-03 bug) AND only the resume-needed
+    # members (11-17 clobber bug: the results/ ride-along overwrote fresher
+    # CSVs from other rungs, ef48786 reset the E7 curve to header-only)
+    assert "extractall('.', members=keep)" in text, \
+        "restore step must extract at the repo root via a keep-list"
+    assert "startswith('checkpoints/')" in text, \
+        "restore keep-list must not extract the results/ ride-along"
     assert "-o checkpoints/resume.zip" not in text, \
         "resume zip must not be written inside checkpoints/"
 
