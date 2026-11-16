@@ -73,6 +73,10 @@ class Region(nn.Module):
         # launch-bound small-SM GPUs; any other string passes to inductor).
         self.compile_mode = str(config.get("training", {})
                                 .get("compile_mode", "")) or None
+        # torch 2.14 removed "max-autotune-no-cudnn" (renamed to
+        # "max-autotune-no-cudagraphs") — map it so configs work on both.
+        if self.compile_mode == "max-autotune-no-cudnn":
+            self.compile_mode = "max-autotune-no-cudagraphs"
         self.hard_top_m = int(m.get("hard_top_m", 4))
         self.dynamic_query = bool(m.get("dynamic_query", False))
         self.share_pass_params = bool(m.get("share_pass_params", True))
