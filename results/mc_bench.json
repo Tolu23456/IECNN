@@ -1,0 +1,15 @@
+{
+ "meta": {
+  "ckpt": "checkpoints/vocab3_gpu_seed0_checkpoint.pt (1.85351 bpc, best_step 12240, tau0 0.89375)",
+  "config": "configs/e6_consensus_v2_vocab3_warmstart.yaml + overlay_cpu_fp32.yaml",
+  "protocol": "zero-shot NLL option scoring; WG partial (tokens after _), HS ctx+ending with acc_norm, ARC 'Question...\\nAnswer: {opt}'",
+  "note": "winogrande + hellaswag scored on a Colab CPU session whose VM was reclaimed before the JSON was saved; exact printed stdout values recorded verbatim below. arc_challenge re-scored post index-fix (ARC has 3-5 options; flat index math desynced - fixed in scripts/mc_bench.py)."
+ },
+ "results": {
+  "winogrande": {"acc": 0.4822, "n": 1267},
+  "hellaswag": {"acc": 0.272, "n": 1000, "acc_norm": 0.264},
+  "arc_challenge": {"acc": 0.204, "n": 299}
+ },
+ "chance": {"winogrande": 0.5, "hellaswag": 0.25, "arc_challenge": 0.25},
+ "gpt2_xl_reference": {"winogrande": 0.583, "hellaswag": 0.400, "arc_challenge": 0.250}
+}
