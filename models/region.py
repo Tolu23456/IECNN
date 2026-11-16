@@ -100,6 +100,12 @@ class Region(nn.Module):
             seed=1000 + region_index,
             fast_math=bool(m.get("fast_dot_math", True)))
         self.dots.head_layout = str(m.get("head_layout", "shared_gemm"))
+        # Rung E12: Tolu's seclusion mechanism — model.read_mode: "secluded"
+        # makes every dot commit to exactly ONE token in its window (hard
+        # top-1 read, straight-through backward). Default "soft" = unchanged.
+        self.read_mode = str(m.get("read_mode", "soft"))
+        self.dots.read_mode = self.read_mode
+        self.dots.tau_seclusion = float(m.get("tau_seclusion", 1.0))
         # speed opt 7 (Tolu's "don't compute the same op twice"): with
         # share_pass_params + static queries the attention block is
         # bit-identical across passes; one fresh dict per region-forward

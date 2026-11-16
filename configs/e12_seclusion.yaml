@@ -1,0 +1,25 @@
+# Rung E12 "seclusion" (Tolu, 2026-11-17): "every token focuses on exactly
+# one token. Since each token knows exactly what they are looking for and
+# since every token knows what they entail they shout really loud so tokens
+# get the ones they need without having to search every other tokens first."
+#
+# model.read_mode: secluded = in the windowed read, each dot commits to
+# exactly ONE token (hard top-1 on its read scores, straight-through
+# backward so near-miss tokens' keys still learn — that is the "shouting":
+# a token's key is its shout, the soft gradient is how it learns volume).
+#
+# What it prunes / buys:
+#   * the read stops being a blurred average over w tokens — a dot that
+#     needs the exact token that opened a quote gets that exact token;
+#   * each position carries N learned one-hop pointers into its past
+#     (N dots x T positions), sparse and interpretable by construction;
+#   * drops the [f,N,w]x[f,w,d_v] read matmul (the score GEMM stays — it
+#     is what finds the one token).
+#
+# Built on e11 (shared head) since that is the slim base; seclusion itself
+# is orthogonal to head_mode. Dispatch after e11's verdict.
+base: e11_shared_head.yaml
+name: e12_seclusion
+model:
+  read_mode: secluded
+  tau_seclusion: 1.0

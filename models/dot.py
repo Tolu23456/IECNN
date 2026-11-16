@@ -99,6 +99,16 @@ class DotPopulation(nn.Module):
         # output); "legacy" = the pre-opt-6 [N, f, V] + permute path, kept
         # for the paired A/B bench and as a fallback.
         self.head_layout = "shared_gemm"
+        # Rung E12 (Tolu's seclusion mechanism, 2026-11-17): "every token
+        # focuses on exactly one token ... since every token knows what they
+        # entail they shout really loud so tokens get the ones they need
+        # without having to search every other tokens first."
+        # "soft" (default) = the original weighted average over the window;
+        # "secluded" = each dot commits to exactly ONE token in its window
+        # (hard top-1 on the read scores, straight-through backward). Set by
+        # Region from model.read_mode; tau_seclusion anneals the soft term.
+        self.read_mode = "soft"
+        self.tau_seclusion = 1.0
         self.in_dim = gru_input_dim(d_v, d_s, message_dim)
 
         p_layers = 1 if share_pass_params else n_passes   # stacked per-pass depth
@@ -127,6 +137,26 @@ class DotPopulation(nn.Module):
     def _sel(self, pass_idx: int, t: torch.Tensor) -> torch.Tensor:
         """[p_layers, N, ...] -> current pass's slice (or layer 0 when shared)."""
         return t[0 if self.shared else pass_idx]
+
+    def _secluded_ctx(self, scores: torch.Tensor, wv: torch.Tensor) -> torch.Tensor:
+        """Tolu's seclusion mechanism: each dot commits to exactly ONE token
+        in its window and reads only that token's value (rung E12).
+
+        scores [f, N, w] (already sqrt(d_q)-scaled and validity-masked),
+        wv [f, w, d_v]. Forward = the hard pick (argmax token's value, no
+        average over the other w-1 tokens). Backward = the soft gradient:
+        straight-through, so near-miss tokens keep learning their keys —
+        the 'shouting' part of the mechanism (a token's key is what makes
+        it findable; the soft term is what tells it how loud to shout).
+        """
+        idx = scores.argmax(-1)                                    # [f, N]
+        ctx_hard = wv.gather(
+            1, idx.unsqueeze(-1).expand(-1, -1, wv.shape[-1]))      # [f, N, d_v]
+        attn_soft = torch.nan_to_num(
+            F.softmax(scores / self.tau_seclusion, dim=-1), nan=0.0)
+        ctx_soft = torch.matmul(attn_soft.unsqueeze(-2),
+                                wv.unsqueeze(1)).squeeze(-2)       # [f, N, d_v]
+        return ctx_hard + (ctx_soft - ctx_soft.detach())
 
     def initial_state(self, batch_shape) -> torch.Tensor:
         """Broadcast learned s0 to [*batch_shape, N, d_s] for pass 1.
@@ -190,8 +220,14 @@ class DotPopulation(nn.Module):
         scores = scores / math.sqrt(self.d_q)
         if valid_mask is not None:
             scores = scores.masked_fill(~valid_mask[None, :, None, :], float("-inf"))
-        attn = torch.nan_to_num(F.softmax(scores, dim=-1), nan=0.0)    # [B, T, N, w]
-        ctx = torch.matmul(attn.unsqueeze(-2), wind_v.unsqueeze(-3)).squeeze(-2)  # [B, T, N, d_v]
+        if self.read_mode == "secluded":
+            ctx = self._secluded_ctx(
+                scores.reshape(b * t, self.N, w),
+                wind_v.reshape(b * t, w, self.d_v)).reshape(
+                b, t, self.N, self.d_v)
+        else:
+            attn = torch.nan_to_num(F.softmax(scores, dim=-1), nan=0.0)    # [B, T, N, w]
+            ctx = torch.matmul(attn.unsqueeze(-2), wind_v.unsqueeze(-3)).squeeze(-2)  # [B, T, N, d_v]
 
         # ---- GRU step (all dots at once) ----------------------------------
         parts = [ctx, h_pool, err_feat,
@@ -278,8 +314,11 @@ class DotPopulation(nn.Module):
             if valid_mask is not None:
                 vm = valid_mask.unsqueeze(0).expand(b, t, w).reshape(f, 1, w)
                 scores = scores.masked_fill(~vm, float("-inf"))         # [f, N, w]
-            attn = torch.nan_to_num(F.softmax(scores, dim=-1), nan=0.0)  # [f, N, w]
-            ctx = torch.matmul(attn.unsqueeze(-2), wv.unsqueeze(1)).squeeze(-2)  # [f, N, d_v]
+            if self.read_mode == "secluded":
+                ctx = self._secluded_ctx(scores, wv)                    # [f, N, d_v]
+            else:
+                attn = torch.nan_to_num(F.softmax(scores, dim=-1), nan=0.0)  # [f, N, w]
+                ctx = torch.matmul(attn.unsqueeze(-2), wv.unsqueeze(1)).squeeze(-2)  # [f, N, d_v]
             if cacheable:
                 attn_cache["ctx"] = ctx
 

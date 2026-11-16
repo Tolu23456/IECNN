@@ -1,0 +1,15 @@
+# Rung E11b "no trust" (Tolu's question, 2026-11-17: "is it necessary to
+# compute trust too — we can get it another way?").
+#
+# Zero-code ablation: update_trust(prev, scores, rho=0.0) returns exactly
+# `scores`, so the gate reads softmax(beta*gamma + trust_term / tau) with
+# NO accumulation. The pass-to-pass memory trust used to carry is already
+# duplicated by the dots themselves: the GRU state (s_prev) and the pooled
+# opinion (h_pool) cross passes, and gamma is recomputed from s_new every
+# pass — so a dot that saw something useful on pass 1 still has it in its
+# state on pass 3. If bpc holds at rho=0, trust is pruned permanently:
+# one less recurrence, one less gradient path through the gate.
+base: e11_shared_head.yaml
+name: e11b_no_trust
+consensus:
+  rho: 0.0
