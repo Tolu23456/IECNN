@@ -24,7 +24,12 @@ model:
   n_regions: 4
   use_cross_region: true
 training:
-  batch_size: 8
+  # Tolu, 2026-11-16: batch 8 OOMs on the 12GB Colab CPU VM (eager forward at
+  # 1x256 alone retains ~4GB across the 4 chained regions; compile caps it but
+  # b8 tracing still blows past 12GB). b4 + compiled consensus measured:
+  # peak 8.4GB, ~30 s/step. CONFOUND for the E2-vs-E7 comparison (E7 runs b8):
+  # noted in DECISIONS; rerun at b8 on bigger hardware if E2 wins.
+  batch_size: 4
   lr: 1.0e-3
   lr_schedule: constant
   warmup_steps: 500
