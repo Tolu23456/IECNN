@@ -112,12 +112,24 @@ jobs:
           curl -sfL -H "Authorization: Bearer $GH_TOKEN" \
             -o /tmp/eqc_resume.zip \
             "https://api.github.com/repos/${{ github.repository }}/actions/artifacts/$ART_ID/zip"
-          # The artifact zip already stores the checkpoints/ (and results/)
-          # prefixes, so it MUST be unpacked at the repo root. Extracting it
-          # into checkpoints/ once produced checkpoints/checkpoints/... (the
-          # resume file was never found, so every chained chunk re-trained the
-          # rung from step 0 — found on the runner 2026-11-03).
-          python3 -c "import zipfile; zipfile.ZipFile('/tmp/eqc_resume.zip').extractall('.')"
+          # The artifact zip stores checkpoints/ (plus a results/ ride-along
+          # and data/split_info.json), and MUST be unpacked at the repo root
+          # (extracting into checkpoints/ once produced
+          # checkpoints/checkpoints/... so every chained chunk re-trained
+          # from step 0 — found on the runner 2026-11-03).
+          # CLOBBER FIX (2026-11-17): extract ONLY checkpoints/ + split_info.
+          # The results/ ride-along is a snapshot of whatever existed when the
+          # PREVIOUS chunk of this rung uploaded — restoring it overwrote
+          # fresher CSVs from other rungs and git add results/ then committed
+          # the stale copies (observed: ef48786 reset train_e7_scale_up_seed0.csv
+          # from 63 eval rows to header-only).
+          python3 - << 'PYEOF'
+          import zipfile
+          z = zipfile.ZipFile('/tmp/eqc_resume.zip')
+          keep = [n for n in z.namelist()
+                  if n.startswith('checkpoints/') or n == 'data/split_info.json']
+          z.extractall('.', members=keep)
+          PYEOF
           rm /tmp/eqc_resume.zip
           echo "restored:"; find checkpoints -maxdepth 3 -type f | head
 
@@ -213,7 +225,13 @@ jobs:
           # by step, freshest wins) via scripts/union_merge_csv.py — an
           # inline heredoc here broke the shell once already (indented
           # terminator), so the merger lives in the repo.
-          git add results/
+          # CLOBBER FIX (2026-11-17): stage ONLY this rung's own results
+          # files. The old `git add results/` staged whatever the (possibly
+          # stale) working tree held for every other rung too.
+          RCSV="results/train_${CONFIG%.*}_seed${{ matrix.seed }}.csv"
+          RSUM="results/summary_${CONFIG%.*}_seed${{ matrix.seed }}.json"
+          git add "$RCSV" 2>/dev/null || true
+          [ -f "$RSUM" ] && git add "$RSUM" || true
           if ! git diff --cached --quiet; then
             git commit -m "results: ${{ github.event.inputs.config }} seed ${{ matrix.seed }} [run ${{ github.run_id }}]"
           fi
