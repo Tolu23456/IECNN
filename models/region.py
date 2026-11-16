@@ -11,6 +11,7 @@ import os
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from models import consensus
 from models.dot import DotPopulation
@@ -81,6 +82,15 @@ class Region(nn.Module):
         self.dynamic_query = bool(m.get("dynamic_query", False))
         self.share_pass_params = bool(m.get("share_pass_params", True))
         self.dot_dropout = float(m.get("dot_dropout", 0.0))
+        # Rung E11 (Tolu, 2026-11-17: "instead of every dot having its own
+        # head they all share one head and only their state differs"):
+        # "prob" (default) = the original per-dot vocab heads + consensus
+        # pooling over [., N, V]; "hidden" = dots emit hidden states only,
+        # a learned gate weights them, and ONE shared tied head reads the
+        # pooled state. Prunes: per-dot logits on P-1 of P passes, the whole
+        # JS/leave-one-out/verifier chain, and the [B,T,N,V] elementwise
+        # traffic — with the committee read intact in hidden space.
+        self.head_mode = str(m.get("head_mode", "prob"))
 
         self.dots = DotPopulation(
             self.n_dots, d, d_q, d_v, d_s, vocab_size,
@@ -252,6 +262,133 @@ class Region(nn.Module):
         return trust_c, w_c, log_b_c, v_out, err_next
 
     # ------------------------------------------------------------------
+    def _pass_hidden(self, gamma_c, trust_term_c, trust_prev_c, dot_mask,
+                     tau_p: float, floor: float):
+        """One pass of the shared-head gate (hidden mode). All ops are
+        [., N]-scale — no vocab-space tensor exists in this path. Weights
+        come from the same learned scalar projections as the prob-space
+        consensus (gamma / trust_term + trust accumulation), with the
+        JS-disagreement and verifier terms dropped (the committee study
+        bounded their value at ~0.047 bpc; they were the dominant cost).
+
+        Returns (trust_c, w_c)."""
+        scores = self.beta * gamma_c + trust_term_c
+        trust_c = consensus.update_trust(trust_prev_c, scores, self.rho)
+        t = trust_c.clamp(-20.0, 20.0)
+        w = F.softmax(t / max(tau_p, 1e-6), dim=-1)
+        if floor > 0.0:
+            wf = w.clamp_min(floor)
+            w = wf / wf.sum(-1, keepdim=True).clamp_min(1e-9)
+        if dot_mask is not None:
+            w = w * dot_mask
+            w = w / w.sum(-1, keepdim=True).clamp_min(1e-9)
+        return trust_c, w
+
+    # ------------------------------------------------------------------
+    def _forward_hidden(self, rows: torch.Tensor, emb_table: torch.Tensor,
+                        tau0: float, hard_mode: bool, floor: float,
+                        training: bool) -> dict:
+        """Shared-head mode (rung E11): dots produce hidden states; a
+        learned gate pools them; ONE tied head reads the pooled state.
+
+        Passes 1..P-1 skip the per-dot vocab GEMM entirely; the LAST pass
+        materializes per-dot logits once (the oracle/metric machinery and
+        the boosted-dot losses consume [., N, V] there — train-time only
+        cost, and a single GEMM + log-softmax instead of the old chain)."""
+        device = rows.device
+        b, t = rows.shape[0], rows.shape[1]
+        wind_k, wind_v, valid = self._window_memory(rows, device)
+        n = self.n_dots
+        f = b * t
+
+        state = self.dots.initial_state((b, t))
+        attn_cache = {} if self.cache_attention else None
+        trust = None
+        w_prev = None
+        state_prev = None
+        msg_read = None
+        per_pass = []
+        err = torch.zeros(b, t, n, 3, device=device, dtype=rows.dtype)
+        e_state_last = None
+
+        dot_mask = None
+        if training and self.dot_dropout > 0 and torch.rand(()) < self.dot_dropout:
+            k = int(torch.randint(0, n, ()))
+            dot_mask = torch.ones(n, device=device, dtype=rows.dtype)
+            dot_mask[k] = 0.0
+
+        for p in range(1, self.n_passes + 1):
+            tau_p = tau0 * (self.kappa ** (p - 1))
+            if p == 1:
+                h_pool = torch.zeros(b, t, n, self.d_s, device=device,
+                                     dtype=rows.dtype)
+            else:
+                pooled = torch.einsum("bfn,bfnd->bfd", w_prev, state_prev)
+                h_pool = pooled[:, :, None, :].expand(b, t, n, self.d_s)
+            last = (p == self.n_passes)
+            out = self.dots(wind_k, wind_v, valid, h_pool, err,
+                            round_idx=p - 1,
+                            msg_in=msg_read if p > 1 else None, state=state,
+                            emb_table=emb_table, attn_cache=attn_cache,
+                            want_log_pi=last)
+            state_prev = out.state
+            if last:
+                e_state_last = out.e_state
+
+            tr_c, w_c = self._pass_hidden(
+                out.gamma, out.trust_term,
+                trust.reshape(b, t, n) if trust is not None else None,
+                dot_mask, tau_p, 0.0 if hard_mode else floor)
+            if self.use_weights:
+                trust = tr_c
+            w = w_c
+
+            # ONE shared head on the pooled hidden state
+            h_mix = torch.einsum("bfn,bfnd->bfd", w, out.e_state)   # [B, T, d]
+            logits = h_mix.reshape(f, self.d).matmul(emb_table.t())  # [f, V]
+            log_b = F.log_softmax(logits, dim=-1).reshape(b, t, -1)
+
+            # hidden-space error features for the next pass (3 dims, cheap):
+            # own weight, gate entropy, top weight
+            w_ent = -(w * w.clamp_min(1e-12).log()).sum(-1, keepdim=True)
+            w_top = w.max(-1, keepdim=True).values
+            err = torch.cat([w.unsqueeze(-1), w_ent.expand(b, t, n, 1),
+                             w_top.expand(b, t, n, 1)], dim=-1)
+
+            per_pass.append({"weights": w, "log_b": log_b,
+                             "gamma": out.gamma, "tau": tau_p,
+                             "verifier": None})
+            w_prev = w
+            if self.messages is not None:
+                msg_write = self.messages(out.state, training=training)
+                msg_read = msg_write
+
+        w_final = per_pass[-1]["weights"]
+        summary = torch.einsum("bfn,bfnd->bfd", w_final, state_prev)
+
+        if hard_mode and self.use_weights:
+            w_hard = consensus.hard_top_m(w_final, self.hard_top_m)
+            h_mix = torch.einsum("bfn,bfnd->bfd", w_hard, e_state_last)
+            logits = h_mix.reshape(f, self.d).matmul(emb_table.t())
+            log_final = F.log_softmax(logits, dim=-1).reshape(b, t, -1)
+            w_out = w_hard
+        else:
+            log_final = per_pass[-1]["log_b"]
+            w_out = w_final
+
+        # per-dot logits, ONE GEMM, last pass only (oracle/metrics/losses)
+        e_f = e_state_last.reshape(f * n, self.d)
+        log_pi = F.log_softmax(e_f.matmul(emb_table.t()),
+                               dim=-1).reshape(b, t, n, -1)
+        per_pass[-1]["log_pi"] = log_pi
+
+        return {"log_b": log_final,
+                "region_summary": summary,
+                "weights": w_out,
+                "per_pass": per_pass,
+                "state_final": state_prev}
+
+    # ------------------------------------------------------------------
     def forward(self, rows: torch.Tensor, emb_table: torch.Tensor,
                 tau0: float = 1.0, hard_mode: bool = False,
                 floor: float = 0.0, training: bool | None = None) -> dict:
@@ -262,6 +399,9 @@ class Region(nn.Module):
         """
         if training is None:
             training = self.training
+        if self.head_mode == "hidden":
+            return self._forward_hidden(rows, emb_table, tau0, hard_mode,
+                                        floor, training)
         device = rows.device
         b, t = rows.shape[0], rows.shape[1]
         wind_k, wind_v, valid = self._window_memory(rows, device)

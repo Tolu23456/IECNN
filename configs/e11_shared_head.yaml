@@ -1,0 +1,37 @@
+# Rung E11 "shared head" (Tolu, 2026-11-17: "instead of every dot having
+# its own head they all share one head and only their state differs. So it
+# is like one model with varying internal [state]").
+#
+# The pruning rung. Evidence base (all measured, DECISIONS.md):
+#   * committee-combination study (ba05943): the ENTIRE weighting apparatus
+#     (JS/leave-one-out/verifier) is bounded at ~0.047 bpc by the oracle
+#     selection ceiling — while costing ~45x the transformer control's
+#     step time (13.5 s vs 0.29 s/step).
+#   * per-pass bpc (E6 pilot): pass 3 buys ~0.02-0.05 bpc for 33% of compute.
+#
+# model.head_mode: hidden = dots emit hidden states only (no per-dot vocab
+# GEMM on passes 1..P-1), a learned gate (beta*gamma + trust accumulation)
+# weights them in hidden space, ONE tied head reads the pooled state. The
+# per-dot logits materialize ONCE on the last pass so the per-dot oracle
+# loss (lambda_o - the one mechanism with a measured bpc gain), the boosted
+# dot loss and the committee metrics keep working. Verifier dropped
+# (untrained, near-random selection: 17-19%).
+#
+# Everything else = E6-vocab3 recipe, fresh training (from scratch, like
+# the b1 transformer control: cleanest architecture-vs-architecture
+# comparison at matched params 1.72M / corpus / vocab / batch / eval).
+base: e6_consensus_v2.yaml
+name: e11_shared_head
+data:
+  corpus: big
+ubm:
+  vocab_file: UBM/vocab_v3.json
+model:
+  head_mode: hidden
+  verifier: false
+training:
+  lambda_o: 0.2
+  lambda_v: 0.0
+  lambda_c: 0.1
+  lambda_c_ramp_steps: 5000
+  outvote_weight: 3.0

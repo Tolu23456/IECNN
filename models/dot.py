@@ -37,6 +37,11 @@ class DotOutputs:
     gamma: torch.Tensor         # [B, T, N]
     trust_term: torch.Tensor    # [B, T, N]
     state: torch.Tensor         # [B, T, N, d_s]
+    # shared-head mode (Tolu, 2026-11-17: "instead of every dot having its
+    # own head they all share one head and only their state differs"):
+    # per-dot pre-head hidden states [B, T, N, d]; None when log_pi was
+    # materialized (the two are mutually exclusive outputs).
+    e_state: torch.Tensor | None = None
 
 
 def _orth_cols(feat: int, count: int, gen: torch.Generator) -> torch.Tensor:
@@ -135,7 +140,8 @@ class DotPopulation(nn.Module):
     # ----- one pass --------------------------------------------------------
     def forward(self, wind_k, wind_v, valid_mask, h_pool, err_feat,
                 round_idx: int, msg_in, state, emb_table,
-                attn_cache: dict | None = None) -> DotOutputs:
+                attn_cache: dict | None = None,
+                want_log_pi: bool = True) -> DotOutputs:
         """One pass for all dots at all positions simultaneously.
 
         wind_k    [B, T, w, d_q]   windowed, rel-distance-added keys
@@ -160,16 +166,17 @@ class DotPopulation(nn.Module):
         if getattr(self, "fast_math", True):
             return self._forward_fast(wind_k, wind_v, valid_mask, h_pool,
                                       err_feat, round_idx, msg_in, state,
-                                      emb_table, attn_cache)
+                                      emb_table, attn_cache, want_log_pi)
         return self._forward_reference(wind_k, wind_v, valid_mask, h_pool,
                                        err_feat, round_idx, msg_in, state,
-                                       emb_table)
+                                       emb_table, want_log_pi)
 
     # the einsum-per-op version, kept for the equivalence test and as a
     # reference implementation of spec 01 (slower: einsum re-plans paths the
     # kernel cannot fuse into batched GEMMs)
     def _forward_reference(self, wind_k, wind_v, valid_mask, h_pool, err_feat,
-                           round_idx: int, msg_in, state, emb_table) -> DotOutputs:
+                           round_idx: int, msg_in, state, emb_table,
+                           want_log_pi: bool = True) -> DotOutputs:
         b, t, w = wind_k.shape[0], wind_k.shape[1], wind_k.shape[2]
         device = wind_k.device
 
@@ -206,13 +213,19 @@ class DotPopulation(nn.Module):
 
         # ---- heads --------------------------------------------------------
         e_state = torch.einsum("bfnd,ndm->bfnm", s_new, self._sel(round_idx, self.p_out))
-        logits = torch.einsum("bfnm,vm->bfnv", e_state, emb_table)
-        log_pi = F.log_softmax(logits, dim=-1)
         gamma = torch.einsum("bfnd,nd->bfn", s_new, self._sel(round_idx, self.c_w)) \
             + self._sel(round_idx, self.c_b)
         trust = torch.einsum("bfnd,nd->bfn", s_new, self._sel(round_idx, self.g_w)) \
             + self._sel(round_idx, self.g_b)
-        return DotOutputs(log_pi=log_pi, gamma=gamma, trust_term=trust, state=s_new)
+        if not want_log_pi:
+            # shared-head mode: no per-dot vocab head — the region pools
+            # e_state in hidden space and runs ONE shared head (Tolu).
+            return DotOutputs(log_pi=None, gamma=gamma, trust_term=trust,
+                              state=s_new, e_state=e_state)
+        logits = torch.einsum("bfnm,vm->bfnv", e_state, emb_table)
+        log_pi = F.log_softmax(logits, dim=-1)
+        return DotOutputs(log_pi=log_pi, gamma=gamma, trust_term=trust, state=s_new,
+                          e_state=e_state)
 
     # the optimized twin: same math, same op ORDER within each vector op, but
     # the three heavy contractions (GRU in-gates, GRU hidden gates, tied head)
@@ -221,7 +234,8 @@ class DotPopulation(nn.Module):
     # GEMM); pinned by test_pyi_fast_math_matches_reference.
     def _forward_fast(self, wind_k, wind_v, valid_mask, h_pool, err_feat,
                       round_idx: int, msg_in, state, emb_table,
-                      attn_cache: dict | None = None) -> DotOutputs:
+                      attn_cache: dict | None = None,
+                      want_log_pi: bool = True) -> DotOutputs:
         b, t, w = wind_k.shape[0], wind_k.shape[1], wind_k.shape[2]
         f = b * t
         n = self.N
@@ -303,6 +317,18 @@ class DotPopulation(nn.Module):
         # Same math; only GEMM reassociation differs (last bits).
         e_state = torch.bmm(s_new.transpose(0, 1),                     # [N, f, d_s]
                             self._sel(round_idx, self.p_out))          # [N, d_s, d]
+        gamma = torch.einsum("fnd,nd->fn", s_new, self._sel(round_idx, self.c_w)) \
+            + self._sel(round_idx, self.c_b).unsqueeze(0)
+        trust = torch.einsum("fnd,nd->fn", s_new, self._sel(round_idx, self.g_w)) \
+            + self._sel(round_idx, self.g_b).unsqueeze(0)
+        if not want_log_pi:
+            # shared-head mode: no per-dot vocab head — the region pools
+            # e_state in hidden space and runs ONE shared head (Tolu).
+            e_state = e_state.permute(1, 0, 2).reshape(b, t, n, self.d)
+            return DotOutputs(log_pi=None, gamma=gamma.reshape(b, t, n),
+                              trust_term=trust.reshape(b, t, n),
+                              state=s_new.reshape(b, t, n, self.d_s),
+                              e_state=e_state)
         if self.head_layout == "shared_gemm":
             e_state = e_state.transpose(0, 1).reshape(f * n, self.d)   # small copy
             logits = e_state.matmul(emb_table.t())                     # [f*N, V]
@@ -311,11 +337,8 @@ class DotPopulation(nn.Module):
             logits = torch.matmul(e_state, emb_table.t())              # [N, f, V]
             log_pi = F.log_softmax(logits, dim=-1).permute(1, 0, 2)    # [f, N, V]
             log_pi = log_pi.reshape(b, t, n, -1)                       # [B, T, N, V]
-        gamma = torch.einsum("fnd,nd->fn", s_new, self._sel(round_idx, self.c_w)) \
-            + self._sel(round_idx, self.c_b).unsqueeze(0)
-        trust = torch.einsum("fnd,nd->fn", s_new, self._sel(round_idx, self.g_w)) \
-            + self._sel(round_idx, self.g_b).unsqueeze(0)
         return DotOutputs(log_pi=log_pi,
                           gamma=gamma.reshape(b, t, n),
                           trust_term=trust.reshape(b, t, n),
-                          state=s_new.reshape(b, t, n, self.d_s))
+                          state=s_new.reshape(b, t, n, self.d_s),
+                          e_state=None)
