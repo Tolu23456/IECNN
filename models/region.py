@@ -352,8 +352,8 @@ class Region(nn.Module):
             # own weight, gate entropy, top weight
             w_ent = -(w * w.clamp_min(1e-12).log()).sum(-1, keepdim=True)
             w_top = w.max(-1, keepdim=True).values
-            err = torch.cat([w.unsqueeze(-1), w_ent.expand(b, t, n, 1),
-                             w_top.expand(b, t, n, 1)], dim=-1)
+            err = torch.cat([w.unsqueeze(-1), w_ent.unsqueeze(-1).expand(b, t, n, 1),
+                             w_top.unsqueeze(-1).expand(b, t, n, 1)], dim=-1)
 
             per_pass.append({"weights": w, "log_b": log_b,
                              "gamma": out.gamma, "tau": tau_p,
