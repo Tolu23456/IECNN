@@ -1,0 +1,43 @@
+# Rung E2-vocab3 "depth" (Tolu, 2026-11-16: "we haven't even added regions").
+#
+# The spec's intended shape finally evaluated at scale: 4 regions as stages
+# (spans 32/64/128/256, spelling -> sentence meaning) + cross-region
+# competition, on the E6 consensus machinery (verifier + per-dot oracle),
+# vocab 4096, corpus big.
+#
+# KEY COMPARISON: ~5.3M params ~= E7's 5.7M — so E2-vocab3 vs E7_scale_up
+# is WIDTH (d 256, 1 region) vs DEPTH (d 128, 4 regions) at matched size.
+# Whichever axis scales better decides the 25M+ rung shape (and the 1.5B
+# sketch: 8 regions x d_s 2048).
+#
+# Fresh training (the 1-region checkpoint's region/chains weights are
+# shape-incompatible with 4 regions). Compute per position is ~4x E6
+# (regions run sequentially; each is a full 3-pass committee), comparable
+# to E7's width. CPU overlay overrides the GPU speed pack.
+base: e6_consensus_v2.yaml
+name: e2_regions_vocab3
+data:
+  corpus: big
+ubm:
+  vocab_file: UBM/vocab_v3.json
+model:
+  n_regions: 4
+  use_cross_region: true
+training:
+  batch_size: 8
+  lr: 1.0e-3
+  lr_schedule: constant
+  warmup_steps: 500
+  steps: 50000
+  eval_chars: 100000
+  eval_every: 120
+  checkpoint_every: 120
+  early_stop:
+    patience_evals: 6
+    min_improvement: 0.005
+    wall_hours: 0.0
+  lambda_o: 0.2
+  lambda_v: 0.5
+  lambda_c: 0.1
+  lambda_c_ramp_steps: 5000
+  outvote_weight: 3.0
