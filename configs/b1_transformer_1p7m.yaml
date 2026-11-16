@@ -1,0 +1,40 @@
+# Rung B1-matched "transformer @ 1.7M" (Tolu, 2026-11-16: "train a
+# transformer with equal compute and basically the same thing as IECNN with
+# the same params (1.7M) and we see if transformer can produce better text").
+#
+# Sizing to match the IECNN committee (1,717,030 params, d=128 single
+# region): d_model 128, 3 layers, 4 heads -> embed 524k + UNTIED out head
+# 524k + pos 33k + 3 blocks x ~197k ~= 1.67M params (-2.6% vs IECNN; the
+# transformer spends a whole second embedding table on the output head).
+# Equal-compute protocol: same corpus (big), same vocab (4096/v3), same
+# batch (8 x 256 ctx), same eval protocol (100k chars every 120 steps),
+# same steps budget as the IECNN path consumed to reach its 1.85351
+# plateau (12,240 from-scratch steps; ceiling 15000 here, patience-governed).
+# Regularization parity with b0/b1 (Tolu, 2026-11-02).
+base: base.yaml
+name: b1_transformer_1p7m
+data:
+  corpus: big
+ubm:
+  vocab_file: UBM/vocab_v3.json
+model:
+  kind: transformer
+  d_model: 128
+  n_heads: 4
+  n_layers: 3
+training:
+  batch_size: 8
+  lr: 1.0e-3
+  lr_schedule: constant
+  warmup_steps: 500
+  steps: 15000
+  eval_chars: 100000
+  eval_every: 120
+  checkpoint_every: 120
+  early_stop:
+    patience_evals: 6
+    min_improvement: 0.005
+    wall_hours: 0.0
+  weight_decay: 0.01
+  dot_dropout: 0.0
+  message_dropout: 0.2
