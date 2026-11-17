@@ -9,9 +9,18 @@ Per pass p, per dot k, per position t (b, f=batch shape B,T):
     K_t   = windowed memory keys (shared, built by Region)          [w, d_q]
     a     = softmax(K_t q / sqrt(d_q), causal window mask applied)  [w]
     c     = a V_t                                                   [d_v]
-    u     = [c ; h_pool ; e ; r_p ; m_in]                          [d_in]
+    u     = [c ; h_pool ; e ; r_p ; m_in ; slot_r]              [d_in]
     s'    = GRU_k(u, s)                                             [d_s]
     pi,gamma,trust from s' through the tied embedding E [V, d].
+
+E13 slot table (Tolu, 2026-11-17): each dot also owns S private slots
+[d_w each] carried ACROSS positions (dot states reset every position per
+clarification C1 — the table is the persistence loophole). Writes are
+gated and DETACHED (no gradient through time: near-zero training cost,
+the fast-weights move validated in scripts/slot_toy.py — reset+table
+recovered most of the ~0.4 bpc the reset costs at toy scale). The read
+enters the GRU input; slots differentiate through per-slot gate
+trajectories (different temporal mixtures of the dot's value stream).
 """
 from __future__ import annotations
 
@@ -26,9 +35,11 @@ ROUND_DIM = 16          # learned pass-index embedding (spec 01)
 ERR_DIM = 3             # error feature e (spec 01, section 5)
 
 
-def gru_input_dim(d_v: int, d_s: int, message_dim: int = 0) -> int:
-    """d_in = value + pooled opinion + error feature + round signal + message."""
-    return d_v + d_s + ERR_DIM + ROUND_DIM + message_dim
+def gru_input_dim(d_v: int, d_s: int, message_dim: int = 0,
+                  slot_read_dim: int = 0) -> int:
+    """d_in = value + pooled opinion + error feature + round signal + message
+    + slot read (e13: the dot's private carried table)."""
+    return (d_v + d_s + ERR_DIM + ROUND_DIM + message_dim + slot_read_dim)
 
 
 @dataclass
@@ -82,7 +93,9 @@ class DotPopulation(nn.Module):
 
     def __init__(self, n_dots, d, d_q, d_v, d_s, vocab_size, message_dim=0,
                  n_passes=3, dynamic_query=False, share_pass_params=True,
-                 seed: int = 0, fast_math: bool = True):
+                 seed: int = 0, fast_math: bool = True,
+                 slot_slots: int = 0, slot_dim: int = 32,
+                 slot_decay: float = 0.5):
         super().__init__()
         self.N = n_dots
         self.d = d
@@ -109,7 +122,18 @@ class DotPopulation(nn.Module):
         # Region from model.read_mode; tau_seclusion anneals the soft term.
         self.read_mode = "soft"
         self.tau_seclusion = 1.0
-        self.in_dim = gru_input_dim(d_v, d_s, message_dim)
+        # E13 (Tolu's slot-table memory): S private slots per dot, dim d_w,
+        # carried across positions inside one forward (zeroed at sequence
+        # start). Parameter-lean: the write value is a per-dot d_s->d_w
+        # projection shared across slots (slots differentiate via their own
+        # gate trajectories = different temporal mixtures), the gate is
+        # per-dot d_s->S, the read is per-slot-per-dim weights [N, S, d_w].
+        # Writes run under no_grad -> grads reach only the read path.
+        self.S = int(slot_slots)
+        self.d_w = int(slot_dim)
+        self.slot_decay = float(slot_decay)
+        self.slot_read_dim = self.d_w if self.S > 0 else 0
+        self.in_dim = gru_input_dim(d_v, d_s, message_dim, self.slot_read_dim)
 
         p_layers = 1 if share_pass_params else n_passes   # stacked per-pass depth
         g = torch.Generator().manual_seed(seed)
@@ -132,6 +156,70 @@ class DotPopulation(nn.Module):
         self.g_b = nn.Parameter(torch.zeros(p_layers, n_dots))
         self.round_emb = nn.Embedding(max(n_passes, 1), ROUND_DIM)
         nn.init.normal_(self.round_emb.weight, std=0.02)
+
+        # ---- e13 slot table parameters (Tolu) -----------------------------
+        if self.S > 0:
+            self.sv = nn.Parameter(torch.stack(      # write value d_s -> d_w
+                [torch.stack([_xavier(d_s, self.d_w, g)
+                              for _ in range(n_dots)])
+                 for _ in range(p_layers)]))         # [p_layers, N, d_s, d_w]
+            self.sg = nn.Parameter(0.1 * torch.randn(  # write gate d_s -> S
+                p_layers, n_dots, d_s, self.S, generator=g))
+            self.sgb = nn.Parameter(torch.zeros(p_layers, n_dots, self.S))
+            self.sr = nn.Parameter(0.1 * torch.randn(  # read [N, S, d_w]
+                p_layers, n_dots, self.S, self.d_w, generator=g))
+        else:
+            self.sv = self.sg = self.sgb = self.sr = None
+
+    # ----- e13 slot table --------------------------------------------------
+    def empty_slots(self, batch: int, device, dtype) -> torch.Tensor:
+        """Fresh (zeroed) slot table [B, N, S, d_w] — the sequence boundary.
+
+        Each forward starts with an empty table, matching how the windowed
+        memory treats a new document chunk (clarification C1 stays true for
+        the GRU state; ONLY the table persists, and only within a sequence).
+        """
+        return torch.zeros(batch, self.N, self.S, self.d_w,
+                           device=device, dtype=dtype)
+
+    def slot_context(self, slot_table: torch.Tensor | None,
+                     round_idx: int) -> torch.Tensor | None:
+        """Read the dot's own slots: [B, N, S, d_w] -> [B, N, d_w].
+
+        Differentiable ONLY through the read weights (the table itself is
+        built under no_grad), so training cost stays near zero.
+        """
+        if self.S == 0:
+            return None
+        return torch.einsum("bnsd,nsd->bnd", slot_table,
+                            self._sel(round_idx, self.sr))
+
+    def update_slots(self, state: torch.Tensor,
+                     slot_table: torch.Tensor,
+                     round_idx: int) -> torch.Tensor:
+        """Gated DETACHED write, sequential over positions: after a pass.
+
+        state [B, T, N, d_s] -> new [B, N, S, d_w].
+        M <- dec*M + (1-dec) * sigmoid(gate) * tanh(value)
+        Per-slot gates give each slot its own temporal mixture of the dot's
+        value stream (that is how slots differentiate — no per-slot heads).
+        """
+        with torch.no_grad():
+            b, t = state.shape[0], state.shape[1]
+            v = torch.tanh(torch.einsum(
+                "btnd,nde->btne", state, self._sel(round_idx, self.sv)))
+            g = torch.sigmoid(torch.einsum(
+                "btnd,nds->btns", state, self._sel(round_idx, self.sg))
+                + self._sel(round_idx, self.sgb))
+            m = slot_table
+            dec = self.slot_decay
+            for i in range(t):
+                # gate [B,N,S,1] x value [B,N,1,d_w] -> [B,N,S,d_w]: the
+                # write VALUE is shared across slots; the per-slot gate
+                # trajectory is what makes slot contents differ over time
+                m = (dec * m + (1.0 - dec) * g[:, i].unsqueeze(-1)
+                     * v[:, i].unsqueeze(2))
+            return m
 
     # ----- helpers ---------------------------------------------------------
     def _sel(self, pass_idx: int, t: torch.Tensor) -> torch.Tensor:
@@ -171,7 +259,8 @@ class DotPopulation(nn.Module):
     def forward(self, wind_k, wind_v, valid_mask, h_pool, err_feat,
                 round_idx: int, msg_in, state, emb_table,
                 attn_cache: dict | None = None,
-                want_log_pi: bool = True) -> DotOutputs:
+                want_log_pi: bool = True,
+                slot_table: torch.Tensor | None = None) -> DotOutputs:
         """One pass for all dots at all positions simultaneously.
 
         wind_k    [B, T, w, d_q]   windowed, rel-distance-added keys
@@ -182,6 +271,8 @@ class DotPopulation(nn.Module):
         msg_in    [B, T, N, d_m]   or None
         state     [B, T, N, d_s]   s_prev
         emb_table [V, d]           tied embedding, shared by the whole model
+        slot_table [B, N, S, d_w]  e13: the dot's carried private slots
+                                   (None when slots are off)
         attn_cache dict           speed opt 7 (Tolu's "don't compute the same
                                   operation twice"): when shared pass params +
                                   static queries make the attention block
@@ -196,17 +287,19 @@ class DotPopulation(nn.Module):
         if getattr(self, "fast_math", True):
             return self._forward_fast(wind_k, wind_v, valid_mask, h_pool,
                                       err_feat, round_idx, msg_in, state,
-                                      emb_table, attn_cache, want_log_pi)
+                                      emb_table, attn_cache, want_log_pi,
+                                      slot_table)
         return self._forward_reference(wind_k, wind_v, valid_mask, h_pool,
                                        err_feat, round_idx, msg_in, state,
-                                       emb_table, want_log_pi)
+                                       emb_table, want_log_pi, slot_table)
 
     # the einsum-per-op version, kept for the equivalence test and as a
     # reference implementation of spec 01 (slower: einsum re-plans paths the
     # kernel cannot fuse into batched GEMMs)
     def _forward_reference(self, wind_k, wind_v, valid_mask, h_pool, err_feat,
                            round_idx: int, msg_in, state, emb_table,
-                           want_log_pi: bool = True) -> DotOutputs:
+                           want_log_pi: bool = True,
+                           slot_table: torch.Tensor | None = None) -> DotOutputs:
         b, t, w = wind_k.shape[0], wind_k.shape[1], wind_k.shape[2]
         device = wind_k.device
 
@@ -235,6 +328,12 @@ class DotPopulation(nn.Module):
         if self.d_m > 0:
             parts.append(msg_in if msg_in is not None else
                          torch.zeros(b, t, self.N, self.d_m, device=device, dtype=ctx.dtype))
+        if self.S > 0:
+            # e13: the dot's carried slots read as ONE vector per dot, the
+            # same for every position in this pass (the table updates
+            # between passes — a one-pass-delay persistence channel)
+            r = self.slot_context(slot_table, round_idx)            # [B, N, d_w]
+            parts.append(r.unsqueeze(1).expand(b, t, self.N, self.d_w))
         x = torch.cat(parts, dim=-1)                                    # [B, T, N, d_in]
 
         in_gates = torch.einsum("bfni,niq->bfnq", x, self._sel(round_idx, self.w_ih))
@@ -271,7 +370,8 @@ class DotPopulation(nn.Module):
     def _forward_fast(self, wind_k, wind_v, valid_mask, h_pool, err_feat,
                       round_idx: int, msg_in, state, emb_table,
                       attn_cache: dict | None = None,
-                      want_log_pi: bool = True) -> DotOutputs:
+                      want_log_pi: bool = True,
+                      slot_table: torch.Tensor | None = None) -> DotOutputs:
         b, t, w = wind_k.shape[0], wind_k.shape[1], wind_k.shape[2]
         f = b * t
         n = self.N
@@ -328,6 +428,10 @@ class DotPopulation(nn.Module):
         if self.d_m > 0:
             parts.append(msg_in.reshape(f, n, self.d_m) if msg_in is not None else
                          torch.zeros(f, n, self.d_m, device=device, dtype=dt))
+        if self.S > 0:
+            r = self.slot_context(slot_table, round_idx)            # [B, N, d_w]
+            parts.append(r.unsqueeze(1).expand(b, t, n, self.d_w)
+                         .reshape(f, n, self.d_w))
         x = torch.cat(parts, dim=-1)                                    # [f, N, d_in]
 
         w_ih_b = self._sel(round_idx, self.w_ih)                        # [N, in, 3h]

@@ -92,13 +92,24 @@ class Region(nn.Module):
         # traffic — with the committee read intact in hidden space.
         self.head_mode = str(m.get("head_mode", "prob"))
 
+        # Rung E13 (Tolu's slot-table memory, 2026-11-17): model.slot_slots
+        # > 0 gives every dot S private slots [slot_dim each] carried across
+        # positions inside a forward (the dot's GRU state still resets every
+        # position — clarification C1 stays; the TABLE is the persistence).
+        # Gated detached writes; the read enters the GRU input.
+        self.slot_slots = int(m.get("slot_slots", 0))
+        self.slot_dim = int(m.get("slot_dim", 32))
+        self.slot_decay = float(m.get("slot_decay", 0.5))
+
         self.dots = DotPopulation(
             self.n_dots, d, d_q, d_v, d_s, vocab_size,
             message_dim=(16 if self.use_messages else 0),
             n_passes=self.n_passes, dynamic_query=self.dynamic_query,
             share_pass_params=self.share_pass_params,
             seed=1000 + region_index,
-            fast_math=bool(m.get("fast_dot_math", True)))
+            fast_math=bool(m.get("fast_dot_math", True)),
+            slot_slots=self.slot_slots, slot_dim=self.slot_dim,
+            slot_decay=self.slot_decay)
         self.dots.head_layout = str(m.get("head_layout", "shared_gemm"))
         # Rung E12: Tolu's seclusion mechanism — model.read_mode: "secluded"
         # makes every dot commit to exactly ONE token in its window (hard
@@ -316,6 +327,10 @@ class Region(nn.Module):
         per_pass = []
         err = torch.zeros(b, t, n, 3, device=device, dtype=rows.dtype)
         e_state_last = None
+        # e13: fresh (zeroed) slot table at the sequence boundary; it is
+        # updated with a detached scan after every pass and read by the next
+        slots = (self.dots.empty_slots(b, device, rows.dtype)
+                 if self.dots.S > 0 else None)
 
         dot_mask = None
         if training and self.dot_dropout > 0 and torch.rand(()) < self.dot_dropout:
@@ -336,8 +351,12 @@ class Region(nn.Module):
                             round_idx=p - 1,
                             msg_in=msg_read if p > 1 else None, state=state,
                             emb_table=emb_table, attn_cache=attn_cache,
-                            want_log_pi=last)
+                            want_log_pi=last, slot_table=slots)
             state_prev = out.state
+            if slots is not None:
+                # e13: detached scan — the table this pass wrote is read by
+                # the next pass (one-pass-delay persistence, no BPTT)
+                slots = self.dots.update_slots(state_prev, slots, p - 1)
             if last:
                 e_state_last = out.e_state
 
@@ -421,6 +440,9 @@ class Region(nn.Module):
         msg_read = None
         log_b_prev = None
         per_pass = []
+        # e13: fresh slot table per forward, detached scan after each pass
+        slots = (self.dots.empty_slots(b, device, rows.dtype)
+                 if self.dots.S > 0 else None)
 
         # chunked consensus (speed opt 4): rows per consensus slice; 0 or
         # >= f disables chunking (single slice = the pre-opt-4 math exactly).
@@ -459,8 +481,11 @@ class Region(nn.Module):
                 # ^ every dot reads the SAME pooled opinion (spec 01, input table)
             out = self.dots(wind_k, wind_v, valid, h_pool, err, round_idx=p - 1,
                             msg_in=msg_read if p > 1 else None, state=state,
-                            emb_table=emb_table, attn_cache=attn_cache)
+                            emb_table=emb_table, attn_cache=attn_cache,
+                            slot_table=slots)
             state_prev = out.state
+            if slots is not None:
+                slots = self.dots.update_slots(state_prev, slots, p - 1)
 
             # ---- consensus + pooling, chunked over rows (speed opt 4) ----
             # The [., N, V] chain (exp, loo, JS, scores, weights, pool) is

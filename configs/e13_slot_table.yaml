@@ -1,0 +1,22 @@
+# Rung E13 (Tolu's slot-table memory, 2026-11-17: "a large table just one
+# and each dots commits to the table and gets a space with an id only they
+# can view because it is masked").
+#
+# What it is: S private slots per dot, carried ACROSS positions inside a
+# forward (the dot's GRU state still resets every position — clarification
+# C1 stays; the table is the persistence loophole). Gated DETACHED writes
+# (fast-weights move: no gradient through time, near-zero training cost);
+# the read enters the GRU input. Strict privacy needs no mask tensor: each
+# dot reads only its own slice (a door only you can open is your own room).
+#
+# Evidence (DECISIONS.md, scripts/slot_toy.py): the state reset costs
+# ~0.42-0.45 bpc at toy scale; reset+table recovers most of it (beats reset
+# by 0.41/0.26 on two seeds) WITHOUT backprop-through-time; it reached
+# parity with full state-carry on seed 0. Built on e11b (no-trust shared
+# head) — the current leader — so the table rides on the cheapest dots.
+base: e11b_no_trust.yaml
+name: e13_slot_table
+model:
+  slot_slots: 4      # slots per dot
+  slot_dim: 32       # slot width d_w (independent of d_s)
+  slot_decay: 0.5    # M <- 0.5*M + 0.5*gate*tanh(value)
