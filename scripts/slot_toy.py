@@ -8,7 +8,8 @@ Arms (same seed, same params except the table's own):
   table  : window W=8 + S private slots per dot, carried across positions
   wide   : window W=32, no table  (control: notebook vs longer recording)
 
-Run: python3 scripts/slot_toy.py [steps]
+Run: python3 scripts/slot_toy.py [steps] [seed]
+Arms: none/table/wide = state carried; reset/rtab = state zeroed each position.
 """
 import sys, time
 import torch
@@ -40,9 +41,10 @@ class Model(nn.Module):
     GRU update s = GRU([c ; r ; s]); gated detached write into slots.
     Slots differentiate via per-slot write heads (S distinct heads)."""
 
-    def __init__(self, use_table, W):
+    def __init__(self, use_table, W, reset_state=False):
         super().__init__()
         self.use_table, self.W = use_table, W
+        self.reset_state = reset_state
         self.emb = nn.Embedding(V, D)
         self.q = nn.Parameter(torch.randn(N, D) * 0.1)   # per-dot queries
         self.k = nn.Linear(D, D, bias=False)             # window keys
@@ -62,6 +64,8 @@ class Model(nn.Module):
         M = torch.zeros(B, N, S, D, device=x.device)      # slots: no grad ever
         logits = []
         for t in range(T):
+            if self.reset_state:                          # clarification-C1 arm
+                s = torch.zeros_like(s)
             lo = max(0, t - self.W + 1)
             win = E[:, lo:t + 1]                          # [B,w,D] raw past
             att = torch.einsum('nd,bwd->bnw', self.q, self.k(win))
@@ -86,10 +90,15 @@ class Model(nn.Module):
 
 
 def run(arm, steps):
-    use_table, W = {"none": (False, 8), "table": (True, 8),
-                    "wide": (False, 32)}[arm]
+    use_table, W, rst = {
+        "none":  (False, 8, False),   # carry state, no table
+        "table": (True,  8, False),   # carry state + table
+        "wide":  (False, 32, False),  # longer recording, no table
+        "reset": (False, 8, True),    # current IECNN regime: state resets
+        "rtab":  (True,  8, True),    # e13 regime: state resets, table carries
+    }[arm]
     torch.manual_seed(SEED)
-    m = Model(use_table, W)
+    m = Model(use_table, W, rst)
     opt = torch.optim.AdamW(m.parameters(), lr=3e-3)
     t0 = time.time()
     curve = []
@@ -110,7 +119,7 @@ def run(arm, steps):
 
 
 t0 = time.time()
-for arm in ("none", "table", "wide"):
+for arm in ("none", "table", "wide", "reset", "rtab"):
     torch.manual_seed(SEED)
     curve, dt, div = run(arm, STEPS)
     print(f"[{arm:6s}] val bpc: {curve[0]:.3f} -> {curve[-1]:.3f}  "
