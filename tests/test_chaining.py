@@ -6,6 +6,7 @@ chained chunk silently re-trained from step 0)."""
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 from utils import set_seed
@@ -98,3 +99,12 @@ def test_train_workflow_restores_artifact_at_repo_root():
     names = [s.get("name", "") for s in wf["jobs"]["train"]["steps"]]
     assert any("Restore previous chunk" in n for n in names), names
     assert json.dumps(wf["permissions"]) != "{}"
+    # the commit step must define CONFIG itself: it runs under set -u and
+    # CONFIG is only exported on the Train-chunk step (2026-11-17 bug: every
+    # chunk's results commit died silently on the unbound variable)
+    commit = [s for s in wf["jobs"]["train"]["steps"]
+              if s.get("name", "").startswith("Commit results")]
+    assert commit, names
+    commit_run = commit[0].get("run", "")
+    assert re.search(r'^\s*CONFIG=', commit_run, re.M), \
+        "commit step must define CONFIG itself (unbound-variable bug)"

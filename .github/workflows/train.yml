@@ -213,7 +213,11 @@ jobs:
         if: always() && !cancelled() && github.event.inputs.commit_results == 'true'
         run: |
           set -euo pipefail
-          OUT="checkpoints/${{ github.event.inputs.config }}_seed${{ matrix.seed }}"
+          # CONFIG is defined as env on the Train-chunk step only; this step
+          # needs its own copy (the unbound-variable failure 2026-11-17 lost
+          # every chunk-2/3 results commit silently).
+          CONFIG="${{ github.event.inputs.config }}"
+          OUT="checkpoints/${CONFIG%.*}_seed${{ matrix.seed }}"
           if [ -f "$OUT/summary.json" ]; then cp "$OUT/summary.json" "results/summary_${{ github.event.inputs.config }}_seed${{ matrix.seed }}.json"; fi
           git config user.name "IECNN Actions bot"
           git config user.email "actions@users.noreply.github.com"
