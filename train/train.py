@@ -424,6 +424,24 @@ def train_one(config: dict, seed: int, out_dir: Path, max_steps: int | None = No
         train_seconds += time.perf_counter() - t_step
         last_step = step
 
+        # progress + memory diagnostics every 100 steps (flushed): the
+        # 2026-11-17 stall diagnosis ("did chunk N crawl or hang?") was
+        # blind because prints only fired every 10000 steps / at evals —
+        # buffered stdout on Actions made even those invisible. RSS via
+        # /proc (Linux runners) when available; empty elsewhere.
+        if step % 100 == 0:
+            rss = ""
+            try:
+                with open("/proc/self/status") as fh:
+                    for ln in fh:
+                        if ln.startswith("VmRSS"):
+                            rss = f" rss {ln.split()[1]}{ln.split()[2]}"
+                            break
+            except OSError:
+                pass
+            print(f"[{name} seed{seed}] diag step {step} "
+                  f"train_s {train_seconds:.0f}{rss}", flush=True)
+
         last = step == steps - 1
         if (step > 0 and step % eval_every == 0) or last:
             # eval() around in-loop evals: numerically neutral today (the

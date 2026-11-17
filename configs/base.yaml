@@ -46,7 +46,12 @@ training:
   betas: [0.9, 0.95]
   grad_clip: 1.0
   eval_every: 1000
-  checkpoint_every: 1000
+  # 250 (2026-11-17 stall diagnosis): a resumed Actions chunk starts mid-
+  # window, so with 1000-step saves a crawling chunk could run its whole
+  # 320-min cap without hitting a save and lose ALL progress (its artifact
+  # was just the restored previous-chunk file). 250 guarantees progress
+  # persists every ~25 min even at 10 s/step. Evals stay at 1000.
+  checkpoint_every: 250
   seeds: [0, 1, 2]
   lambda_r: 0.0
   lambda_d: 0.0
