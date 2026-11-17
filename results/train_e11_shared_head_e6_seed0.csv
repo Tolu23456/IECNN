@@ -1,0 +1,2 @@
+step,pooled_top1,oracle_top1,oracle_top5,outvote_rate,verifier_sel,overlap5,acc_per_dot
+1000,0.13165,0.17726,0.3116,0.04563,,0.69838,"[0.10555, 0.10744, 0.11173, 0.10895, 0.09867, 0.10843, 0.08522, 0.11146]"
