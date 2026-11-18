@@ -61,8 +61,12 @@ def main():
     conf, ok = [], []
     # top-1 by amount of context available: positions 0..15 of a window have
     # almost no history, positions 32+ have plenty. A model that is only good
-    # because of long context shows it here.
-    buckets = {"0-15": [0, 0], "16-63": [0, 0], "64+": [0, 0]}
+    # because of long context shows it here. Accumulated as a per-POSITION hit
+    # count (the first version summed sliced tensors inside the loop and
+    # printed 0.000 for every bucket — a silent instrument bug, so this one is
+    # a single tensor and the buckets are read off it once).
+    pos_hit = torch.zeros(T)
+    pos_n = 0
     with torch.no_grad():
         for x, y in wins:
             lp = model(x)["final_log_probs"]
@@ -76,11 +80,12 @@ def main():
             hit5 += top.eq(y.unsqueeze(-1)).any(-1).sum().item()
             conf.append(lp.exp().max(-1).values.reshape(-1).cpu())
             ok.append(h1.cpu())
-            for name, (lo, hi) in buckets.items():
-                sl = slice(lo, min(hi, T))
-                buckets[name][0] += h1[sl].sum().item()
-                buckets[name][1] += h1[sl].numel()
+            pos_hit += h1.float().cpu().reshape(-1)
+            pos_n += 1
 
+    rate = pos_hit / max(pos_n, 1)                              # [T]
+    buckets = {"0-15": rate[:16], "16-63": rate[16:64],
+               "64+": rate[64:] if T > 64 else rate[0:0]}
     cp = torch.cat(conf)
     co = torch.cat(ok).float()
     order = cp.argsort()
@@ -94,7 +99,7 @@ def main():
         "steps": row["steps"], "bpc": nll_sum / ntok / math.log(2),
         "bpc_at_eq": row["bpc_final"],
         "top1": hit1 / ntok, "top5": hit5 / ntok,
-        "top1_by_context": {k: round(v[0] / max(v[1], 1), 3)
+        "top1_by_context": {k: round(v.mean().item(), 3) if v.numel() else None
                             for k, v in buckets.items()},
         "accuracy_by_confidence_decile": dec,
     }
