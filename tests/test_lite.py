@@ -1012,7 +1012,8 @@ def test_post_share_trades_parameters_for_depth():
     assert allsh.regions[0].post_repeat == 4
     assert n(base) - n(allsh) == 3 * n_blk
     # "up" keeps every per-block ln and w2, and only the [d, w] w1 is shared
-    assert n(base) - n(upsh) == 3 * r.post_blocks[0]["w1"].weight.numel()
+    n_w1 = sum(p.numel() for p in r.post_blocks[0]["w1"].parameters())
+    assert n(base) - n(upsh) == 3 * n_w1
     # and the shared stack is the same function as the explicit one
     h = torch.randn(3, 5, r.post_blocks[0]["ln"].normalized_shape[0])
     with torch.no_grad():

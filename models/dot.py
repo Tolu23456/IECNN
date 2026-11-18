@@ -649,7 +649,7 @@ class DotPopulation(nn.Module):
         e_k = e.unsqueeze(-1) * torch.exp(
             -ar * torch.log(gam.view(1, 1, n, k)))                # [B,T,N,K]
         cum_e = torch.cumsum(e_k, dim=1)                          # [B,T,N,K]
-        ev = e_k.unsqueeze(-1) * full_v.unsqueeze(2).unsqueeze(-1)
+        ev = e_k.unsqueeze(-1) * full_v.unsqueeze(2).unsqueeze(2)
         num = torch.cumsum(ev, dim=1) / cum_e.unsqueeze(-1).clamp_min(1e-9)
         return (num * mix.view(1, 1, n, k, 1)).sum(-2)            # [B,T,N,d_v]
 
