@@ -851,6 +851,28 @@ ARMS = {
         global_read=True, spans=(8,), head_post=512, head_post_layers=3,
         read_ln=True, head_ln=True, global_decay=True),
         {"lr": 2e-3, "swa": 0.99, "compile": "noscan"}),
+    # --- and if it is not the optimiser, which part of the model is the CEILING?
+    # Two candidates the short budget cannot separate, because at 180 s the dot
+    # model is AHEAD of tf and nobody asks what it cannot do:
+    #   * the far read cannot be content-addressed (static query => linear
+    #     attention), so it can learn "look 3 back" but not "look at the token
+    #     that matches this pattern". Multi-pass is the CHEAP content-addressed
+    #     read: pass 2 sees pass 1's pooled message, so the same 8 slots are
+    #     re-read with a state-dependent query at 2x cell cost and no T*T term.
+    #   * the LUG cell is a diagonal recurrence with a d_s=96 state per dot, a
+    #     much smaller memory than attention over 256 tokens. GRU was better per
+    #     token and slower per step at 180 s (-0.010 bpc@eqtok, +16% step); at a
+    #     long budget per-token quality dominates, so it is worth re-asking.
+    "iecnn-n3-x3-p2-ln-decay-d128-w512": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=512, head_post_layers=3,
+        read_ln=True, head_ln=True, global_decay=True),
+        {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-n3-x3-p1-ln-decay-d128-w512-gru": ("iecnn", lambda: iecnn(
+        "gru", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=512, head_post_layers=3,
+        read_ln=True, head_ln=True, global_decay=True),
+        {"lr": 2e-3, "swa": 0.99}),
     # --- is the long-budget PLATEAU an optimisation artefact? --------------
     # At 900 s the d128 arms flatten at ~2.01-2.03 while tf keeps falling to
     # 1.84, and bpc_train flattens with them (1.892 vs val 1.952), so it is not
