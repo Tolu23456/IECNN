@@ -625,3 +625,72 @@ def test_state_carry_trains_and_differs_from_reset():
         opt.zero_grad(); loss.backward(); opt.step()
     assert math.isfinite(loss.item())
     assert all(torch.isfinite(p).all() for p in car.parameters())
+
+
+def test_gla_matches_a_naive_position_by_position_linear_attention():
+    """`_global_ctx_linear` must equal the definition, written the slow way:
+    S_t = sum_{s<=t} phi(k_s) v_s^T, z_t = sum_{s<=t} phi(k_s),
+    ctx_t = phi(q)^T S_t / phi(q)^T z_t, with phi(z)=elu(z/d^(1/4))+1."""
+    import torch.nn.functional as F
+    model = build_iecnn(_cfg(global_read=True, global_linear=True, cell="lug"), 64)
+    dots = model.regions[0].dots
+    b, t, dq, dv, n = 2, 11, dots.d_q, dots.d_v, dots.N
+    k = torch.randn(b, t, dq) * 0.5
+    v = torch.randn(b, t, dv) * 0.5
+    got = dots._global_ctx_linear(k, v, 0)
+    assert got.shape == (b, t, n, dv)
+    s = dots.d_q ** -0.25
+    phik = F.elu(k * s) + 1.0
+    phiq = F.elu(dots._sel(0, dots.q) * s) + 1.0                     # [N,dq]
+    want = torch.zeros(b, t, n, dv)
+    for bb in range(b):
+        S = torch.zeros(dq, dv)
+        z = torch.zeros(dq)
+        for tt in range(t):
+            S = S + torch.outer(phik[bb, tt], v[bb, tt])
+            z = z + phik[bb, tt]
+            for nn in range(n):
+                num = phiq[nn] @ S
+                den = (phiq[nn] @ z).clamp_min(1e-6)
+                want[bb, tt, nn] = num / den
+    err = (got - want).abs().max().item()
+    assert err < 1e-5, err
+
+
+def test_gla_is_causal_cached_and_differs_from_the_static_read():
+    """Causality (a future token cannot change an earlier read), the S/z
+    cache must not change the numbers, and the read must actually differ
+    from the static-query prefix sum it replaces."""
+    kw = dict(global_read=True, cell="lug", head_last_only=True,
+              per_dot_logits=False, n_passes=2)
+    static = build_iecnn(_cfg(**kw), 64)
+    lin = build_iecnn(_cfg(global_linear=True, **kw), 64)
+    lin.load_state_dict(static.state_dict())        # same params, new read
+    x = torch.randint(0, 64, (2, 12))
+    dots = lin.regions[0].dots
+    k = torch.randn(2, 12, dots.d_q)
+    v = torch.randn(2, 12, dots.d_v)
+    with torch.no_grad():
+        a = dots._global_ctx(k, v, 0)
+        c1, c2 = {}, {}
+        b1 = dots._global_ctx(k, v, 0, cache=c1)     # fills the cache
+        b2 = dots._global_ctx(k, v, 0, cache=c1)     # cache hit
+        assert torch.allclose(b1, b2, atol=0, rtol=0), "cached read drifted"
+        # same k/v, future perturbed: earlier reads must be identical
+        k2, v2 = k.clone(), v.clone()
+        k2[:, 7:] += 3.0
+        b3 = dots._global_ctx(k2, v2, 0, cache=c2)
+        assert (a[:, :7] - b3[:, :7]).abs().max().item() < 1e-6
+        assert (a[:, 7:] - b3[:, 7:]).abs().max().item() > 1e-6
+        # and it is not the static-query read
+        sa = static.regions[0].dots._global_ctx(k, v, 0)
+        assert (sa - a).abs().max().item() > 1e-3
+    # end-to-end: runs, normalised log-probs, and trains a step
+    lin.train()
+    lp = lin(x)["final_log_probs"]
+    assert torch.allclose(lp.exp().sum(-1), torch.ones(2, 12), atol=1e-5)
+    y = torch.randint(0, 64, (2, 12))
+    loss = -lp.reshape(-1, 64).gather(1, y.reshape(-1, 1)).mean()
+    loss.backward()
+    assert all(torch.isfinite(p.grad).all() for p in lin.parameters()
+               if p.grad is not None)

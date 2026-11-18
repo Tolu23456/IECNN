@@ -201,7 +201,8 @@ class Region(nn.Module):
             in_ln=bool(m.get("cell_ln", False)),
             share_cell=bool(m.get("share_cell", False)),
             carry_state=bool(m.get("state_carry", False)),
-            carry_chunk=int(m.get("carry_chunk", 8)))
+            carry_chunk=int(m.get("carry_chunk", 8)),
+            gla=bool(m.get("global_linear", False)))
         # Lean passes: in hidden mode the pooled shared head and the per-dot
         # e_state projection are only consumed on the LAST pass. With
         # head_last_only the earlier passes skip both (they still update the

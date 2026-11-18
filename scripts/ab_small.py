@@ -56,7 +56,7 @@ def iecnn(cell="gru", lean=False, n_passes=3, n_dots=8, d_s=128, d=128,
           global_read=False, read_schedule="mix", head_untied=False,
           cell_ln=False, share_cell=False, query_from_input=False,
           id_lags=False, ngram_bias=0, head_rank=0,
-          state_carry=False, carry_chunk=8):
+          state_carry=False, carry_chunk=8, gla=False):
     m = {
         "kind": "iecnn", "d": d, "d_q": 16, "d_v": 32, "d_s": d_s,
         "n_dots": n_dots, "n_regions": 1, "n_passes": n_passes,
@@ -83,6 +83,7 @@ def iecnn(cell="gru", lean=False, n_passes=3, n_dots=8, d_s=128, d=128,
         "head_rank": head_rank,
         "state_carry": state_carry,
         "carry_chunk": carry_chunk,
+        "global_linear": gla,
     }
     if window_reach is not None:
         m["window_reach"] = window_reach
@@ -410,6 +411,23 @@ ARMS = {
     "iecnn-d96-ng": ("iecnn", lambda: iecnn(
         "lug", True, n_passes=2, n_dots=3, d_s=48, d=96, per_dot_logits=False,
         global_read=True, spans=(8,), ngram_bias=32),
+        {"lr": 2e-3, "swa": 0.99}),
+    # --- content-addressed LINEAR-attention global read (zero new params)
+    # The static-query prefix sum can only weight the prefix with a FIXED
+    # kernel; the transformer can address it by content. Linear attention
+    # gives that at O(T) and with no parameters: ctx = phi(q)^T S / phi(q)^T z
+    # with S = cumsum(phi(k) v^T). The old read is its phi==1 special case.
+    # gla      : phi(q) from the existing static per-dot query.
+    # gla-q    : phi(q) also carries the existing w_qi content term, so the
+    #            query depends on the current token (the only piece qin was
+    #            missing: _global_ctx used to ignore q_add entirely).
+    "iecnn-d96-gla": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=3, d_s=48, d=96, per_dot_logits=False,
+        global_read=True, spans=(8,), gla=True),
+        {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-d96-gla-q": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=3, d_s=48, d=96, per_dot_logits=False,
+        global_read=True, spans=(8,), gla=True, query_from_input=True),
         {"lr": 2e-3, "swa": 0.99}),
     # --- cross-position state carry (2026-11-18) ------------------------
     # The cell has always RESET to the learned s0 at every position, so the

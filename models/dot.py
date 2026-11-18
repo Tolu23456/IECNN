@@ -100,7 +100,8 @@ class DotPopulation(nn.Module):
                  share_out: bool = False, dist_bias: bool = False,
                  global_read: bool = False, read_schedule: str = "mix",
                  in_ln: bool = False, share_cell: bool = False,
-                 carry_state: bool = False, carry_chunk: int = 8):
+                 carry_state: bool = False, carry_chunk: int = 8,
+                 gla: bool = False):
         super().__init__()
         self.N = n_dots
         self.d = d
@@ -242,6 +243,26 @@ class DotPopulation(nn.Module):
         # factors, so the gate products stay in range.
         self.carry_state = bool(carry_state)
         self.carry_chunk = int(carry_chunk)
+        # gla: replace the global read's STATIC-QUERY prefix-sum with
+        # content-addressed LINEAR attention. This is the one thing the
+        # transformer has that the dots did not: a query that depends on the
+        # current token, so the read can say "find the past positions that
+        # look like what I am holding" instead of "average the prefix with a
+        # fixed weighting".
+        #
+        # The old read is the special case phi == 1 of
+        #     S_t = sum_{s<=t} phi(k_s) v_s^T,  z_t = sum_{s<=t} phi(k_s)
+        #     ctx_t = phi(q_t)^T S_t / (phi(q_t)^T z_t)
+        # with phi = elu(z / d_q^(1/4)) + 1. Both prefix sums are shared by
+        # ALL dots (the keys are shared) and pass-invariant, so they are
+        # computed once and cached with the window read. No O(T^2) tensor,
+        # no new parameters of any kind (q is the existing per-dot query,
+        # optionally plus the existing w_qi content term).
+        #
+        # Why this and not more parameters: five batches in a row have shown
+        # that ANY mechanism that adds parameters or gradient paths costs
+        # 0.06-0.12 bpc at this budget. This one adds zero.
+        self.gla = bool(gla)
         n_cell = 1 if self.share_cell else n_dots
         self.in_ln = (nn.LayerNorm(gru_input_dim(d_v, d_s, message_dim,
                                                  self.slot_read_dim))
@@ -445,7 +466,8 @@ class DotPopulation(nn.Module):
         return s0.expand(*batch_shape, self.N, self.d_s).contiguous()
 
     # ----- global causal read ----------------------------------------------
-    def _global_ctx(self, full_k, full_v, round_idx: int) -> torch.Tensor:
+    def _global_ctx(self, full_k, full_v, round_idx: int,
+                    q_add=None, cache: dict | None = None) -> torch.Tensor:
         """Exact causal attention over the whole prefix at O(T) time.
 
         A dot's query is static, so score(s) = q_n.k_s is independent of the
@@ -463,6 +485,9 @@ class DotPopulation(nn.Module):
         [B, N, T, d_v] tensor walks a d_v-strided axis and is measurably
         slower for the same numbers.
         """
+        if self.gla:
+            return self._global_ctx_linear(full_k, full_v, round_idx,
+                                           q_add=q_add, cache=cache)
         b, t, _ = full_v.shape
         n = self.N
         sc = torch.einsum("bsj,nj->bns", full_k, self._sel(round_idx, self.q))
@@ -473,6 +498,46 @@ class DotPopulation(nn.Module):
         cum_ev = torch.cumsum(ev, dim=-1)
         g = cum_ev / cum_e.unsqueeze(2).clamp_min(1e-9)                # [B,N,d_v,T]
         return g.permute(0, 3, 1, 2).contiguous()                    # [B, T, N, d_v]
+
+    def _global_ctx_linear(self, full_k, full_v, round_idx: int,
+                           q_add=None, cache: dict | None = None) -> torch.Tensor:
+        """Content-addressed linear-attention read of the whole prefix.
+
+            S_t = sum_{s<=t} phi(k_s) v_s^T      [B,T,d_q,d_v]
+            z_t = sum_{s<=t} phi(k_s)            [B,T,d_q]
+            ctx_t = phi(q_t)^T S_t / (phi(q_t)^T z_t)
+
+        with phi(z) = elu(z / d_q^(1/4)) + 1 (positive features, the standard
+        linear-attention map; the d_q^(1/4) keeps phi(q).phi(k) on the same
+        scale as the softmax path's q.k/sqrt(d_q)).
+
+        S and z do not depend on the query and the keys are shared by every
+        dot, so they are computed ONCE per region-forward and cached: the
+        per-pass and per-dot work is one [d_q] x [d_q, d_v] contraction
+        (~512 MACs/token). Total cost is ~5% of the cell, and no parameter
+        anywhere — the query is the existing per-dot q, optionally plus the
+        existing content term from w_qi.
+        """
+        b, t, dq = full_k.shape
+        n = self.N
+        s = float(self.d_q) ** -0.25
+        if cache is not None and "gla_S" in cache:
+            S, Z = cache["gla_S"], cache["gla_Z"]
+        else:
+            phik = F.elu(full_k * s) + 1.0                       # [B,T,d_q]
+            S = torch.cumsum(phik.unsqueeze(-1) * full_v.unsqueeze(2), dim=1)
+            Z = torch.cumsum(phik, dim=1)                        # [B,T,d_q]
+            if cache is not None:
+                cache["gla_S"], cache["gla_Z"] = S, Z
+        q0 = self._sel(round_idx, self.q)                        # [N,d_q]
+        if q_add is not None:
+            qv = q0.view(1, 1, n, dq) + q_add.reshape(b, t, 1, dq)
+        else:
+            qv = q0.view(1, 1, n, dq).expand(b, t, n, dq)
+        phiq = F.elu(qv * s) + 1.0
+        num = torch.einsum("btnd,btdv->btnv", phiq, S)           # [B,T,N,d_v]
+        den = torch.einsum("btnd,btd->btn", phiq, Z).clamp_min(1e-6)
+        return num / den.unsqueeze(-1)
 
     # ----- one pass --------------------------------------------------------
     def forward(self, wind_k, wind_v, valid_mask, h_pool, err_feat,
@@ -558,7 +623,8 @@ class DotPopulation(nn.Module):
 
         # ---- global causal read (same O(T) prefix-sum as the fast path) ----
         if self.global_read and full_k is not None:
-            g_ctx = self._global_ctx(full_k, full_v, round_idx)        # [B, T, N, d_v]
+            g_ctx = self._global_ctx(full_k, full_v, round_idx,
+                                     q_add=q_add)                    # [B, T, N, d_v]
             g_row = (self.g_glob[round_idx] if self.read_schedule == "split"
                      else self._sel(round_idx, self.g_glob))
             mix = torch.sigmoid(g_row).view(1, 1, n, 1)
@@ -736,7 +802,9 @@ class DotPopulation(nn.Module):
             if g_cacheable and "g_ctx" in attn_cache:
                 g_ctx = attn_cache["g_ctx"]
             else:
-                g_ctx = self._global_ctx(full_k, full_v, round_idx)
+                g_ctx = self._global_ctx(full_k, full_v, round_idx,
+                                         q_add=q_add,
+                                         cache=attn_cache if g_cacheable else None)
                 if g_cacheable:
                     attn_cache["g_ctx"] = g_ctx
             if self.read_schedule == "split":
