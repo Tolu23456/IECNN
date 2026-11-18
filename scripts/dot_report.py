@@ -148,7 +148,7 @@ def main():
             sc = torch.einsum("bfwj,nj->bfnw", wk, q) / math.sqrt(dots.d_q)
             sc = sc.masked_fill(~valid[None, :, None, :], float("-inf"))
             p = torch.nan_to_num(sc.softmax(-1), nan=0.0)        # [1,T,N,w]
-            p = p.reshape(-1, n, -1)
+            p = p.reshape(-1, n, p.shape[-1])
             ent = -(p.clamp_min(1e-12).log() * p).sum(-1)       # [T,N]
             acc["read_ent"] += ent.sum(0).cpu()
             for a in range(n):
