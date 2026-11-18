@@ -1193,16 +1193,32 @@ def pointer_audit(model) -> dict:
     q = r.dots._sel(0, r.dots.q)
     scores = torch.einsum("bfwj,nj->bfnw", wind_k, q) / math.sqrt(r.d_q)
     scores = scores.masked_fill(~valid[None, :, None, :], float("-inf"))
-    idx = scores.argmax(-1)
+    idx = scores.argmax(-1)                                   # [B,T,N]
     distinct = torch.tensor([len(set(row.tolist()))
                              for row in idx.reshape(-1, idx.shape[-1])])
     w = wind_k.shape[2]
-    dist = (w - 1 - idx).float()
+    # REAL slot -> distance map, from the same offsets the read used. With
+    # window_mode quad/bands the slots are not consecutive, so "w-1-idx" would
+    # silently report a fictional distance for those arms.
+    offs = r._window_offsets(x.device, 0)
+    dist = (-offs)[idx].clamp_min(0).float()                   # [B,T,N]
+    p = scores.softmax(-1)
+    ent = -(p.clamp_min(1e-12).log() * p).sum(-1)              # [B,T,N]
+    n = idx.shape[-1]
     return {
         "distinct_per_pos": round(distinct.float().mean().item(), 2),
         "all_same": round((distinct == 1).float().mean().item(), 3),
         "mean_dist_back": round(dist.float().mean().item(), 2),
         "frac_window_end": round((idx == (w - 1)).float().mean().item(), 3),
+        # per-dot: WHO looks where. One dot parked on distance 0 while the
+        # others look back is division of labour; every dot at distance 0 is
+        # the clone failure mode, and it is visible in bpc too.
+        "dot_dist_back": [round(v, 2)
+                          for v in dist.reshape(-1, n).mean(0).tolist()],
+        "dot_frac_end": [round(v, 3) for v in
+                         (idx == (w - 1)).reshape(-1, n).float().mean(0).tolist()],
+        "dot_read_entropy": [round(v, 3)
+                             for v in ent.reshape(-1, n).mean(0).tolist()],
     }
 
 

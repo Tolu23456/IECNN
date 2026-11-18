@@ -583,7 +583,8 @@ class Region(nn.Module):
     # ------------------------------------------------------------------
     def _forward_hidden(self, rows: torch.Tensor, emb_table: torch.Tensor,
                         tau0: float, hard_mode: bool, floor: float,
-                        training: bool, ablate_dot: int = -1) -> dict:
+                        training: bool, ablate_dot: int = -1,
+                        pool_only_dot: int = -1) -> dict:
         """Shared-head mode (rung E11): dots produce hidden states; a
         learned gate pools them; ONE tied head reads the pooled state.
 
@@ -716,6 +717,14 @@ class Region(nn.Module):
                 keep[..., ablate_dot] = 0.0
                 w = w * keep
                 w = w / w.sum(-1, keepdim=True).clamp_min(1e-9)
+            if pool_only_dot >= 0:
+                # Diagnostic only: force the pool to a one-hot so each dot is
+                # judged ALONE through the TRAINED pool->head path. This is the
+                # honest per-dot quality number, because per-dot logits are an
+                # untrained side output in the arms where per_dot_logits is
+                # off during training, so their own bpc says nothing.
+                w = torch.zeros_like(w)
+                w[..., pool_only_dot] = 1.0
 
             if self.interleave and not last:
                 # The transformer-block step the dots were missing: a
@@ -833,7 +842,7 @@ class Region(nn.Module):
                 tau0: float = 1.0, hard_mode: bool = False,
                 floor: float = 0.0, training: bool | None = None,
                 ids: torch.Tensor | None = None,
-                ablate_dot: int = -1) -> dict:
+                ablate_dot: int = -1, pool_only_dot: int = -1) -> dict:
         """rows [B, T, d] -> the region's consensus and diagnostics.
 
         floor: the per-dot weight floor eps (spec 04 section 3); callers hand
@@ -844,7 +853,8 @@ class Region(nn.Module):
             training = self.training
         if self.head_mode == "hidden":
             out = self._forward_hidden(rows, emb_table, tau0, hard_mode,
-                                       floor, training, ablate_dot=ablate_dot)
+                                       floor, training, ablate_dot=ablate_dot,
+                                       pool_only_dot=pool_only_dot)
         else:
             out = self._forward_prob(rows, emb_table, tau0, hard_mode,
                                      floor, training)

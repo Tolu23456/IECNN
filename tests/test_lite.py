@@ -1100,3 +1100,23 @@ def test_ablate_dot_is_a_diagnostic_only_path():
     assert torch.isfinite(c).all() and torch.isfinite(d).all()
     assert (a - c).abs().max().item() > 1e-5
     assert (c - d).abs().max().item() > 1e-5
+
+
+def test_pool_only_dot_is_the_trained_path_one_hot():
+    """`pool_only_dot=k` is how the audit judges a dot ALONE (per-dot logits
+    are an untrained side output, so they cannot answer "is this dot any
+    good"). It must be inert at -1 and exact: the one-hot pool has to
+    reproduce the pooled answer when there is only ONE dot to pick."""
+    kw = dict(global_read=True, per_dot_logits=False, head_last_only=True,
+              n_passes=2)
+    m = build_iecnn(_cfg(**kw), 64)
+    m.eval()
+    x = torch.randint(0, 64, (2, 12))
+    with torch.no_grad():
+        a = m(x)["final_log_probs"]
+        assert torch.equal(a, m(x, pool_only_dot=-1)["final_log_probs"])
+        outs = [m(x, pool_only_dot=k)["final_log_probs"] for k in range(4)]
+    for o in outs:
+        assert torch.isfinite(o).all()
+        assert o.shape == a.shape
+    assert (outs[0] - outs[1]).abs().max().item() > 1e-5
