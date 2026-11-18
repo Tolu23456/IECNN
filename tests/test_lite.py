@@ -955,7 +955,8 @@ def test_global_decay_matches_the_direct_weighted_average():
             ref = torch.zeros_like(got)
             for tt in range(t):
                 w = torch.exp(sc[:, :tt + 1] - sc[:, tt:tt + 1])  # [B,s,N]
-                w = w * gam ** torch.arange(tt, -1, -1).float()   # [B,s,N]
+                dist = torch.arange(tt, -1, -1).float().view(1, -1, 1)
+                w = w * gam ** dist                               # [B,s,N]
                 w = w.permute(0, 2, 1).unsqueeze(-1)              # [B,N,s,1]
                 ref[:, tt] = ((w * v[:, None, :tt + 1]).sum(2)
                               / w.sum(2))
