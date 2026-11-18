@@ -764,6 +764,35 @@ ARMS = {
         global_read=True, spans=(8,), head_post=256, head_post_layers=5,
         read_ln=True, head_ln=True, global_decay=True),
         {"lr": 2e-3, "swa": 0.99}),
+    # --- THROUGHPUT SWEEP: is the step launch-bound or FLOP-bound? ----------
+    # Every arm so far has been measured at B=32, T=256 (8192 tok/step). On a
+    # T4 with eager execution the step is a few hundred kernel launches, and
+    # the launch cost does not grow with batch size while the arithmetic does
+    # — so if the step is launch-bound, doubling B buys nearly free tokens and
+    # the same 180 s buys a third more DATA (bpc at fixed wall clock falls).
+    # The transformer gets the same treatment: this is a harness axis, not an
+    # architecture claim, so the anchor is re-measured at each B in-session.
+    # lr is deliberately NOT retuned per B (fairness: same optimiser for both
+    # arms); a B win with the same lr is a pure throughput win.
+    "tf-swa-b64": ("transformer", lambda: tf(96, 4, 3),
+                   {"swa": 0.995, "batch": 64}),
+    "tf-swa-b128": ("transformer", lambda: tf(96, 4, 3),
+                    {"swa": 0.995, "batch": 128}),
+    "iecnn-n3-x4-p1-ln-decay-b64": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=192, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=384, head_post_layers=4,
+        read_ln=True, head_ln=True, global_decay=True),
+        {"lr": 2e-3, "swa": 0.99, "batch": 64}),
+    "iecnn-n3-x4-p1-ln-decay-b128": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=192, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=384, head_post_layers=4,
+        read_ln=True, head_ln=True, global_decay=True),
+        {"lr": 2e-3, "swa": 0.99, "batch": 128}),
+    "iecnn-n3-x5-p1-ln-decay-d128-b64": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=384, head_post_layers=5,
+        read_ln=True, head_ln=True, global_decay=True),
+        {"lr": 2e-3, "swa": 0.99, "batch": 64}),
     "iecnn-n3-x6-p1-ln-decay-d128-w256": ("iecnn", lambda: iecnn(
         "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
         global_read=True, spans=(8,), head_post=256, head_post_layers=6,
@@ -1317,7 +1346,7 @@ def main():
         gap = r["bpc_train"] - r["bpc_final"]
         print(f"{r['arm']:<18}{r['params']:>8}{r['steps']:>7}"
               f"{r['tokens']/1e6:>8.2f}M{r['s_per_step']:>9.4f}"
-              f"{r['s_per_1k_tokens']:>10.2f}{r['bpc_final']:>9.4f}"
+              f"{r['s_per_1k_tokens']:>10.4f}{r['bpc_final']:>9.4f}"
               f"{('%.4f' % be) if be is not None else '   -':>11}"
               f"{r['bpc_train']:>8.4f}{gap:>+7.4f}", flush=True)
         if "pointers" in r:
