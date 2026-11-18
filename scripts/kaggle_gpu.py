@@ -93,6 +93,7 @@ env.update({
     "ARM_VALSTRIDE": str(stride),
     "ARM_COMPILE": "0",          # Inductor dies on the CUDA prefix scan
     "ARM_BREAK_SCAN": "0",
+    "ARM_SEED": os.environ.get("K_SEED", "0"),   # 2-seed confirmation runs
 })
 
 print(f"=== TAG {TAG} arms {ARMS}", flush=True)

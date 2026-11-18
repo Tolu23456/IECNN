@@ -714,6 +714,39 @@ ARMS = {
         global_read=True, spans=(8,), head_post=384, head_post_layers=4,
         read_ln=True, head_ln=True, global_decay=True, read_heads=2),
         {"lr": 2e-3, "swa": 0.99}),
+    # --- the parameter frontier -------------------------------------------
+    # Width has never beaten depth at equal parameters (2.2005 two blocks at
+    # w384 < 2.2349 one block at w768), and a block costs 384*w + 960 params,
+    # so the efficient direction is NARROW AND DEEP: at w256 six blocks cost
+    # the same 786k as four w384 blocks, and at w192 eight blocks do. These
+    # are the points that decide whether the 593k block stack can be paid for
+    # with depth instead of width, and the d128 pairs test whether the stream
+    # itself can be narrowed.
+    "iecnn-n3-x5-p1-ln-decay-w256": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=192, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=256, head_post_layers=5,
+        read_ln=True, head_ln=True, global_decay=True),
+        {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-n3-x6-p1-ln-decay-w256": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=192, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=256, head_post_layers=6,
+        read_ln=True, head_ln=True, global_decay=True),
+        {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-n3-x8-p1-ln-decay-w192": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=192, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=192, head_post_layers=8,
+        read_ln=True, head_ln=True, global_decay=True),
+        {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-n3-x5-p1-ln-decay-d128-w256": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=256, head_post_layers=5,
+        read_ln=True, head_ln=True, global_decay=True),
+        {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-n3-x6-p1-ln-decay-d128-w256": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=256, head_post_layers=6,
+        read_ln=True, head_ln=True, global_decay=True),
+        {"lr": 2e-3, "swa": 0.99}),
     "iecnn-d256-ds256-n6": ("iecnn", lambda: iecnn(
         "lug", True, n_passes=2, n_dots=6, d_s=256, d=256, per_dot_logits=False,
         global_read=True, spans=(8,)), {"lr": 2e-3, "swa": 0.99}),
