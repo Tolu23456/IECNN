@@ -804,6 +804,33 @@ ARMS = {
         global_read=True, spans=(8,), head_post=384, head_post_layers=4,
         read_ln=True, head_ln=True, global_decay=True, global_decay_k=5),
         {"lr": 2e-3, "swa": 0.99}),
+    # --- the cheap half of "regions": several receptive fields, ONE trunk ----
+    # A second Region module today means a second dot population AND a second
+    # post stack: n_regions=2 is 2x the step for a depth-like gain, so it can
+    # never pay. The read is 0.4% of the step, though (2.8k MAC/token against
+    # 590k for the block stack), so more VIEWS over the same trunk are nearly
+    # free. The cheapest version needs no new code at all: `quad`/`bands` put
+    # the same 8 slots on a geometric axis reaching window_reach, so the read
+    # sees 64 tokens back for exactly the compute of 8. Both were pruned on
+    # the 2-vCPU toy, where added fitting power is punished by construction.
+    "iecnn-n3-x4-p1-ln-decay-q32": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=192, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=384, head_post_layers=4,
+        read_ln=True, head_ln=True, global_decay=True,
+        window_mode="quad", window_reach=32), {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-n3-x4-p1-ln-decay-q64": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=192, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=384, head_post_layers=4,
+        read_ln=True, head_ln=True, global_decay=True,
+        window_mode="quad", window_reach=64), {"lr": 2e-3, "swa": 0.99}),
+    # --- the dot cell, which no GPU arm has ever varied ----------------------
+    # lug (a diagonal recurrence gain: one timescale per state dim) was chosen
+    # for cost, never measured against the gru it replaced.
+    "iecnn-n3-x4-p1-ln-decay-gru": ("iecnn", lambda: iecnn(
+        "gru", True, n_passes=1, n_dots=3, d_s=96, d=192, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=384, head_post_layers=4,
+        read_ln=True, head_ln=True, global_decay=True),
+        {"lr": 2e-3, "swa": 0.99}),
     "iecnn-d256-ds256-n6": ("iecnn", lambda: iecnn(
         "lug", True, n_passes=2, n_dots=6, d_s=256, d=256, per_dot_logits=False,
         global_read=True, spans=(8,)), {"lr": 2e-3, "swa": 0.99}),
