@@ -764,6 +764,32 @@ ARMS = {
         global_read=True, spans=(8,), head_post=256, head_post_layers=5,
         read_ln=True, head_ln=True, global_decay=True),
         {"lr": 2e-3, "swa": 0.99}),
+    # --- the winning SHAPE at a smaller d, preserving w/d = 3 ---------------
+    # The parameter axis that has ever paid is the block EXPANSION RATIO
+    # w/d (3.0 at d128-w384 wins; 1.33 at d192-w256 loses), not the raw
+    # count. That makes a prediction: the same ratio at a narrower stream with
+    # MORE layers should keep the quality while cutting the step time, because
+    # blocks cost 2*d*w per layer and 2*d*w at (96,288) is 44% cheaper than at
+    # (128,384). Same three dots (the read is 0.4% of the step, so the cell's
+    # d_s is the only fixed cost). These arms test the ratio invariant rather
+    # than adding a mechanism: if (96,288) tracks (128,384) at equal depth,
+    # the frontier gets cheaper; if it loses, the ratio was a coincidence of
+    # two points and d=128 stays the floor.
+    "iecnn-n3-x6-p1-ln-decay-d96-w288": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=96, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=288, head_post_layers=6,
+        read_ln=True, head_ln=True, global_decay=True),
+        {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-n3-x8-p1-ln-decay-d96-w288": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=96, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=288, head_post_layers=8,
+        read_ln=True, head_ln=True, global_decay=True),
+        {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-n3-x6-p1-ln-decay-d112-w336": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=112, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=336, head_post_layers=6,
+        read_ln=True, head_ln=True, global_decay=True),
+        {"lr": 2e-3, "swa": 0.99}),
     # --- THROUGHPUT SWEEP: is the step launch-bound or FLOP-bound? ----------
     # Every arm so far has been measured at B=32, T=256 (8192 tok/step). On a
     # T4 with eager execution the step is a few hundred kernel launches, and
