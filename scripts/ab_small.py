@@ -880,6 +880,19 @@ ARMS = {
         global_read=True, spans=(16,), head_post=384, head_post_layers=5,
         read_ln=True, head_ln=True, global_decay=True),
         {"lr": 2e-3, "swa": 0.99}),
+    # seed-1 twins: span 12 and N=4-span-16 both came back inside one-seed noise
+    # (0.024 is the transformer's own spread), so neither is a result yet. The
+    # seed-0 twins are in the same session, so the comparison is paired.
+    "iecnn-n3-x5-p1-ln-decay-d128-s12-s1": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(12,), head_post=384, head_post_layers=5,
+        read_ln=True, head_ln=True, global_decay=True),
+        {"lr": 2e-3, "swa": 0.99, "seed": 1}),
+    "iecnn-n4-x5-p1-ln-decay-d128-s16-s1": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=4, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(16,), head_post=384, head_post_layers=5,
+        read_ln=True, head_ln=True, global_decay=True),
+        {"lr": 2e-3, "swa": 0.99, "seed": 1}),
     "iecnn-n4-x5-p1-ln-decay-d128-s16": ("iecnn", lambda: iecnn(
         "lug", True, n_passes=1, n_dots=4, d_s=96, d=128, per_dot_logits=False,
         global_read=True, spans=(16,), head_post=384, head_post_layers=5,
