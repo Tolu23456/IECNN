@@ -766,6 +766,21 @@ ARMS = {
         global_read=True, spans=(8,), head_post=256, head_post_layers=5,
         read_ln=True, head_ln=True, global_decay=True),
         {"lr": 2e-3, "swa": 0.99}),
+    # --- eager vs torch.compile, in one session -----------------------------
+    # The throughput batch showed tokens are the only currency that buys bpc,
+    # and it killed batch size as a lever. Compile is the other way to buy
+    # tokens: it is the only remaining harness knob. It has to be measured
+    # in-session against an eager twin because its warmup comes out of the
+    # same 180 s, so the question is whether the steady-state win repays the
+    # trace. ARM_BREAK_SCAN=1 makes the prefix scan an eager graph boundary,
+    # which is what made the CUDA Inductor crash disappear.
+    "tf-swa-c": ("transformer", lambda: tf(96, 4, 3),
+                 {"swa": 0.995, "compile": True}),
+    "iecnn-n3-x5-p1-ln-decay-d128-c": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=384, head_post_layers=5,
+        read_ln=True, head_ln=True, global_decay=True),
+        {"lr": 2e-3, "swa": 0.99, "compile": True}),
     # --- the far dot may be capped by the WINDOW, not by the data -----------
     # Measured horizons on the winning arm are 0.00 / 2.96 / 5.87 tokens back
     # out of an 8-slot contiguous window: the far dot sits one slot from the
@@ -1482,7 +1497,12 @@ def main():
         print(f"--- {name} ({sum(p.numel() for p in model.parameters())} params"
               f"{', lr ' + str(opts['lr']) if 'lr' in opts else ''})", flush=True)
         inner = model
-        if os.environ.get("ARM_COMPILE") == "1":
+        # Per-arm compile: the global env switch stays the harness default, but
+        # an arm may opt in so compile-vs-eager can be measured in ONE session
+        # (across two sessions it would be confounded by tf drift). Compile
+        # pays only if its warmup, which comes out of the same 180 s budget, is
+        # repaid by the faster steady-state step.
+        if opts.get("compile", os.environ.get("ARM_COMPILE") == "1"):
             model = torch.compile(model)
         rows.append(run(name, kind, model, eval_model=inner, **opts))
 
