@@ -108,6 +108,11 @@ class Region(nn.Module):
         # and without ever materializing [B,T,N,d]. Must be set BEFORE the
         # DotPopulation is built (it decides p_out's shape).
         self.pool_first = bool(m.get("pool_first", False))
+        # global_read: every dot additionally reads its WHOLE prefix (causal)
+        # through an O(T) prefix-sum attention — see DotPopulation.__init__.
+        # It costs no T*T tensor and no per-position GEMM. Mixing g_glob lets
+        # some dots stay local (bigram precision) and others read globally.
+        self.global_read = bool(m.get("global_read", False))
         self.dots = DotPopulation(
             self.n_dots, d, d_q, d_v, d_s, vocab_size,
             message_dim=(16 if self.use_messages else 0),
@@ -120,7 +125,8 @@ class Region(nn.Module):
             cell=str(m.get("cell", "gru")),
             share_out=self.pool_first,
             span=self.span,
-            dist_bias=bool(m.get("dot_dist_bias", False)))
+            dist_bias=bool(m.get("dot_dist_bias", False)),
+            global_read=self.global_read)
         # Lean passes: in hidden mode the pooled shared head and the per-dot
         # e_state projection are only consumed on the LAST pass. With
         # head_last_only the earlier passes skip both (they still update the
@@ -231,6 +237,10 @@ class Region(nn.Module):
             dist = ((i / max(w - 1, 1)) ** 2 * reach).round().long()
             dist[0] = 0
         return (-dist).flip(0)        # ascending offsets, slot -1 = current
+
+    def _full_kv(self, rows: torch.Tensor):
+        """Keys/values for the GLOBAL read: one row per position, no window."""
+        return self.w_k(rows), self.w_v(rows)
 
     def _window_memory(self, rows: torch.Tensor, device, pass_idx: int = 0):
         """Rows [B,T,d] -> (wind_k [B,T,w,d_q], wind_v [B,T,w,d_v], valid [T,w])."""
@@ -399,6 +409,10 @@ class Region(nn.Module):
         n = self.n_dots
         f = b * t
 
+        full_k = full_v = None
+        if self.global_read:
+            full_k, full_v = self._full_kv(rows)
+
         # Read windows. Normally every pass reads the SAME window, and the
         # attention cache is shared so the read is computed once (that is
         # exactly what made P>=2 "fake depth": passes 2..P re-used ctx).
@@ -460,7 +474,8 @@ class Region(nn.Module):
                             msg_in=msg_read if p > 1 else None, state=state,
                             emb_table=emb_table, attn_cache=attn_cache,
                             want_log_pi=want_pi, slot_table=slots,
-                            want_e_state=want_e)
+                            want_e_state=want_e, full_k=full_k,
+                            full_v=full_v)
             state_prev = out.state
             if slots is not None:
                 # e13: detached scan — the table this pass wrote is read by
@@ -575,6 +590,10 @@ class Region(nn.Module):
             caches = [shared] * self.n_passes
         n = self.n_dots
 
+        full_k = full_v = None
+        if self.global_read:
+            full_k, full_v = self._full_kv(rows)
+
         state = self.dots.initial_state((b, t))
         trust = None
         w_prev = None
@@ -626,7 +645,7 @@ class Region(nn.Module):
             out = self.dots(wind_k, wind_v, valid, h_pool, err, round_idx=p - 1,
                             msg_in=msg_read if p > 1 else None, state=state,
                             emb_table=emb_table, attn_cache=attn_cache,
-                            slot_table=slots)
+                            slot_table=slots, full_k=full_k, full_v=full_v)
             state_prev = out.state
             if slots is not None:
                 slots = self.dots.update_slots(state_prev, slots, p - 1)

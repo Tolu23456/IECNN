@@ -221,10 +221,13 @@ def test_dist_bias_steers_each_dot_to_its_own_distance():
     assert at_full.tolist() == [list(range(d.N))] * 2, at_full.tolist()
     # the 4 dots therefore sit on 4 DIFFERENT distances (no collapse)
     assert len(set(at_full[0].tolist())) == d.N
-    # and without the bias the same dots do NOT split that way
-    plain = (torch.einsum("bfwj,nj->bfnw", wind_k, q) / _m.sqrt(d.d_q)
-             ).masked_fill(~valid[None, :, None, :], float("-inf"))
-    assert plain[:, -1, :].argmax(-1).unique().numel() < d.N
+    # the bias is what drives the split: move every dot's bonus two slots
+    # over and every pick must move with it (deterministic, not luck)
+    shifted = torch.roll(d.d_bias[0], shifts=2, dims=-1)
+    sc2 = (torch.einsum("bfwj,nj->bfnw", wind_k, q) / _m.sqrt(d.d_q)
+           + shifted.view(1, d.N, wind_k.shape[2]))
+    sc2 = sc2.masked_fill(~valid[None, :, None, :], float("-inf"))
+    assert sc2[:, -1, :].argmax(-1).tolist() == [[2, 3, 4, 5]] * 2
 
 
 def test_bands_give_each_pass_its_own_window():
@@ -253,3 +256,62 @@ def test_bands_give_each_pass_its_own_window():
     lp = _fwd(m, x)
     assert torch.isfinite(lp).all()
     assert lp.shape == (2, 20, 64)
+
+
+def test_global_read_is_causal():
+    """The prefix-sum read must never leak the future: changing token t+k
+    cannot change any log-prob at position <= t+k-1."""
+    m = build_iecnn(_cfg(global_read=True, head_last_only=True,
+                         per_dot_logits=False, n_passes=2), 64)
+    m.eval()
+    x = torch.randint(0, 64, (2, 12))
+    a = _fwd(m, x)
+    x2 = x.clone()
+    x2[:, 9] = (x2[:, 9] + 7) % 64                   # perturb the future
+    b = _fwd(m, x2)
+    assert torch.equal(a[:, :9], b[:, :9]), "global read leaked the future"
+    assert not torch.equal(a[:, 9:], b[:, 9:])
+
+
+def test_global_read_is_exactly_prefix_softmax_attention():
+    """The O(T) cumsum trick must equal, to float tolerance, a naive loop
+    that runs a real softmax over each position's causal prefix."""
+    from models.memory import region1_rows
+    m = build_iecnn(_cfg(global_read=True, head_last_only=True,
+                         per_dot_logits=False, n_passes=2), 64)
+    m.eval()
+    r = m.regions[0]
+    d = r.dots
+    x = torch.randint(0, 64, (2, 10))
+    rows = region1_rows(m.embed(x))
+    k, v = r._full_kv(rows)                           # [B,T,d_q], [B,T,d_v]
+    q = d.q[0]
+    sc = torch.einsum("bsj,nj->bns", k, q) / math.sqrt(d.d_q)
+    e = torch.exp(sc - sc.amax(-1, keepdim=True))
+    ce = torch.cumsum(e, dim=-1)
+    cev = torch.cumsum(e.unsqueeze(-1) * v.unsqueeze(1), dim=-2)
+    fast = (cev / ce.unsqueeze(-1).clamp_min(1e-9)).permute(0, 2, 1, 3)
+
+    T = sc.shape[-1]
+    naive = torch.zeros_like(fast)
+    for t in range(T):
+        a_t = torch.softmax(sc[..., :t + 1], dim=-1)          # [B, N, t+1]
+        naive[:, t] = torch.einsum("bns,bsv->bnv", a_t, v[:, :t + 1])
+    assert torch.allclose(fast, naive, atol=1e-5, rtol=1e-5), \
+        (fast - naive).abs().max().item()
+
+
+def test_global_read_mix_is_wired():
+    """g_glob must actually gate the two reads: pure-window and pure-global
+    settings must give different outputs."""
+    m = build_iecnn(_cfg(global_read=True, head_last_only=True,
+                         per_dot_logits=False, n_passes=1), 64)
+    m.eval()
+    x = torch.randint(0, 64, (2, 12))
+    dots = m.regions[0].dots
+    with torch.no_grad():
+        dots.g_glob.fill_(-30.0)                      # sigmoid ~ 0 -> window
+        a = _fwd(m, x)
+        dots.g_glob.fill_(30.0)                       # sigmoid ~ 1 -> global
+        b = _fwd(m, x)
+    assert not torch.allclose(a, b)

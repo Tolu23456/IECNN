@@ -39,7 +39,8 @@ def iecnn(cell="gru", lean=False, n_passes=3, n_dots=8, d_s=128, d=128,
           spans=(16,), read_mode="soft", head_mode="hidden",
           per_dot_logits=True, window_mode="contiguous", window_reach=None,
           window_local=None, seclusion_topk=0, pool_first=False,
-          slot_slots=0, dist_bias=False, dynamic_query=False):
+          slot_slots=0, dist_bias=False, dynamic_query=False,
+          global_read=False):
     m = {
         "kind": "iecnn", "d": d, "d_q": 16, "d_v": 32, "d_s": d_s,
         "n_dots": n_dots, "n_regions": 1, "n_passes": n_passes,
@@ -55,6 +56,7 @@ def iecnn(cell="gru", lean=False, n_passes=3, n_dots=8, d_s=128, d=128,
         "pool_first": pool_first,
         "slot_slots": slot_slots,
         "dot_dist_bias": dist_bias,
+        "global_read": global_read,
     }
     if window_reach is not None:
         m["window_reach"] = window_reach
@@ -253,6 +255,26 @@ ARMS = {
         "lug", True, n_passes=2, n_dots=4, d_s=64, per_dot_logits=False,
         window_mode="quad", window_reach=64), {"lr": 2e-3}),
     # --- fairness controls: give the transformer the SAME lr/schedule ----
+    # --- O(T) global causal read (prefix-sum attention) on top of the
+    # window read, at lr 2e-3. This is the transformer's own trick (every
+    # position sees its whole past) at ~1/10 the cost.
+    "iecnn-lr2-plain": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=4, d_s=64, per_dot_logits=False),
+        {"lr": 2e-3}),
+    "iecnn-lr2-glob-h64": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=4, d_s=64, per_dot_logits=False,
+        global_read=True, window_mode="hybrid", window_reach=64),
+        {"lr": 2e-3}),
+    "iecnn-lr2-glob": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=4, d_s=64, per_dot_logits=False,
+        global_read=True), {"lr": 2e-3}),
+    "iecnn-lr2-glob-q64": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=4, d_s=64, per_dot_logits=False,
+        global_read=True, window_mode="quad", window_reach=64),
+        {"lr": 2e-3}),
+    "iecnn-lr2-glob-n6": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=6, d_s=64, per_dot_logits=False,
+        global_read=True), {"lr": 2e-3}),
     "tf-lr2": ("transformer", lambda: tf(96, 4, 3), {"lr": 2e-3}),
     "tf-lr2-cos": ("transformer", lambda: tf(96, 4, 3),
                    {"lr": 2e-3, "sched": "cos"}),

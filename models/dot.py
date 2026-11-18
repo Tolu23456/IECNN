@@ -97,7 +97,8 @@ class DotPopulation(nn.Module):
                  seed: int = 0, fast_math: bool = True,
                  slot_slots: int = 0, slot_dim: int = 32,
                  slot_decay: float = 0.5, cell: str = "gru",
-                 share_out: bool = False, dist_bias: bool = False):
+                 share_out: bool = False, dist_bias: bool = False,
+                 global_read: bool = False):
         super().__init__()
         self.N = n_dots
         self.d = d
@@ -179,6 +180,24 @@ class DotPopulation(nn.Module):
         # distance 64, and the mixture weights arbitrate per position.
         self.d_bias = (nn.Parameter(torch.zeros(p_layers, n_dots, span))
                        if dist_bias else None)
+        # global_read: add a CAUSAL read of the ENTIRE prefix to the windowed
+        # read, at O(T) cost instead of O(T^2).
+        #
+        # Why this is cheap: a dot's query is STATIC (dynamic_query off), so
+        # score(s) = q_n . k_s does not depend on the reading position t.
+        # Full causal attention is therefore just a normalised PREFIX SUM:
+        #     e_s     = exp(q_n . k_s)
+        #     ctx_t   = sum_{s<=t} e_s v_s / sum_{s<=t} e_s
+        # which is two cumsums — no T*T matrix, no extra GEMM per position.
+        # Cost at T=64, N=4, d_v=32: ~16k MAC-equivalents vs 59k for the LUG
+        # cell, i.e. the dots get the whole sequence for less than the cell.
+        # g_glob mixes the two reads per dot, so dots can SPECIALISE: some
+        # stay local (bigram precision), some read the whole prefix.
+        self.global_read = bool(global_read)
+        if self.global_read:
+            self.g_glob = nn.Parameter(torch.zeros(p_layers, n_dots))
+        else:
+            self.g_glob = None
         self.s0 = nn.Parameter(0.02 * torch.randn(p_layers, n_dots, d_s, generator=g))
         if self.cell == "lug":
             self.w_ih = None
@@ -326,7 +345,8 @@ class DotPopulation(nn.Module):
                 attn_cache: dict | None = None,
                 want_log_pi: bool = True,
                 slot_table: torch.Tensor | None = None,
-                want_e_state: bool = True) -> DotOutputs:
+                want_e_state: bool = True, full_k=None,
+                full_v=None) -> DotOutputs:
         """One pass for all dots at all positions simultaneously.
 
         wind_k    [B, T, w, d_q]   windowed, rel-distance-added keys
@@ -354,11 +374,12 @@ class DotPopulation(nn.Module):
             return self._forward_fast(wind_k, wind_v, valid_mask, h_pool,
                                       err_feat, round_idx, msg_in, state,
                                       emb_table, attn_cache, want_log_pi,
-                                      slot_table, want_e_state)
+                                      slot_table, want_e_state, full_k,
+                                      full_v)
         return self._forward_reference(wind_k, wind_v, valid_mask, h_pool,
                                        err_feat, round_idx, msg_in, state,
                                        emb_table, want_log_pi, slot_table,
-                                       want_e_state)
+                                       want_e_state, full_k, full_v)
 
     # the einsum-per-op version, kept for the equivalence test and as a
     # reference implementation of spec 01 (slower: einsum re-plans paths the
@@ -367,7 +388,8 @@ class DotPopulation(nn.Module):
                            round_idx: int, msg_in, state, emb_table,
                            want_log_pi: bool = True,
                            slot_table: torch.Tensor | None = None,
-                           want_e_state: bool = True) -> DotOutputs:
+                           want_e_state: bool = True, full_k=None,
+                           full_v=None) -> DotOutputs:
         b, t, w = wind_k.shape[0], wind_k.shape[1], wind_k.shape[2]
         device = wind_k.device
 
@@ -391,6 +413,19 @@ class DotPopulation(nn.Module):
         else:
             attn = torch.nan_to_num(F.softmax(scores, dim=-1), nan=0.0)    # [B, T, N, w]
             ctx = torch.matmul(attn.unsqueeze(-2), wind_v.unsqueeze(-3)).squeeze(-2)  # [B, T, N, d_v]
+
+        # ---- global causal read (same O(T) prefix-sum as the fast path) ----
+        if self.global_read and full_k is not None:
+            sc = torch.einsum("bsj,nj->bns", full_k, self._sel(round_idx, self.q))
+            sc = sc / math.sqrt(self.d_q)
+            e = torch.exp(sc - sc.amax(-1, keepdim=True))
+            cum_e = torch.cumsum(e, dim=-1)                            # [B, N, T]
+            cum_ev = torch.cumsum(
+                e.unsqueeze(-1) * full_v.unsqueeze(1), dim=-2)         # [B, N, T, d_v]
+            g_ctx = (cum_ev / cum_e.unsqueeze(-1).clamp_min(1e-9)
+                     ).permute(0, 2, 1, 3)                             # [B, T, N, d_v]
+            mix = torch.sigmoid(self._sel(round_idx, self.g_glob)).view(1, 1, n, 1)
+            ctx = (1.0 - mix) * ctx + mix * g_ctx
 
         # ---- GRU step (all dots at once) ----------------------------------
         parts = [ctx, h_pool, err_feat,
@@ -462,7 +497,8 @@ class DotPopulation(nn.Module):
                       attn_cache: dict | None = None,
                       want_log_pi: bool = True,
                       slot_table: torch.Tensor | None = None,
-                      want_e_state: bool = True) -> DotOutputs:
+                      want_e_state: bool = True, full_k=None,
+                      full_v=None) -> DotOutputs:
         b, t, w = wind_k.shape[0], wind_k.shape[1], wind_k.shape[2]
         f = b * t
         n = self.N
@@ -514,6 +550,23 @@ class DotPopulation(nn.Module):
                 ctx = torch.matmul(attn.unsqueeze(-2), wv.unsqueeze(1)).squeeze(-2)  # [f, N, d_v]
             if cacheable:
                 attn_cache["ctx"] = ctx
+
+        # ---- global causal read (O(T), see __init__) ----------------------
+        if self.global_read and full_k is not None:
+            # scores do NOT depend on the reading position: [B, N, T]
+            sc = torch.einsum("bsj,nj->bns", full_k, self._sel(round_idx, self.q))
+            sc = sc / math.sqrt(self.d_q)
+            e = torch.exp(sc - sc.amax(-1, keepdim=True))
+            # The cumsum IS the causal mask: cum_e[t] = sum_{s<=t} e_s, so
+            # position t can only ever see its own prefix. (Zero extra work,
+            # and no [T, T] tensor anywhere.)
+            cum_e = torch.cumsum(e, dim=-1)                          # [B, N, T]
+            cum_ev = torch.cumsum(
+                e.unsqueeze(-1) * full_v.unsqueeze(1), dim=-2)       # [B, N, T, d_v]
+            g_ctx = cum_ev / cum_e.unsqueeze(-1).clamp_min(1e-9)
+            g_ctx = g_ctx.permute(0, 2, 1, 3).reshape(f, n, self.d_v)
+            mix = torch.sigmoid(self._sel(round_idx, self.g_glob)).view(1, n, 1)
+            ctx = (1.0 - mix) * ctx + mix * g_ctx
 
         # ---- GRU step (batched GEMM per dot over merged [B*T]) ------------
         parts = [ctx, h_pool.reshape(f, n, self.d_s), err_feat.reshape(f, n, 3),
