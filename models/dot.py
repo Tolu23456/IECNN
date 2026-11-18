@@ -586,17 +586,19 @@ class DotPopulation(nn.Module):
         # does not lose digits in the prefix sum.
         e = torch.exp(sc - sc.amax(dim=1, keepdim=True))
         if self.g_decay is not None:
-            # gamma^-s on both numerator and denominator; the gamma^-t factor
-            # is common to every term and cancels in the ratio.
+            # ctx_t = sum_{s<=t} e_s gam^(t-s) v_s / sum_{s<=t} e_s gam^(t-s)
+            # is still two prefix sums: weight term s by gam^(-s) before the
+            # scan and the common gam^(-t) cancels in the ratio. Literal
+            # gam^(-s) overflows float32 once gam^(-T) > 3e38 (gam < 0.71 at
+            # T=256), so scan gam^((T-1)-s) instead: multiplying EVERY term by
+            # the same constant gam^(T-1) cannot change the ratio, this form
+            # is <= 1 everywhere, and it underflows old positions to zero in
+            # exactly the order the decay says they stop mattering. No T limit.
             gam = torch.sigmoid(self._sel(round_idx, self.g_decay))
-            gam = gam.clamp(0.5, 0.99999).view(1, 1, n)
-            if t > 1024:
-                raise ValueError(
-                    "global_decay's unnormalised scan is float32-safe only to "
-                    "T=1024 (gamma^-T); chunk it before using longer contexts")
-            inv = gam ** (-torch.arange(t, device=e.device, dtype=e.dtype
-                                        ).view(1, t, 1))
-            e = e * inv
+            gam = gam.clamp(1e-4, 0.99999).view(1, 1, n)
+            expo = ((t - 1) - torch.arange(t, device=e.device, dtype=e.dtype)
+                    ).view(1, t, 1)
+            e = e * torch.exp(expo * torch.log(gam))
         cum_e = torch.cumsum(e, dim=1)                               # [B, T, N]
         ev = e.unsqueeze(-1) * full_v.unsqueeze(2)                   # [B, T, N, d_v]
         cum_ev = torch.cumsum(ev, dim=1)                              # [B, T, N, d_v]

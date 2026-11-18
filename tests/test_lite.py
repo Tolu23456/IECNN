@@ -929,3 +929,52 @@ def test_global_decay_adds_recency_and_vanishes_at_gamma_one():
     loss = -dec(x)["final_log_probs"].reshape(-1, 64).gather(1, y.reshape(-1, 1)).mean()
     loss.backward()
     assert torch.isfinite(dd.g_decay.grad).all()
+
+
+def test_global_decay_matches_the_direct_weighted_average():
+    """Pin the decayed prefix read against the formula it claims to compute,
+
+        ctx_t = sum_{s<=t} e_s gam^(t-s) v_s / sum_{s<=t} e_s gam^(t-s)
+
+    evaluated directly in a loop. The implementation gets this from two
+    cumsums with a gamma-folded weight, and the fold has to be a constant
+    across s or the ratio is wrong; this is the test that would catch that."""
+    kw = dict(global_read=True, per_dot_logits=False, head_last_only=True,
+              n_passes=2, global_decay=True)
+    d = build_iecnn(_cfg(**kw), 64).regions[0].dots
+    b, t = 2, 20
+    torch.manual_seed(0)
+    k = torch.randn(b, t, d.d_q)
+    v = torch.randn(b, t, d.d_v)
+    for gv in (-1.0, 1.0, 4.0):                  # gam = .27, .73, .98
+        with torch.no_grad():
+            d.g_decay.fill_(gv)
+            got = d._global_ctx(k, v, 0)                       # [B,T,N,d_v]
+            gam = torch.sigmoid(torch.tensor(gv)).clamp(1e-4, 0.99999)
+            sc = k @ d.q[0].t() / math.sqrt(d.d_q)             # [B,T,N]
+            ref = torch.zeros_like(got)
+            for tt in range(t):
+                w = torch.exp(sc[:, :tt + 1] - sc[:, tt:tt + 1])
+                w = w * gam ** torch.arange(tt, -1, -1).float()
+                ref[:, tt] = (w.unsqueeze(-1)
+                              * v[:, None, :tt + 1]).sum(2) / w.sum(1).unsqueeze(-1)
+            err = (got - ref).abs().max().item()
+        assert err < 1e-4, (gv, err)
+
+
+def test_global_decay_does_not_overflow_at_long_contexts():
+    """The gamma^-s form overflowed float32 for gam < 0.71 at T=256 (and the
+    code raised above T=1024 to hide it). The shifted form has no such limit
+    and must stay finite for an aggressive gam at a T far beyond the guard
+    that used to exist."""
+    kw = dict(global_read=True, per_dot_logits=False, head_last_only=True,
+              n_passes=2, global_decay=True)
+    d = build_iecnn(_cfg(**kw), 64).regions[0].dots
+    with torch.no_grad():
+        d.g_decay.fill_(-20.0)                 # gam -> 1e-4 (the hard floor)
+        k = torch.randn(1, 4096, d.d_q)
+        v = torch.randn(1, 4096, d.d_v)
+        ctx = d._global_ctx(k, v, 0)
+        assert torch.isfinite(ctx).all()
+        # full decay means "only the newest value", everywhere
+        assert (ctx[:, 2000] - v[:, 2000].unsqueeze(1)).abs().max().item() < 1e-3
