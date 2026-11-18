@@ -1,0 +1,2 @@
+step,lr,loss,bpc_val,bpc_p1,bpc_p2,bpc_p3,bpc_train,tau0,weight_entropy,L_w,elapsed_s,gn_total,gn_emb,gn_regions,gn_chain,gn_gate,gn_messages,gn_other
+1000,0.0009997482711915926,5.27355,2.41217,2.89938,2.69475,2.41217,2.2469,1.0,1.28638,-0.06071,15892.4,0.4136,0.3378,0.2386,0.0,0.0,0.0,0.0
