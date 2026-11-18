@@ -46,10 +46,16 @@ T, V, DEV = A.T, A.V, A.DEV
 
 
 def js(p, q, eps=1e-12):
-    """Jensen-Shannon divergence between two batches of distributions."""
+    """Jensen-Shannon divergence between two batches of distributions.
+
+    Masked reads can be exactly zero in some slots, and `0 * log(0)` is nan,
+    so the first factor is clamped: eps*log(eps) is ~1e-11 and cannot move a
+    divergence that is O(0.1). Clamped at 0 because JS is non-negative and
+    the eps term can otherwise push it a hair below."""
     m = 0.5 * (p + q)
-    kl = lambda a, b: (a * ((a + eps) / (b + eps)).log()).sum(-1)
-    return (0.5 * kl(p, m) + 0.5 * kl(q, m)).mean().item()
+    kl = lambda a, b: (a.clamp_min(eps)
+                       * ((a + eps) / (b + eps)).log()).sum(-1)
+    return (0.5 * kl(p, m) + 0.5 * kl(q, m)).clamp_min(0.0).mean().item()
 
 
 def main():
