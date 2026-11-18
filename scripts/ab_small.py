@@ -795,6 +795,15 @@ ARMS = {
         global_read=True, spans=(8,), head_post=512, head_post_layers=4,
         read_ln=True, head_ln=True, global_decay=True),
         {"lr": 2e-3, "swa": 0.99}),
+    # two layers at the same MAC budget as three-wider: x2/w768 = 2*128*768*2
+    # = 393k MAC/token, identical to x3/w512 and 20% under x5/w384. This is the
+    # depth-vs-width trade AT CONSTANT COMPUTE, which is the only form of the
+    # question that matters for wall clock.
+    "iecnn-n3-x2-p1-ln-decay-d128-w768": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=768, head_post_layers=2,
+        read_ln=True, head_ln=True, global_decay=True),
+        {"lr": 2e-3, "swa": 0.99}),
     "iecnn-n3-x3-p1-ln-decay-d128-w512": ("iecnn", lambda: iecnn(
         "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
         global_read=True, spans=(8,), head_post=512, head_post_layers=3,
