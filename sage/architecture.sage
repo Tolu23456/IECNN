@@ -1,1 +1,0 @@
-sage runs on SAGE (Synthesize) Architecture
