@@ -339,6 +339,36 @@ class DotPopulation(nn.Module):
         s0 = self._sel(0, self.s0)                                  # [N, d_s]
         return s0.expand(*batch_shape, self.N, self.d_s).contiguous()
 
+    # ----- global causal read ----------------------------------------------
+    def _global_ctx(self, full_k, full_v, round_idx: int) -> torch.Tensor:
+        """Exact causal attention over the whole prefix at O(T) time.
+
+        A dot's query is static, so score(s) = q_n.k_s is independent of the
+        reading position t and full causal attention collapses to a
+        normalised prefix sum:
+
+            e_s   = exp(q_n . k_s)
+            ctx_t = sum_{s<=t} e_s v_s / sum_{s<=t} e_s
+
+        Two cumsums, no T*T tensor, no per-position GEMM. The cumsum IS the
+        causal mask. Returns [B, T, N, d_v].
+
+        Layout note: the value accumulation runs in [B, N, d_v, T] so the
+        cumsum walks the CONTIGUOUS last axis; summing over dim=-2 of a
+        [B, N, T, d_v] tensor walks a d_v-strided axis and is measurably
+        slower for the same numbers.
+        """
+        b, t, _ = full_v.shape
+        n = self.N
+        sc = torch.einsum("bsj,nj->bns", full_k, self._sel(round_idx, self.q))
+        sc = sc / math.sqrt(self.d_q)
+        e = torch.exp(sc - sc.amax(-1, keepdim=True))
+        cum_e = torch.cumsum(e, dim=-1)                              # [B, N, T]
+        ev = e.unsqueeze(2) * full_v.transpose(1, 2).unsqueeze(1)     # [B, N, d_v, T]
+        cum_ev = torch.cumsum(ev, dim=-1)
+        g = cum_ev / cum_e.unsqueeze(2).clamp_min(1e-9)                # [B,N,d_v,T]
+        return g.permute(0, 3, 1, 2).contiguous()                    # [B, T, N, d_v]
+
     # ----- one pass --------------------------------------------------------
     def forward(self, wind_k, wind_v, valid_mask, h_pool, err_feat,
                 round_idx: int, msg_in, state, emb_table,
@@ -416,14 +446,7 @@ class DotPopulation(nn.Module):
 
         # ---- global causal read (same O(T) prefix-sum as the fast path) ----
         if self.global_read and full_k is not None:
-            sc = torch.einsum("bsj,nj->bns", full_k, self._sel(round_idx, self.q))
-            sc = sc / math.sqrt(self.d_q)
-            e = torch.exp(sc - sc.amax(-1, keepdim=True))
-            cum_e = torch.cumsum(e, dim=-1)                            # [B, N, T]
-            cum_ev = torch.cumsum(
-                e.unsqueeze(-1) * full_v.unsqueeze(1), dim=-2)         # [B, N, T, d_v]
-            g_ctx = (cum_ev / cum_e.unsqueeze(-1).clamp_min(1e-9)
-                     ).permute(0, 2, 1, 3)                             # [B, T, N, d_v]
+            g_ctx = self._global_ctx(full_k, full_v, round_idx)        # [B, T, N, d_v]
             mix = torch.sigmoid(self._sel(round_idx, self.g_glob)).view(1, 1, n, 1)
             ctx = (1.0 - mix) * ctx + mix * g_ctx
 
@@ -553,20 +576,20 @@ class DotPopulation(nn.Module):
 
         # ---- global causal read (O(T), see __init__) ----------------------
         if self.global_read and full_k is not None:
-            # scores do NOT depend on the reading position: [B, N, T]
-            sc = torch.einsum("bsj,nj->bns", full_k, self._sel(round_idx, self.q))
-            sc = sc / math.sqrt(self.d_q)
-            e = torch.exp(sc - sc.amax(-1, keepdim=True))
-            # The cumsum IS the causal mask: cum_e[t] = sum_{s<=t} e_s, so
-            # position t can only ever see its own prefix. (Zero extra work,
-            # and no [T, T] tensor anywhere.)
-            cum_e = torch.cumsum(e, dim=-1)                          # [B, N, T]
-            cum_ev = torch.cumsum(
-                e.unsqueeze(-1) * full_v.unsqueeze(1), dim=-2)       # [B, N, T, d_v]
-            g_ctx = cum_ev / cum_e.unsqueeze(-1).clamp_min(1e-9)
-            g_ctx = g_ctx.permute(0, 2, 1, 3).reshape(f, n, self.d_v)
+            # The read itself is PASS-INVARIANT (static query, shared params),
+            # so cache it exactly like the window ctx: recomputing the two
+            # cumsums on every pass was costing ~8% of a P2 step for numbers
+            # that were already known. Only the cheap per-pass g_glob mix is
+            # redone below (passes may carry their own g_glob row).
+            g_cacheable = attn_cache is not None and not self.dynamic_query
+            if g_cacheable and "g_ctx" in attn_cache:
+                g_ctx = attn_cache["g_ctx"]
+            else:
+                g_ctx = self._global_ctx(full_k, full_v, round_idx)
+                if g_cacheable:
+                    attn_cache["g_ctx"] = g_ctx
             mix = torch.sigmoid(self._sel(round_idx, self.g_glob)).view(1, n, 1)
-            ctx = (1.0 - mix) * ctx + mix * g_ctx
+            ctx = (1.0 - mix) * ctx + mix * g_ctx.reshape(f, n, self.d_v)
 
         # ---- GRU step (batched GEMM per dot over merged [B*T]) ------------
         parts = [ctx, h_pool.reshape(f, n, self.d_s), err_feat.reshape(f, n, 3),

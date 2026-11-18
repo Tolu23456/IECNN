@@ -242,10 +242,19 @@ class Region(nn.Module):
         """Keys/values for the GLOBAL read: one row per position, no window."""
         return self.w_k(rows), self.w_v(rows)
 
-    def _window_memory(self, rows: torch.Tensor, device, pass_idx: int = 0):
-        """Rows [B,T,d] -> (wind_k [B,T,w,d_q], wind_v [B,T,w,d_v], valid [T,w])."""
-        k_all = self.w_k(rows)                       # [B, T, d_q]
-        v_all = self.w_v(rows)                       # [B, T, d_v]
+    def _window_memory(self, rows: torch.Tensor, device, pass_idx: int = 0,
+                       k_all: torch.Tensor | None = None,
+                       v_all: torch.Tensor | None = None):
+        """Rows [B,T,d] -> (wind_k [B,T,w,d_q], wind_v [B,T,w,d_v], valid [T,w]).
+
+        `k_all`/`v_all` may be passed in when the caller already projected the
+        rows (the global read needs exactly the same two projections as the
+        window read — one GEMM pair serves both).
+        """
+        if k_all is None:
+            k_all = self.w_k(rows)                   # [B, T, d_q]
+        if v_all is None:
+            v_all = self.w_v(rows)                   # [B, T, d_v]
         offs = self._window_offsets(device, pass_idx)
         wind_k_raw, valid = gather_windows(k_all, self.span, offs)
         wind_v, _ = gather_windows(v_all, self.span, offs)
@@ -409,9 +418,12 @@ class Region(nn.Module):
         n = self.n_dots
         f = b * t
 
-        full_k = full_v = None
+        full_k = full_v = k_all = v_all = None
         if self.global_read:
-            full_k, full_v = self._full_kv(rows)
+            # ONE projection pair serves both the window gather and the
+            # global read (they read the same keys/values).
+            k_all, v_all = self._full_kv(rows)
+            full_k, full_v = k_all, v_all
 
         # Read windows. Normally every pass reads the SAME window, and the
         # attention cache is shared so the read is computed once (that is
@@ -420,13 +432,13 @@ class Region(nn.Module):
         # later passes far), so each pass must also have its OWN cache —
         # a cached ctx from a different band would be a different input.
         if self.window_mode == "bands":
-            winds = [self._window_memory(rows, device, p)
+            winds = [self._window_memory(rows, device, p, k_all, v_all)
                      for p in range(self.n_passes)]
             # each pass reads its own band, so a ctx cached by one pass is
             # never reusable by another: no cache at all.
             caches = [None] * self.n_passes
         else:
-            one = self._window_memory(rows, device)
+            one = self._window_memory(rows, device, 0, k_all, v_all)
             winds = [one] * self.n_passes
             # ONE shared dict: pass 1 fills ctx, passes 2..P hit the cache.
             # (Separate per-pass dicts would silently recompute the read P
@@ -572,28 +584,29 @@ class Region(nn.Module):
                                         floor, training)
         device = rows.device
         b, t = rows.shape[0], rows.shape[1]
+        n = self.n_dots
+
+        full_k = full_v = k_all = v_all = None
+        if self.global_read:
+            k_all, v_all = self._full_kv(rows)
+            full_k, full_v = k_all, v_all
+
         # same per-pass band machinery as _forward_hidden (bands mode gives
         # each pass its own window, so each needs its own attention cache)
         if self.window_mode == "bands":
-            winds = [self._window_memory(rows, device, p)
+            winds = [self._window_memory(rows, device, p, k_all, v_all)
                      for p in range(self.n_passes)]
             # each pass reads its own band, so a ctx cached by one pass is
             # never reusable by another: no cache at all.
             caches = [None] * self.n_passes
         else:
-            one = self._window_memory(rows, device)
+            one = self._window_memory(rows, device, 0, k_all, v_all)
             winds = [one] * self.n_passes
             # ONE shared dict: pass 1 fills ctx, passes 2..P hit the cache.
             # (Separate per-pass dicts would silently recompute the read P
             # times — same numbers, needless work.)
             shared = {} if self.cache_attention else None
             caches = [shared] * self.n_passes
-        n = self.n_dots
-
-        full_k = full_v = None
-        if self.global_read:
-            full_k, full_v = self._full_kv(rows)
-
         state = self.dots.initial_state((b, t))
         trust = None
         w_prev = None

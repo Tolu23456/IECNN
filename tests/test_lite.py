@@ -269,8 +269,15 @@ def test_global_read_is_causal():
     x2 = x.clone()
     x2[:, 9] = (x2[:, 9] + 7) % 64                   # perturb the future
     b = _fwd(m, x2)
-    assert torch.equal(a[:, :9], b[:, :9]), "global read leaked the future"
-    assert not torch.equal(a[:, 9:], b[:, 9:])
+    # Not bitwise: `e = exp(sc - sc.amax(-1))` normalises by the max over the
+    # whole row, i.e. by a POSITIVE CONSTANT that cancels exactly in the
+    # ratio. Mathematically the prefix cannot see the future; in float the
+    # cancelled factor leaves last-bit noise, so the real invariant is
+    # "no material leak" (a genuine leak is orders of magnitude larger).
+    leak = (a[:, :9] - b[:, :9]).abs().max().item()
+    assert leak < 1e-6, f"global read leaked the future: {leak}"
+    # and the perturbation must actually matter at/after its position
+    assert (a[:, 9:] - b[:, 9:]).abs().max().item() > 1e-5
 
 
 def test_global_read_is_exactly_prefix_softmax_attention():
@@ -286,11 +293,8 @@ def test_global_read_is_exactly_prefix_softmax_attention():
     rows = region1_rows(m.embed(x))
     k, v = r._full_kv(rows)                           # [B,T,d_q], [B,T,d_v]
     q = d.q[0]
+    fast = d._global_ctx(k, v, 0)                     # [B, T, N, d_v]  (module)
     sc = torch.einsum("bsj,nj->bns", k, q) / math.sqrt(d.d_q)
-    e = torch.exp(sc - sc.amax(-1, keepdim=True))
-    ce = torch.cumsum(e, dim=-1)
-    cev = torch.cumsum(e.unsqueeze(-1) * v.unsqueeze(1), dim=-2)
-    fast = (cev / ce.unsqueeze(-1).clamp_min(1e-9)).permute(0, 2, 1, 3)
 
     T = sc.shape[-1]
     naive = torch.zeros_like(fast)
@@ -315,3 +319,29 @@ def test_global_read_mix_is_wired():
         dots.g_glob.fill_(30.0)                       # sigmoid ~ 1 -> global
         b = _fwd(m, x)
     assert not torch.allclose(a, b)
+
+
+def test_global_read_cache_is_exact_and_shared_projection_is_exact():
+    """Two speed opts must be numerically free:
+    (a) caching the pass-invariant global read (g_ctx) across passes, and
+    (b) reusing the window read's k/v projections for the global read.
+    Same weights, cache off vs on, and pre-projected vs re-projected."""
+    kw = dict(global_read=True, head_last_only=True, per_dot_logits=False,
+              n_passes=2)
+    cached = build_iecnn(_cfg(cache_attention=True, **kw), 64)
+    plain = build_iecnn(_cfg(cache_attention=False, **kw), 64)
+    plain.load_state_dict(cached.state_dict())
+    cached.eval(); plain.eval()
+    x = torch.randint(0, 64, (2, 14))
+    a, b = _fwd(cached, x), _fwd(plain, x)
+    assert torch.allclose(a, b, atol=1e-6, rtol=1e-6), \
+        (a - b).abs().max().item()
+
+    # the window read must accept caller-supplied projections unchanged
+    r = cached.regions[0]
+    rows = torch.randn(2, 14, r.d)
+    k, v = r._full_kv(rows)
+    w1 = r._window_memory(rows, rows.device, 0)
+    w2 = r._window_memory(rows, rows.device, 0, k, v)
+    for u, w in zip(w1, w2):
+        assert torch.allclose(u, w, atol=0, rtol=0), "projection reuse drifted"

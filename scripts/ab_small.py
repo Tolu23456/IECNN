@@ -280,6 +280,25 @@ ARMS = {
         "lug", True, n_passes=1, n_dots=4, d_s=64, per_dot_logits=False,
         global_read=True, spans=(32,), window_mode="hybrid",
         window_reach=64), {"lr": 2e-3}),
+    # --- lr x SWA x window span, on top of the O(T) global read ----------
+    # SWA is worth 0.06-0.08 bpc and turns the "constant lr is pure noise at
+    # the end" problem into an asset: more lr = more noise = more to average.
+    "iecnn-lr3-glob-swa": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=4, d_s=64, per_dot_logits=False,
+        global_read=True), {"lr": 3e-3, "swa": 0.995}),
+    "iecnn-lr3-glob-s8-swa": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=4, d_s=64, per_dot_logits=False,
+        global_read=True, spans=(8,)), {"lr": 3e-3, "swa": 0.995}),
+    "iecnn-lr2-glob-s8-swa": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=4, d_s=64, per_dot_logits=False,
+        global_read=True, spans=(8,)), {"lr": 2e-3, "swa": 0.995}),
+    # longer averaging window = less variance (free)
+    "iecnn-lr2-glob-s8-swa99": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=4, d_s=64, per_dot_logits=False,
+        global_read=True, spans=(8,)), {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-lr3-g1-s8-swa": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=4, d_s=64, per_dot_logits=False,
+        global_read=True, spans=(8,)), {"lr": 3e-3, "swa": 0.995}),
     # --- tail weight averaging (free: no extra training steps) ----------
     "tf-swa": ("transformer", lambda: tf(96, 4, 3), {"swa": 0.995}),
     "iecnn-lr2-plain-swa": ("iecnn", lambda: iecnn(
