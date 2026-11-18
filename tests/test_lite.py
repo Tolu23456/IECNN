@@ -789,5 +789,5 @@ def test_head_post_adds_one_per_position_block_and_trains():
     y = torch.randint(0, 64, (2, 12))
     loss = -on(x)["final_log_probs"].reshape(-1, 64).gather(1, y.reshape(-1, 1)).mean()
     loss.backward()
-    g = on.regions[0].post_w1.weight.grad
+    g = on.regions[0].post_blocks[0]["w1"].weight.grad
     assert g is not None and torch.isfinite(g).all()

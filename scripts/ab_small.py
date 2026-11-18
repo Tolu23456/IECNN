@@ -58,7 +58,7 @@ def iecnn(cell="gru", lean=False, n_passes=3, n_dots=8, d_s=128, d=128,
           id_lags=False, ngram_bias=0, head_rank=0,
           state_carry=False, carry_chunk=8, gla=False,
           global_exact=False, head_skip=False, break_scan=False,
-          d_q=16, d_v=32, head_post=0):
+          d_q=16, d_v=32, head_post=0, head_post_layers=1):
     m = {
         "kind": "iecnn", "d": d, "d_q": d_q, "d_v": d_v, "d_s": d_s,
         "n_dots": n_dots, "n_regions": 1, "n_passes": n_passes,
@@ -90,6 +90,7 @@ def iecnn(cell="gru", lean=False, n_passes=3, n_dots=8, d_s=128, d=128,
         "head_skip": head_skip,
         "break_scan": break_scan,
         "head_post": head_post,
+        "head_post_layers": head_post_layers,
     }
     if window_reach is not None:
         m["window_reach"] = window_reach
@@ -506,6 +507,25 @@ ARMS = {
     "iecnn-d192-n2-pmlp": ("iecnn", lambda: iecnn(
         "lug", True, n_passes=2, n_dots=2, d_s=96, d=192, per_dot_logits=False,
         global_read=True, spans=(8,), head_post=384),
+        {"lr": 2e-3, "swa": 0.99}),
+    # The block won on BOTH axes (-0.095 bpc AND -35% step time), so the next
+    # question is how much further the same trade goes: fewer/cheaper dots,
+    # a wider block, more blocks, a wider model.
+    "iecnn-d192-n1-pmlp": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=1, d_s=96, d=192, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=384),
+        {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-d192-n2-pmlp-w768": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=2, d_s=96, d=192, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=768),
+        {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-d192-n2-pmlp-x2": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=2, d_s=96, d=192, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=384, head_post_layers=2),
+        {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-d256-n2-pmlp": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=2, d_s=96, d=256, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=512),
         {"lr": 2e-3, "swa": 0.99}),
     "iecnn-d256-ds256-n6": ("iecnn", lambda: iecnn(
         "lug", True, n_passes=2, n_dots=6, d_s=256, d=256, per_dot_logits=False,
