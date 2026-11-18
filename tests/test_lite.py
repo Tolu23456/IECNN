@@ -913,10 +913,10 @@ def test_global_decay_adds_recency_and_vanishes_at_gamma_one():
         dd.g_decay.fill_(-2.0)             # sigmoid -> 0.12 -> clamp 0.5
         rec = dd._global_ctx(k, v, 0)
         # position 0 has exactly one cause, so recency must return v_0 there
-        assert (rec[:, 0] - v[:, 0]).abs().max().item() < 1e-5
+        assert (rec[:, 0] - v[:, 0].unsqueeze(1)).abs().max().item() < 1e-5
         # and the last position must be much closer to v_t than the bag is
-        d_rec = (rec[:, -1] - v[:, -1]).abs().mean()
-        d_bag = (plain[:, -1] - v[:, -1]).abs().mean()
+        d_rec = (rec[:, -1] - v[:, -1].unsqueeze(1)).abs().mean()
+        d_bag = (plain[:, -1] - v[:, -1].unsqueeze(1)).abs().mean()
         assert d_rec < d_bag
         # causality
         v2 = v.clone()
