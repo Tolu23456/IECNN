@@ -1145,7 +1145,8 @@ def test_gate_agree_is_inert_at_init_and_trains():
     assert not torch.allclose(base(x)["final_log_probs"],
                               m(x)["final_log_probs"], atol=1e-6)
     m.train()
-    m.regions[0].c_agree.zero_()
+    with torch.no_grad():
+        m.regions[0].c_agree.zero_()   # leaf param: in-place needs no_grad
     out = m(x)
     out["final_log_probs"].exp().gather(
         -1, torch.zeros(2, 12, 1, dtype=torch.long)).sum().backward()
