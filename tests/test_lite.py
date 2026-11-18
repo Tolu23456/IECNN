@@ -1059,8 +1059,9 @@ def test_global_decay_mix_k_collapses_to_one_timescale():
         assert (a - c).abs().max().item() < 1e-6
         # distinct timescales: the mix must sit between the fastest and the
         # slowest single read (convexity), and differ from both
-        three.g_decay.copy_(torch.tensor(
-            [[[-3.0, 2.0, 6.0], [-1.0, 3.0, 5.0], [0.0, 3.5, 5.5]]]))
+        three.g_decay.copy_(
+            torch.tensor([-3.0, 2.0, 6.0]).view(1, 1, 3).expand_as(
+                three.g_decay).contiguous())        # three distinct gammas
         m = three._global_ctx(k, v, 0)
         reads = []
         for j in range(3):
