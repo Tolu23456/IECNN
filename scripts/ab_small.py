@@ -544,6 +544,23 @@ ARMS = {
         "lug", True, n_passes=1, n_dots=2, d_s=96, d=192, per_dot_logits=False,
         global_read=True, spans=(8,), head_post=384, head_post_layers=2),
         {"lr": 2e-3, "swa": 0.99}),
+    # The two wins combine: one pass was better than two (2.1909 vs 2.2108)
+    # and cheaper, and depth saturates at three blocks. These are the
+    # candidates for the best single arm under the equal-wall-clock rule.
+    "iecnn-d192-n2-pmlp-x3-p1": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=2, d_s=96, d=192, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=384, head_post_layers=3),
+        {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-d192-n2-pmlp-x4-p1": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=2, d_s=96, d=192, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=384, head_post_layers=4),
+        {"lr": 2e-3, "swa": 0.99}),
+    # one pass frees ~40% of the step, so spend it on the population: with a
+    # single pass the cell is run once, and N=3 may now be affordable.
+    "iecnn-d192-n3-pmlp-x3-p1": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=192, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=384, head_post_layers=3),
+        {"lr": 2e-3, "swa": 0.99}),
     "iecnn-d256-ds256-n6": ("iecnn", lambda: iecnn(
         "lug", True, n_passes=2, n_dots=6, d_s=256, d=256, per_dot_logits=False,
         global_read=True, spans=(8,)), {"lr": 2e-3, "swa": 0.99}),
