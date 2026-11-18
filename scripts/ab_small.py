@@ -42,7 +42,8 @@ def iecnn(cell="gru", lean=False, n_passes=3, n_dots=8, d_s=128, d=128,
           per_dot_logits=True, window_mode="contiguous", window_reach=None,
           window_local=None, seclusion_topk=0, pool_first=False,
           slot_slots=0, dist_bias=False, dynamic_query=False,
-          global_read=False):
+          global_read=False, read_schedule="mix", head_untied=False,
+          cell_ln=False):
     m = {
         "kind": "iecnn", "d": d, "d_q": 16, "d_v": 32, "d_s": d_s,
         "n_dots": n_dots, "n_regions": 1, "n_passes": n_passes,
@@ -59,6 +60,9 @@ def iecnn(cell="gru", lean=False, n_passes=3, n_dots=8, d_s=128, d=128,
         "slot_slots": slot_slots,
         "dot_dist_bias": dist_bias,
         "global_read": global_read,
+        "read_schedule": read_schedule,
+        "head_untied": head_untied,
+        "cell_ln": cell_ln,
     }
     if window_reach is not None:
         m["window_reach"] = window_reach
@@ -282,6 +286,43 @@ ARMS = {
         "lug", True, n_passes=1, n_dots=4, d_s=64, per_dot_logits=False,
         global_read=True, spans=(32,), window_mode="hybrid",
         window_reach=64), {"lr": 2e-3}),
+    # --- capacity / normalisation, at ~0 extra MACs ---------------------
+    "iecnn-lr2-g8-untied": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=4, d_s=64, per_dot_logits=False,
+        global_read=True, spans=(8,), head_untied=True),
+        {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-lr2-g8-ln": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=4, d_s=64, per_dot_logits=False,
+        global_read=True, spans=(8,), cell_ln=True),
+        {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-lr2-g8-ln-untied": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=4, d_s=64, per_dot_logits=False,
+        global_read=True, spans=(8,), cell_ln=True, head_untied=True),
+        {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-lr2-g8-ds96": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=4, d_s=96, per_dot_logits=False,
+        global_read=True, spans=(8,), cell_ln=True, head_untied=True),
+        {"lr": 2e-3, "swa": 0.99}),
+    # --- per-pass read schedule (zero extra reads) -----------------------
+    # Both reads are cached separately, so passes 2..P used to receive a
+    # BIT-IDENTICAL ctx: "depth" was nominal. g_glob now has one row per
+    # pass, init pass 1 local / pass 2 global. Same reads, same GEMMs.
+    "iecnn-lr2-split-s8-swa99": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=4, d_s=64, per_dot_logits=False,
+        global_read=True, spans=(8,), read_schedule="split"),
+        {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-lr2-split-s8-swa": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=4, d_s=64, per_dot_logits=False,
+        global_read=True, spans=(8,), read_schedule="split"),
+        {"lr": 2e-3, "swa": 0.995}),
+    "iecnn-lr2-split-s16-swa99": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=4, d_s=64, per_dot_logits=False,
+        global_read=True, read_schedule="split"),
+        {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-lr2-split3-s8-swa99": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=3, n_dots=4, d_s=64, per_dot_logits=False,
+        global_read=True, spans=(8,), read_schedule="split"),
+        {"lr": 2e-3, "swa": 0.99}),
     # --- lr x SWA x window span, on top of the O(T) global read ----------
     # SWA is worth 0.06-0.08 bpc and turns the "constant lr is pure noise at
     # the end" problem into an asset: more lr = more noise = more to average.

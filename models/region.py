@@ -108,6 +108,17 @@ class Region(nn.Module):
         # and without ever materializing [B,T,N,d]. Must be set BEFORE the
         # DotPopulation is built (it decides p_out's shape).
         self.pool_first = bool(m.get("pool_first", False))
+        # head_untied: an independent output matrix [d, V] instead of the
+        # tied embedding. Same compute per token (d*V either way), +d*V
+        # parameters; the transformer baseline has always had one, so tying
+        # was an unexamined handicap on our side of a like-for-like test.
+        self.head_untied = bool(m.get("head_untied", False))
+        if self.head_untied:
+            w = torch.empty(self.d, vocab_size)
+            nn.init.normal_(w, std=0.02)     # transformer-style small init
+            self.w_head = nn.Parameter(w)
+        else:
+            self.w_head = None
         # global_read: every dot additionally reads its WHOLE prefix (causal)
         # through an O(T) prefix-sum attention — see DotPopulation.__init__.
         # It costs no T*T tensor and no per-position GEMM. Mixing g_glob lets
@@ -126,7 +137,9 @@ class Region(nn.Module):
             share_out=self.pool_first,
             span=self.span,
             dist_bias=bool(m.get("dot_dist_bias", False)),
-            global_read=self.global_read)
+            global_read=self.global_read,
+            read_schedule=str(m.get("read_schedule", "mix")),
+            in_ln=bool(m.get("cell_ln", False)))
         # Lean passes: in hidden mode the pooled shared head and the per-dot
         # e_state projection are only consumed on the LAST pass. With
         # head_last_only the earlier passes skip both (they still update the
@@ -237,6 +250,12 @@ class Region(nn.Module):
             dist = ((i / max(w - 1, 1)) ** 2 * reach).round().long()
             dist[0] = 0
         return (-dist).flip(0)        # ascending offsets, slot -1 = current
+
+    def _head_logits(self, h: torch.Tensor, emb_table: torch.Tensor):
+        """[.., d] -> [.., V]. Tied embedding (default) or an untied head."""
+        if self.w_head is not None:
+            return h.matmul(self.w_head)
+        return h.matmul(emb_table.t())
 
     def _full_kv(self, rows: torch.Tensor):
         """Keys/values for the GLOBAL read: one row per position, no window."""
@@ -518,7 +537,7 @@ class Region(nn.Module):
                 else:
                     h_mix = torch.einsum("bfn,bfnd->bfd", w,
                                          out.e_state)               # [B, T, d]
-                logits = h_mix.reshape(f, self.d).matmul(emb_table.t())  # [f, V]
+                logits = self._head_logits(h_mix.reshape(f, self.d), emb_table)
                 log_b = F.log_softmax(logits, dim=-1).reshape(b, t, -1)
 
             # hidden-space error features for the next pass (3 dims, cheap):
@@ -548,7 +567,7 @@ class Region(nn.Module):
                 ).reshape(b, t, self.d)
             else:
                 h_mix = torch.einsum("bfn,bfnd->bfd", w_hard, e_state_last)
-            logits = h_mix.reshape(f, self.d).matmul(emb_table.t())
+            logits = self._head_logits(h_mix.reshape(f, self.d), emb_table)
             log_final = F.log_softmax(logits, dim=-1).reshape(b, t, -1)
             w_out = w_hard
         else:

@@ -64,10 +64,25 @@ def gather_windows(rows: torch.Tensor, span: int, window_offsets: torch.Tensor |
     invalid in valid_mask (masked, not zero-filled — spec 02 section 1).
     """
     b, t, d = rows.shape
+    device = rows.device
     if window_offsets is None:
-        window_offsets = torch.arange(span) - span + 1            # [-(span-1) .. 0]
-    window_offsets = window_offsets.to(rows.device)
-    idx = torch.arange(t, device=rows.device).unsqueeze(1) + window_offsets.unsqueeze(0)
+        window_offsets = torch.arange(span, device=device) - span + 1  # [-(span-1) .. 0]
+    window_offsets = window_offsets.to(device)
+    tgt = torch.arange(span, device=device) - span + 1
+    # Fast path (the default and by far the most common window): offsets are
+    # exactly -(span-1)..0, i.e. a plain sliding window. Replicate-pad on the
+    # left (out-of-range rows fall back to row 0, matching clamp_min(0)) and
+    # use a stride view. This replaces a [B,T,span,d] fancy-index gather plus
+    # its backward scatter with a view — measured as aten::_index_put_impl_
+    # + aten::index in the step profile.
+    if window_offsets.numel() == tgt.numel() and bool((window_offsets == tgt).all()):
+        padded = F.pad(rows.transpose(1, 2), (span - 1, 0), mode="replicate")
+        padded = padded.transpose(1, 2)                            # [B, T+span-1, d]
+        windowed = padded.unfold(1, span, 1).transpose(-1, -2)      # [B, T, span, d]
+        t_idx = torch.arange(t, device=device).unsqueeze(1)
+        valid = t_idx + tgt.unsqueeze(0) >= 0
+        return windowed, valid
+    idx = torch.arange(t, device=device).unsqueeze(1) + window_offsets.unsqueeze(0)
     valid = idx >= 0
     idx = idx.clamp_min(0)
     windowed = rows[:, idx]          # fancy indexing: [B, T, span, d]

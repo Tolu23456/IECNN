@@ -98,7 +98,8 @@ class DotPopulation(nn.Module):
                  slot_slots: int = 0, slot_dim: int = 32,
                  slot_decay: float = 0.5, cell: str = "gru",
                  share_out: bool = False, dist_bias: bool = False,
-                 global_read: bool = False):
+                 global_read: bool = False, read_schedule: str = "mix",
+                 in_ln: bool = False):
         super().__init__()
         self.N = n_dots
         self.d = d
@@ -194,8 +195,34 @@ class DotPopulation(nn.Module):
         # g_glob mixes the two reads per dot, so dots can SPECIALISE: some
         # stay local (bigram precision), some read the whole prefix.
         self.global_read = bool(global_read)
+        # read_schedule "split": one g_glob row PER PASS, initialised so pass 1
+        # reads the LOCAL window and later passes read the GLOBAL prefix.
+        #
+        # This is the fix for "fake depth" that costs nothing: with the
+        # attention cache both reads are already computed once and cached
+        # separately (ctx, g_ctx), so passes 2..P were receiving a
+        # BIT-IDENTICAL input and depth was nominal. Differing only in the
+        # gate row makes each pass read a different VIEW of the same prefix
+        # at zero extra reads and zero extra GEMMs (the mix is N*d_v adds).
+        # Init +-2 gives 0.12 / 0.88 mixing, i.e. a strong but learnable
+        # preference, so a pass can still soften it if that is better.
+        self.read_schedule = str(read_schedule)
+        # in_ln: LayerNorm over the concatenated cell input. Transformer
+        # blocks normalise their input before every sublayer; the cell was
+        # fed ctx/h_pool/err/round-emb raw, so at lr 2e-3 the input scale
+        # drifted with the read magnitude. Cost: one pass over
+        # [f, N, in_dim] (~1e5 elements, <0.3% of a step).
+        self.in_ln = (nn.LayerNorm(gru_input_dim(d_v, d_s, message_dim,
+                                                 self.slot_read_dim))
+                      if bool(in_ln) else None)
         if self.global_read:
-            self.g_glob = nn.Parameter(torch.zeros(p_layers, n_dots))
+            if self.read_schedule == "split":
+                bias = torch.zeros(n_passes, n_dots)
+                bias[0::2] = -2.0
+                bias[1::2] = 2.0
+                self.g_glob = nn.Parameter(bias)
+            else:
+                self.g_glob = nn.Parameter(torch.zeros(p_layers, n_dots))
         else:
             self.g_glob = None
         self.s0 = nn.Parameter(0.02 * torch.randn(p_layers, n_dots, d_s, generator=g))
@@ -447,7 +474,9 @@ class DotPopulation(nn.Module):
         # ---- global causal read (same O(T) prefix-sum as the fast path) ----
         if self.global_read and full_k is not None:
             g_ctx = self._global_ctx(full_k, full_v, round_idx)        # [B, T, N, d_v]
-            mix = torch.sigmoid(self._sel(round_idx, self.g_glob)).view(1, 1, n, 1)
+            g_row = (self.g_glob[round_idx] if self.read_schedule == "split"
+                     else self._sel(round_idx, self.g_glob))
+            mix = torch.sigmoid(g_row).view(1, 1, n, 1)
             ctx = (1.0 - mix) * ctx + mix * g_ctx
 
         # ---- GRU step (all dots at once) ----------------------------------
@@ -570,7 +599,12 @@ class DotPopulation(nn.Module):
                 ctx = self._secluded_ctx(scores, wv)                    # [f, N, d_v]
             else:
                 attn = torch.nan_to_num(F.softmax(scores, dim=-1), nan=0.0)  # [f, N, w]
-                ctx = torch.matmul(attn.unsqueeze(-2), wv.unsqueeze(1)).squeeze(-2)  # [f, N, d_v]
+                # ONE bmm over f groups of [N, w] @ [w, d_v]. The obvious
+                # attn.unsqueeze(-2) @ wv.unsqueeze(1) form makes torch
+                # broadcast it into f*N separate [1, w] @ [w, d_v] GEMMs
+                # (2048 of them at B=8/T=64/N=4) — measured as the single
+                # largest bmm in the step profile.
+                ctx = torch.bmm(attn, wv)                              # [f, N, d_v]
             if cacheable:
                 attn_cache["ctx"] = ctx
 
@@ -588,7 +622,11 @@ class DotPopulation(nn.Module):
                 g_ctx = self._global_ctx(full_k, full_v, round_idx)
                 if g_cacheable:
                     attn_cache["g_ctx"] = g_ctx
-            mix = torch.sigmoid(self._sel(round_idx, self.g_glob)).view(1, n, 1)
+            if self.read_schedule == "split":
+                g_row = self.g_glob[round_idx]          # per-pass row, unclamped
+            else:
+                g_row = self._sel(round_idx, self.g_glob)
+            mix = torch.sigmoid(g_row).view(1, n, 1)
             ctx = (1.0 - mix) * ctx + mix * g_ctx.reshape(f, n, self.d_v)
 
         # ---- GRU step (batched GEMM per dot over merged [B*T]) ------------
@@ -602,6 +640,8 @@ class DotPopulation(nn.Module):
             parts.append(r.unsqueeze(1).expand(b, t, n, self.d_w)
                          .reshape(f, n, self.d_w))
         x = torch.cat(parts, dim=-1)                                    # [f, N, d_in]
+        if self.in_ln is not None:
+            x = self.in_ln(x)
 
         s_f = state.reshape(f, n, self.d_s)
         if self.cell == "lug":

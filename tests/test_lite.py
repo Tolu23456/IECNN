@@ -345,3 +345,54 @@ def test_global_read_cache_is_exact_and_shared_projection_is_exact():
     w2 = r._window_memory(rows, rows.device, 0, k, v)
     for u, w in zip(w1, w2):
         assert torch.allclose(u, w, atol=0, rtol=0), "projection reuse drifted"
+
+
+def test_split_read_schedule_is_exact_when_gates_agree():
+    """read_schedule='split' must change ONLY the gate rows: with zero gates
+    it is bit-identical to the mixed schedule (both reads are the same
+    tensors; only the per-pass mix weight differs)."""
+    kw = dict(global_read=True, head_last_only=True, per_dot_logits=False,
+              n_passes=2)
+    mix = build_iecnn(_cfg(**kw), 64)
+    split = build_iecnn(_cfg(read_schedule="split", **kw), 64)
+    sd = {k: v for k, v in mix.state_dict().items() if "g_glob" not in k}
+    split.load_state_dict(sd, strict=False)
+    with torch.no_grad():
+        split.regions[0].dots.g_glob.zero_()       # matches the 'mix' init
+        mix.regions[0].dots.g_glob.zero_()
+    mix.eval(); split.eval()
+    x = torch.randint(0, 64, (2, 12))
+    a, b = _fwd(mix, x), _fwd(split, x)
+    assert torch.allclose(a, b, atol=1e-6, rtol=1e-6), \
+        (a - b).abs().max().item()
+
+
+def test_split_read_schedule_gives_each_pass_a_different_read():
+    """The point of the split: pass 1 must be window-dominant, pass 2
+    global-dominant, so consecutive passes see different input at zero
+    added compute."""
+    m = build_iecnn(_cfg(global_read=True, read_schedule="split",
+                         head_last_only=True, per_dot_logits=False,
+                         n_passes=2), 64)
+    r = m.regions[0]
+    g = r.dots.g_glob
+    assert g.shape[0] == 2, g.shape                     # one row per pass
+    mix0 = torch.sigmoid(g[0]).mean().item()
+    mix1 = torch.sigmoid(g[1]).mean().item()
+    assert mix0 < 0.25 < 0.75 < mix1, (mix0, mix1)
+
+    # and each read must still be computed ONCE per region-forward
+    calls = {"n": 0}
+    real = r.dots._global_ctx
+
+    def counted(*a, **k):
+        calls["n"] += 1
+        return real(*a, **k)
+
+    r.dots._global_ctx = counted
+    x = torch.randint(0, 64, (2, 12))
+    _fwd(m, x)
+    assert calls["n"] == 1, f"global read ran {calls['n']}x for 2 passes"
+    r.cache_attention = False
+    _fwd(m, x)
+    assert calls["n"] == 3, f"cache off should recompute: {calls['n']}"
