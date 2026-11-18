@@ -261,6 +261,42 @@ ARMS = {
     "iecnn-lr2-plain": ("iecnn", lambda: iecnn(
         "lug", True, n_passes=2, n_dots=4, d_s=64, per_dot_logits=False),
         {"lr": 2e-3}),
+    # P=1 + global read: one cell pass (half the cell cost) but full causal
+    # context, which is exactly what the 2nd pass was trying to provide.
+    "iecnn-lr2-g1": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=4, d_s=64, per_dot_logits=False,
+        global_read=True), {"lr": 2e-3}),
+    "iecnn-lr2-g1-n8": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=8, d_s=64, per_dot_logits=False,
+        global_read=True), {"lr": 2e-3}),
+    "iecnn-lr2-g1-s8": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=4, d_s=64, per_dot_logits=False,
+        global_read=True, spans=(8,)), {"lr": 2e-3}),
+    "iecnn-lr2-p1": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=4, d_s=64, per_dot_logits=False),
+        {"lr": 2e-3}),
+    # wider local window is cheap at P=1 (read is ~3% of a pass)
+    "iecnn-lr2-g1-s32": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=4, d_s=64, per_dot_logits=False,
+        global_read=True, spans=(32,), window_mode="hybrid",
+        window_reach=64), {"lr": 2e-3}),
+    # --- tail weight averaging (free: no extra training steps) ----------
+    "tf-swa": ("transformer", lambda: tf(96, 4, 3), {"swa": 0.995}),
+    "iecnn-lr2-plain-swa": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=4, d_s=64, per_dot_logits=False),
+        {"lr": 2e-3, "swa": 0.995}),
+    "iecnn-lr2-glob-swa": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=4, d_s=64, per_dot_logits=False,
+        global_read=True), {"lr": 2e-3, "swa": 0.995}),
+    "iecnn-lr2-g1-s8-swa": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=4, d_s=64, per_dot_logits=False,
+        global_read=True, spans=(8,)), {"lr": 2e-3, "swa": 0.995}),
+    "iecnn-lr2-glob-s8": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=4, d_s=64, per_dot_logits=False,
+        global_read=True, spans=(8,)), {"lr": 2e-3}),
+    "iecnn-lr2-g1-ds96": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=4, d_s=96, per_dot_logits=False,
+        global_read=True), {"lr": 2e-3}),
     "iecnn-lr2-glob-h64": ("iecnn", lambda: iecnn(
         "lug", True, n_passes=2, n_dots=4, d_s=64, per_dot_logits=False,
         global_read=True, window_mode="hybrid", window_reach=64),
@@ -360,7 +396,7 @@ BASE_LR = float(os.environ.get("ARM_LR", "1e-3"))
 
 
 def run(name: str, kind: str, model, lr: float = None,
-        seed: int = None, sched: str = None) -> dict:
+        seed: int = None, sched: str = None, swa: float = 0.0) -> dict:
     lr0 = BASE_LR if lr is None else float(lr)
     sd = SEED if seed is None else int(seed)
     torch.manual_seed(sd)
@@ -369,6 +405,13 @@ def run(name: str, kind: str, model, lr: float = None,
     n_par = sum(p.numel() for p in model.parameters())
     gen = batches(sd)
     sched = sched or ""
+    # Tail weight averaging (SWA/EMA). With a constant lr the last steps
+    # bounce around the minimum; averaging the tail is a free variance
+    # reduction (one extra eval, no extra training). Active only in the
+    # last 55% of the budget, where the weights are already worth keeping.
+    ema = None
+    if swa:
+        ema = [p.detach().clone() for p in model.parameters()]
     t0 = time.time()
     step = 0
     marks = []
@@ -392,13 +435,23 @@ def run(name: str, kind: str, model, lr: float = None,
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         opt.step()
         step += 1
+        if ema is not None and (time.time() - t0) > 0.45 * BUDGET:
+            with torch.no_grad():
+                torch._foreach_mul_(ema, swa)
+                torch._foreach_add_(ema, list(model.parameters()),
+                                    alpha=1.0 - swa)
         el = time.time() - t0
         if el >= next_mark:
             marks.append([int(step * B * T), round(val_bpc(model), 4), step])
             next_mark += MARK_S
     el = time.time() - t0
+    if ema is not None:
+        with torch.no_grad():
+            for p, a in zip(model.parameters(), ema):
+                p.copy_(a)
     final = round(val_bpc(model), 4)
     row = {"arm": name, "kind": kind, "seed": sd, "lr": lr0, "sched": sched,
+           "swa": swa,
            "params": n_par, "steps": step,
            "tokens": step * B * T, "s_per_step": round(el / max(step, 1), 4),
            "s_per_1k_tokens": round(el / max(step * B * T / 1000, 1e-9), 3),

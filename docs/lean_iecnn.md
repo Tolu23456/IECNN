@@ -93,3 +93,82 @@ Honest caveat, from the audit: the read is 0.2-2.6% of compute, so seclusion
 can never be a *speed* win at a 16-32 token window. It only becomes one when
 the memory is large (score cost `T*w*d_q` vs a pointer lookup), which is the
 long-context regime the mechanism is really aimed at.
+
+## 5. The learning rate was worth more than any architecture change
+
+Equal 150 s toy, N4/P2/d_s=64 (132.5k params), everything else identical:
+
+| lr | steps | s/step | bpc |
+|---|---:|---:|---:|
+| 3e-4 | 4013 | 0.0374 | 4.7156 |
+| **1e-3** (all earlier work) | 4395 | 0.0342 | 4.2834 |
+| **2e-3** | 4395 | 0.0342 | **4.1179** |
+| 3e-3 | 3965 | 0.0379 | 4.1458 |
+
+**-0.17 bpc for one number.** The model was simply under-trained: at a 150 s
+budget with a constant lr it never left the "more lr is better" regime (which
+is also why the cosine-over-budget schedule *lost* 0.28 bpc — it halves the
+average lr).
+
+The pointer audit changed completely with the lr, which retroactively explains
+two failed mechanisms:
+
+| | lr 1e-3 | lr 2e-3 |
+|---|---:|---:|
+| all dots pick the same token | 70.6% | **6.2%** |
+| mean pick distance back | 0.11 | 0.93 |
+
+The "committee is one bigram detector" collapse was an **under-training
+artefact**, not an architectural flaw. Both `dot_dist_bias` (a per-dot
+distance prior, built to fix the collapse) and `dynamic_query` (built to give
+each pass a different read) were solving a problem that a correct lr had
+already solved — both lost bpc and cost steps. Pruned.
+
+## 6. Global causal read at O(T) (the novel mechanism)
+
+A dot's query is **static** (no dynamic_query), so `score(s) = q_n·k_s` does
+not depend on *where* we are reading. Full causal attention is then exactly a
+normalised prefix sum:
+
+```
+e_s   = exp(q_n · k_s)
+ctx_t = Σ_{s≤t} e_s v_s / Σ_{s≤t} e_s        (two cumsums)
+```
+
+No T×T tensor, no per-position GEMM, no softmax over a growing row. At
+T=64/N=4/d_v=32 that is ~16k MAC-equivalents — **less than the LUG cell
+(59k)**. `g_glob` mixes the windowed read and the global read per dot, so dots
+can specialise (local precision vs whole-prefix context).
+
+Verified (`tests/test_lite.py`): the cumsum read equals a naive per-position
+softmax over the prefix to 1e-5, and perturbing a future token cannot change
+any earlier log-prob.
+
+Measured, equal 150 s, same session:
+
+| arm | bpc | s/step |
+|---|---:|---:|
+| plain P2 | 4.1038 | 0.0349 |
+| P2 + global | **4.0841** | 0.0396 |
+| P1, no global | 4.2874 | 0.0255 |
+| P1 + global | 4.1433 | 0.0294 |
+| P1 + global, window 8 | 4.1286 | 0.0273 |
+
+Two things this shows: (a) the second pass is worth ~0.18 bpc, so passes are
+not free depth but they do work; (b) the global read buys ~0.02 bpc at P2 and
+~0.14 bpc at P1, i.e. it substitutes for a pass at 60% of the cost.
+
+## 7. Pruned, with numbers
+
+| mechanism | bpc@eqtok price | step cost |
+|---|---:|---:|
+| `window_mode: bands` (per-pass bands) | +0.38 | +10% |
+| `dynamic_query` (per-pass reads) | +0.18 | +18% |
+| `dot_dist_bias` (per-dot distance prior) | +0.10 | +5% |
+| `sched: cos` (cosine over the budget) | +0.28 | ~0 |
+| `window_mode: quad` at N4 | +0.16 | ~0 |
+| seclusion | +0.31 | +6% |
+| slot table (per-dot carry) | +0.11 | +30% |
+
+None of them survived the 30% rule; all are still reachable behind flags and
+re-testable in `scripts/ab_small.py`.
