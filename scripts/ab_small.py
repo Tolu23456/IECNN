@@ -766,6 +766,26 @@ ARMS = {
         global_read=True, spans=(8,), head_post=256, head_post_layers=5,
         read_ln=True, head_ln=True, global_decay=True),
         {"lr": 2e-3, "swa": 0.99}),
+    # --- more horizons, now that we know the dots CHOOSE a horizon ----------
+    # The audit found the three dots sitting at 0 / ~3 / ~6 tokens back out of
+    # an 8-slot window, reading JS 0.20-0.27 and agreeing on 6-10% of
+    # predictions. That is a multi-scale receptive field nobody designed, and
+    # 5.87 back is close to the window edge, so the far dot may be capped by
+    # the SPEC rather than by the data. With a quad window (8 slots spread
+    # geometrically to reach) four dots can cover four real scales — 0, a few,
+    # tens, and tens-plus — for the same read compute. N=4 lost before
+    # (span 16, contiguous), but there the four horizons could only be 0/1/2/3;
+    # these arms test whether N=4 was starved of SCALES rather than of dots.
+    "iecnn-n4-x4-p1-ln-decay-q64": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=4, d_s=96, d=192, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=384, head_post_layers=4,
+        read_ln=True, head_ln=True, global_decay=True,
+        window_mode="quad", window_reach=64), {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-n4-x4-p1-ln-decay-q128": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=4, d_s=96, d=192, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=384, head_post_layers=4,
+        read_ln=True, head_ln=True, global_decay=True,
+        window_mode="quad", window_reach=128), {"lr": 2e-3, "swa": 0.99}),
     # --- the gate is blind to the committee (gate_agree) --------------------
     # gamma is a scalar read of a dot's OWN state, so the gate cannot express
     # "this dot disagrees with the other two". Audit finding: the gate is
