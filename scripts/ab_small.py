@@ -1529,7 +1529,16 @@ def main():
         # repaid by the faster steady-state step.
         if opts.get("compile", os.environ.get("ARM_COMPILE") == "1"):
             model = torch.compile(model)
-        rows.append(run(name, kind, model, eval_model=inner, **opts))
+        # `compile` is consumed HERE: passing it on to run() is a TypeError, and
+        # that killed a whole session after the first arm had trained (the GPU
+        # slot is the scarce resource, so knobs are stripped, not forwarded).
+        run_opts = {k: v for k, v in opts.items() if k != "compile"}
+        try:
+            rows.append(run(name, kind, model, eval_model=inner, **run_opts))
+        except Exception as e:  # noqa: BLE001
+            # One broken arm must not cost the other arms their session: the
+            # failure is printed loudly and the summary simply lacks the arm.
+            print(f"ARM FAIL {name:<26}{type(e).__name__}: {e}", flush=True)
 
     common_tok = min(r["tokens"] for r in rows)
     print(f"\n=== SUMMARY (equal wall-clock {BUDGET:.0f}s/arm, "
