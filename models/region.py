@@ -139,7 +139,8 @@ class Region(nn.Module):
             dist_bias=bool(m.get("dot_dist_bias", False)),
             global_read=self.global_read,
             read_schedule=str(m.get("read_schedule", "mix")),
-            in_ln=bool(m.get("cell_ln", False)))
+            in_ln=bool(m.get("cell_ln", False)),
+            share_cell=bool(m.get("share_cell", False)))
         # Lean passes: in hidden mode the pooled shared head and the per-dot
         # e_state projection are only consumed on the LAST pass. With
         # head_last_only the earlier passes skip both (they still update the

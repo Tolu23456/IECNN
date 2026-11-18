@@ -396,3 +396,39 @@ def test_split_read_schedule_gives_each_pass_a_different_read():
     r.cache_attention = False
     _fwd(m, x)
     assert calls["n"] == 3, f"cache off should recompute: {calls['n']}"
+
+
+def test_share_cell_is_exact_and_enables_more_dots():
+    """A shared cell must equal per-dot cells when every dot's cell weights
+    are identical (the N batched GEMMs and the one merged GEMM compute the
+    same numbers). It must also let N grow without growing the cell."""
+    kw = dict(global_read=True, head_last_only=True, per_dot_logits=False,
+              n_passes=2, cell="lug")
+    base = build_iecnn(_cfg(**kw), 64)
+    shared = build_iecnn(_cfg(share_cell=True, **kw), 64)
+    sd = {k: v for k, v in base.state_dict().items()
+          if "w_ih_lug" not in k and "b_lug" not in k and "u_lug" not in k}
+    shared.load_state_dict(sd, strict=False)
+    db, ds_ = base.regions[0].dots, shared.regions[0].dots
+    with torch.no_grad():
+        ds_.w_ih_lug.copy_(db.w_ih_lug[:, :1])
+        ds_.b_lug.copy_(db.b_lug[:, :1])
+        ds_.u_lug.copy_(db.u_lug[:, :1])
+        db.w_ih_lug.copy_(ds_.w_ih_lug.expand_as(db.w_ih_lug))
+        db.b_lug.copy_(ds_.b_lug.expand_as(db.b_lug))
+        db.u_lug.copy_(ds_.u_lug.expand_as(db.u_lug))
+    base.eval(); shared.eval()
+    x = torch.randint(0, 64, (2, 12))
+    a, b = _fwd(base, x), _fwd(shared, x)
+    assert torch.allclose(a, b, atol=1e-6, rtol=1e-6), \
+        (a - b).abs().max().item()
+
+    # cell size must not depend on N
+    n4 = build_iecnn(_cfg(share_cell=True, **kw), 64)
+    n8 = build_iecnn(_cfg(share_cell=True, n_dots=8, **kw), 64)
+    def cell_params(m):
+        return sum(v.numel() for k, v in m.regions[0].dots.named_parameters()
+                   if k in ("w_ih_lug", "b_lug", "u_lug"))
+
+    c4, c8 = cell_params(n4), cell_params(n8)
+    assert c4 == c8, (c4, c8)

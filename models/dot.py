@@ -99,7 +99,7 @@ class DotPopulation(nn.Module):
                  slot_decay: float = 0.5, cell: str = "gru",
                  share_out: bool = False, dist_bias: bool = False,
                  global_read: bool = False, read_schedule: str = "mix",
-                 in_ln: bool = False):
+                 in_ln: bool = False, share_cell: bool = False):
         super().__init__()
         self.N = n_dots
         self.d = d
@@ -212,6 +212,15 @@ class DotPopulation(nn.Module):
         # fed ctx/h_pool/err/round-emb raw, so at lr 2e-3 the input scale
         # drifted with the read magnitude. Cost: one pass over
         # [f, N, in_dim] (~1e5 elements, <0.3% of a step).
+        # share_cell: the N dots share ONE update cell and differ only in
+        # what they read. That turns N batched [f, in] @ [in, 2h] GEMMs into
+        # ONE [f*N, in] @ [in, 2h] GEMM (4x the rows, same FLOPs, far better
+        # shape) and cuts the cell's parameters by N. The dots still have
+        # their own queries, their own read mix and their own output
+        # projection, so specialisation happens on the READ side — which is
+        # where the pointer audit says the committee actually differs.
+        self.share_cell = bool(share_cell)
+        n_cell = 1 if self.share_cell else n_dots
         self.in_ln = (nn.LayerNorm(gru_input_dim(d_v, d_s, message_dim,
                                                  self.slot_read_dim))
                       if bool(in_ln) else None)
@@ -232,10 +241,10 @@ class DotPopulation(nn.Module):
             self.w_hh = None
             self.w_ih_lug = nn.Parameter(torch.stack(
                 [torch.stack([_xavier(self.in_dim, 2 * d_s, g)
-                              for _ in range(n_dots)]) for _ in range(p_layers)]))
-            self.b_lug = nn.Parameter(torch.zeros(p_layers, n_dots, 2 * d_s))
+                              for _ in range(n_cell)]) for _ in range(p_layers)]))
+            self.b_lug = nn.Parameter(torch.zeros(p_layers, n_cell, 2 * d_s))
             # diagonal recurrence gain, init 0.5 so the gate starts ~0.5
-            self.u_lug = nn.Parameter(torch.full((p_layers, n_dots, d_s), 0.5))
+            self.u_lug = nn.Parameter(torch.full((p_layers, n_cell, d_s), 0.5))
         else:
             self.w_ih = nn.Parameter(torch.stack(
                 [torch.stack([_xavier(self.in_dim, 3 * d_s, g) for _ in range(n_dots)]) for _ in range(p_layers)]))
@@ -494,8 +503,13 @@ class DotPopulation(nn.Module):
         x = torch.cat(parts, dim=-1)                                    # [B, T, N, d_in]
 
         if self.cell == "lug":
-            g2 = torch.einsum("bfni,niq->bfnq", x,
-                              self._sel(round_idx, self.w_ih_lug))
+            if self.share_cell:
+                w_lug = self._sel(round_idx, self.w_ih_lug)[0]
+                g2 = (x.reshape(b * t * self.N, self.in_dim).matmul(w_lug)
+                      .reshape(b, t, self.N, 2 * self.d_s))
+            else:
+                g2 = torch.einsum("bfni,niq->bfnq", x,
+                                  self._sel(round_idx, self.w_ih_lug))
             g2 = g2 + self._sel(round_idx, self.b_lug)
             iz, ih = g2.chunk(2, dim=-1)
             z = torch.sigmoid(
@@ -647,10 +661,17 @@ class DotPopulation(nn.Module):
         if self.cell == "lug":
             # Lean Update Gate: ONE input GEMM of width 2*h, diagonal
             # recurrence (u * s), no hidden GEMM.
-            g2 = torch.bmm(x.transpose(0, 1),
-                           self._sel(round_idx, self.w_ih_lug))     # [N, f, 2h]
-            g2 = (g2.transpose(0, 1)
-                  + self._sel(round_idx, self.b_lug).unsqueeze(0))
+            if self.share_cell:
+                # one GEMM over merged rows: [f*N, in] @ [in, 2h]
+                w_lug = self._sel(round_idx, self.w_ih_lug)[0]      # [in, 2h]
+                g2 = (x.reshape(f * n, self.in_dim).matmul(w_lug)
+                      .reshape(f, n, 2 * self.d_s))
+                g2 = g2 + self._sel(round_idx, self.b_lug).unsqueeze(0)
+            else:
+                g2 = torch.bmm(x.transpose(0, 1),
+                               self._sel(round_idx, self.w_ih_lug))  # [N, f, 2h]
+                g2 = (g2.transpose(0, 1)
+                      + self._sel(round_idx, self.b_lug).unsqueeze(0))
             iz, ih = g2.chunk(2, dim=-1)
             z = torch.sigmoid(iz + self._sel(round_idx, self.u_lug).unsqueeze(0) * s_f)
             s_new = (1.0 - z) * torch.tanh(ih) + z * s_f                # [f, N, d_s]

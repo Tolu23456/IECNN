@@ -43,7 +43,7 @@ def iecnn(cell="gru", lean=False, n_passes=3, n_dots=8, d_s=128, d=128,
           window_local=None, seclusion_topk=0, pool_first=False,
           slot_slots=0, dist_bias=False, dynamic_query=False,
           global_read=False, read_schedule="mix", head_untied=False,
-          cell_ln=False):
+          cell_ln=False, share_cell=False):
     m = {
         "kind": "iecnn", "d": d, "d_q": 16, "d_v": 32, "d_s": d_s,
         "n_dots": n_dots, "n_regions": 1, "n_passes": n_passes,
@@ -63,6 +63,7 @@ def iecnn(cell="gru", lean=False, n_passes=3, n_dots=8, d_s=128, d=128,
         "read_schedule": read_schedule,
         "head_untied": head_untied,
         "cell_ln": cell_ln,
+        "share_cell": share_cell,
     }
     if window_reach is not None:
         m["window_reach"] = window_reach
@@ -286,6 +287,25 @@ ARMS = {
         "lug", True, n_passes=1, n_dots=4, d_s=64, per_dot_logits=False,
         global_read=True, spans=(32,), window_mode="hybrid",
         window_reach=64), {"lr": 2e-3}),
+    # --- ONE shared cell, N specialised reads ---------------------------
+    # The cell is the expensive part and it is 4 tiny GEMMs (one per dot).
+    # Sharing it across dots makes it ONE wide GEMM (~4x the rows, same
+    # FLOPs, better shape) and drops 3/4 of the cell parameters. Dots keep
+    # their own queries, read mix and output projection, so specialisation
+    # moves to the read side. Bonus: N no longer scales the cell, so a
+    # bigger committee is nearly free.
+    "iecnn-lr2-g8-scell": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=4, d_s=64, per_dot_logits=False,
+        global_read=True, spans=(8,), share_cell=True),
+        {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-lr2-g8-scell-n8": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=8, d_s=64, per_dot_logits=False,
+        global_read=True, spans=(8,), share_cell=True),
+        {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-lr2-g8-scell-n8-s16": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=8, d_s=64, per_dot_logits=False,
+        global_read=True, share_cell=True),
+        {"lr": 2e-3, "swa": 0.99}),
     # --- capacity / normalisation, at ~0 extra MACs ---------------------
     "iecnn-lr2-g8-untied": ("iecnn", lambda: iecnn(
         "lug", True, n_passes=2, n_dots=4, d_s=64, per_dot_logits=False,
