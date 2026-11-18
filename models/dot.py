@@ -122,7 +122,7 @@ class DotPopulation(nn.Module):
                  carry_state: bool = False, carry_chunk: int = 8,
                  gla: bool = False, global_exact: bool = False,
                  break_scan: bool = False, read_heads: int = 1,
-                 global_decay: bool = False):
+                 global_decay: bool = False, global_decay_k: int = 1):
         super().__init__()
         self.N = n_dots
         self.d = d
@@ -207,10 +207,20 @@ class DotPopulation(nn.Module):
         # which is still two cumsums: multiply by gamma^-s before the scan,
         # the common factor gamma^-t cancels in the ratio. N extra scalars.
         self.global_decay = bool(global_decay)
+        # global_decay_k: how many timescales the decay is a convex mix of.
+        # ONE geometric decay says "recency matters, at a fixed rate", but a
+        # real sequence has several: the previous token, the current word, the
+        # current section. K geometric reads combined by a per-dot softmax
+        # cover all of them for still-O(T) work (K prefix scans, each ~1/100
+        # of a post block) and N*(K-1) extra parameters. K=1 is exactly the
+        # single decay, same code path, same numbers.
+        self.global_decay_k = max(1, int(global_decay_k))
         if self.global_decay:
             # sigmoid^-1(0.99) so the read starts almost uniform and can only
             # sharpen if that pays
-            self.g_decay = nn.Parameter(torch.full((p_layers, n_dots), 4.6))
+            shape = ((p_layers, n_dots) if self.global_decay_k == 1
+                     else (p_layers, n_dots, self.global_decay_k))
+            self.g_decay = nn.Parameter(torch.full(shape, 4.6))
         else:
             self.g_decay = None
         self.read_heads = max(1, int(read_heads))
@@ -585,6 +595,8 @@ class DotPopulation(nn.Module):
         # way, but the time-axis max keeps the cumsum terms O(1) so float32
         # does not lose digits in the prefix sum.
         e = torch.exp(sc - sc.amax(dim=1, keepdim=True))
+        if self.g_decay is not None and self.global_decay_k > 1:
+            return self._global_ctx_mix(e, full_v, round_idx)
         if self.g_decay is not None:
             # ctx_t = sum_{s<=t} e_s gam^(t-s) v_s / sum_{s<=t} e_s gam^(t-s)
             # is still two prefix sums: weight term s by gam^(-s) before the
@@ -610,6 +622,36 @@ class DotPopulation(nn.Module):
         ev = e.unsqueeze(-1) * full_v.unsqueeze(2)                   # [B, T, N, d_v]
         cum_ev = torch.cumsum(ev, dim=1)                              # [B, T, N, d_v]
         return cum_ev / cum_e.unsqueeze(-1).clamp_min(1e-9)
+
+    def _global_ctx_mix(self, e: torch.Tensor, full_v: torch.Tensor,
+                       round_idx: int) -> torch.Tensor:
+        """K geometric prefix reads combined by a per-dot softmax.
+
+            ctx_t = S_k a_k * (S_{s<=t} e_s gam_k^(t-s) v_s
+                               / S_{s<=t} e_s gam_k^(t-s)),  a = softmax(w)
+
+        One geometric decay says "recency matters at a FIXED rate", but a
+        sequence has several at once: the previous token, the current word,
+        the current section. The mixture is a convex combination of the
+        single-decay reads (the same two cumsums each, K times), so the model
+        learns the recency KERNEL's shape per dot instead of one rate. With
+        every gam_k equal the mixture is that one read, so K=1 and "K with
+        tied gammas" are the same function.
+        """
+        n = e.shape[2]
+        k = self.global_decay_k
+        g = self._sel(round_idx, self.g_decay)                    # [N, K]
+        mix = F.softmax(g, dim=-1)                                # [N, K]
+        gmin = math.exp(-60.0 / max(e.shape[1] - 1, 1))
+        gam = torch.sigmoid(g).clamp(gmin, 0.99999)               # [N, K]
+        ar = torch.arange(e.shape[1], device=e.device,
+                          dtype=e.dtype).view(1, -1, 1, 1)
+        e_k = e.unsqueeze(-1) * torch.exp(
+            -ar * torch.log(gam.view(1, 1, n, k)))                # [B,T,N,K]
+        cum_e = torch.cumsum(e_k, dim=1)                          # [B,T,N,K]
+        ev = e_k.unsqueeze(-1) * full_v.unsqueeze(2).unsqueeze(-1)
+        num = torch.cumsum(ev, dim=1) / cum_e.unsqueeze(-1).clamp_min(1e-9)
+        return (num * mix.view(1, 1, n, k, 1)).sum(-2)            # [B,T,N,d_v]
 
     def _global_ctx_linear(self, full_k, full_v, round_idx: int,
                            q_add=None, cache: dict | None = None) -> torch.Tensor:

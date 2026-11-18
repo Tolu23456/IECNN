@@ -1033,3 +1033,47 @@ def test_post_share_trades_parameters_for_depth():
     assert allsh.regions[0].post_blocks[0]["w1"].weight.grad is not None
     assert torch.isfinite(
         allsh.regions[0].post_blocks[0]["w1"].weight.grad).all()
+
+
+def test_global_decay_mix_k_collapses_to_one_timescale():
+    """K geometric reads combined by a softmax: with every gam_k equal and the
+    softmax uniform, the mixture must be EXACTLY the single decayed read (the
+    same numbers, not merely similar), and the parameter cost must be N*(K-1).
+    With distinct gammas it must be a genuine convex mix of the K reads."""
+    kw = dict(global_read=True, per_dot_logits=False, head_last_only=True,
+              n_passes=2, global_decay=True)
+    one = build_iecnn(_cfg(**kw), 64).regions[0].dots
+    three = build_iecnn(_cfg(**kw, global_decay_k=3), 64).regions[0].dots
+    n = lambda m: sum(p.numel() for p in m.parameters())
+    assert n(three) - n(one) == one.N * 2
+    b, t = 2, 16
+    torch.manual_seed(0)
+    k = torch.randn(b, t, one.d_q)
+    v = torch.randn(b, t, one.d_v)
+    with torch.no_grad():
+        one.g_decay.fill_(2.0)
+        three.g_decay.fill_(2.0)               # tied gammas, uniform mix
+        a = one._global_ctx(k, v, 0)
+        c = three._global_ctx(k, v, 0)
+        assert (a - c).abs().max().item() < 1e-6
+        # distinct timescales: the mix must sit between the fastest and the
+        # slowest single read (convexity), and differ from both
+        three.g_decay.copy_(torch.tensor(
+            [[[-3.0, 2.0, 6.0], [-1.0, 3.0, 5.0], [0.0, 3.5, 5.5]]]))
+        m = three._global_ctx(k, v, 0)
+        reads = []
+        for j in range(3):
+            t_one = build_iecnn(_cfg(**kw), 64).regions[0].dots
+            t_one.g_decay.copy_(three.g_decay[:, :, j])
+            reads.append(t_one._global_ctx(k, v, 0))
+        lo = torch.stack(reads).min(0).values
+        hi = torch.stack(reads).max(0).values
+        assert (m >= lo - 1e-5).all() and (m <= hi + 1e-5).all()
+        assert (m - reads[1]).abs().max().item() > 1e-4
+    three.train()
+    x = torch.randint(0, 64, (2, 12))
+    y = torch.randint(0, 64, (2, 12))
+    loss = -three(x)["final_log_probs"].reshape(-1, 64).gather(
+        1, y.reshape(-1, 1)).mean()
+    loss.backward()
+    assert torch.isfinite(three.g_decay.grad).all()

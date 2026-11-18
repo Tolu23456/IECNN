@@ -60,7 +60,7 @@ def iecnn(cell="gru", lean=False, n_passes=3, n_dots=8, d_s=128, d=128,
           global_exact=False, head_skip=False, break_scan=False,
           d_q=16, d_v=32, head_post=0, head_post_layers=1,
           interleave=False, read_ln=False, head_ln=False, read_heads=1,
-          global_decay=False, post_share="none"):
+          global_decay=False, post_share="none", global_decay_k=1):
     m = {
         "kind": "iecnn", "d": d, "d_q": d_q, "d_v": d_v, "d_s": d_s,
         "n_dots": n_dots, "n_regions": 1, "n_passes": n_passes,
@@ -98,6 +98,7 @@ def iecnn(cell="gru", lean=False, n_passes=3, n_dots=8, d_s=128, d=128,
         "head_ln": head_ln,
         "read_heads": read_heads,
         "global_decay": global_decay,
+        "global_decay_k": global_decay_k,
         "post_share": post_share,
     }
     if window_reach is not None:
@@ -768,6 +769,20 @@ ARMS = {
         "lug", True, n_passes=1, n_dots=3, d_s=96, d=192, per_dot_logits=False,
         global_read=True, spans=(8,), head_post=384, head_post_layers=4,
         read_ln=True, head_ln=True, global_decay=True, post_share="up"),
+        {"lr": 2e-3, "swa": 0.99}),
+    # --- K timescales instead of one --------------------------------------
+    # One decay rate is a guess about the corpus; a mixture is the model
+    # choosing its own recency kernel. K reads cost K extra prefix scans
+    # (~1/100 of a block each) and N*(K-1) parameters.
+    "iecnn-n3-x4-p1-ln-decay-k3": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=192, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=384, head_post_layers=4,
+        read_ln=True, head_ln=True, global_decay=True, global_decay_k=3),
+        {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-n3-x4-p1-ln-decay-k5": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=192, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=384, head_post_layers=4,
+        read_ln=True, head_ln=True, global_decay=True, global_decay_k=5),
         {"lr": 2e-3, "swa": 0.99}),
     "iecnn-d256-ds256-n6": ("iecnn", lambda: iecnn(
         "lug", True, n_passes=2, n_dots=6, d_s=256, d=256, per_dot_logits=False,
