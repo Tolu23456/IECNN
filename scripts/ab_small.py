@@ -819,6 +819,11 @@ ARMS = {
         global_read=True, spans=(8,), head_post=384, head_post_layers=5,
         read_ln=True, head_ln=True, global_decay=True),
         {"lr": 2e-3, "swa": 0.99, "batch": 64}),
+    "iecnn-n3-x5-p1-ln-decay-d128-b128": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=384, head_post_layers=5,
+        read_ln=True, head_ln=True, global_decay=True),
+        {"lr": 2e-3, "swa": 0.99, "batch": 128}),
     "iecnn-n3-x6-p1-ln-decay-d128-w256": ("iecnn", lambda: iecnn(
         "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
         global_read=True, spans=(8,), head_post=256, head_post_layers=6,
