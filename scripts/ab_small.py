@@ -766,6 +766,33 @@ ARMS = {
         global_read=True, spans=(8,), head_post=256, head_post_layers=5,
         read_ln=True, head_ln=True, global_decay=True),
         {"lr": 2e-3, "swa": 0.99}),
+    # --- is the compressed ladder a PRIOR problem or a CAPACITY problem? ---
+    # Audit of the d128 frontier: the three dots settle at 0 / 0.8 / 2.8 tokens
+    # back and two of them read with JS 0.015 nats, i.e. the scale ladder that
+    # d192 gets for free is compressed at d128. dist_bias is ONE learned scalar
+    # per (dot, slot) added to that dot's read score -- 24 parameters, zero
+    # measurable compute -- so a dot can price a distance instead of having to
+    # discover it through the query. It was pruned early on the OLD config,
+    # where the diagnosis was "every dot picks the same slot"; that diagnosis
+    # is now confirmed on the frontier shape and the fix is free, so it is
+    # re-tested where the failure actually is. If the horizons spread and bpc
+    # falls, the compression was a prior problem; if nothing moves, it is
+    # capacity (the d_s funnel) and no bias can fix it.
+    "iecnn-n3-x5-p1-ln-decay-d128-db": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=384, head_post_layers=5,
+        read_ln=True, head_ln=True, global_decay=True, dist_bias=True),
+        {"lr": 2e-3, "swa": 0.99}),
+    # --- the cheap end of the frontier: is x3 enough? ----------------------
+    # x4 (559k, 0.0212 s/step) is 16% faster than tf; x5 adds 0.004 bpc for
+    # 14% more step time. x3 has never been run at d128, and it is the arm
+    # that would matter most for "massively faster": if x3 keeps within noise
+    # of tf on bpc it is a ~25-30% faster model at equal quality.
+    "iecnn-n3-x3-p1-ln-decay-d128": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=384, head_post_layers=3,
+        read_ln=True, head_ln=True, global_decay=True),
+        {"lr": 2e-3, "swa": 0.99}),
     # --- the expansion ratio ABOVE 3, at fixed d ----------------------------
     # Every w/d data point so far is on the low side: 1.33 (d192-w256, bad),
     # 2.0 (d192-w384 / d128-w256, bad), 2.4 (d160-w384, bad), 3.0 (d128-w384,
