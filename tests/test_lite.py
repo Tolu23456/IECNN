@@ -848,3 +848,40 @@ def test_read_ln_and_head_ln_are_real_and_cheap():
     loss = -ln(x)["final_log_probs"].reshape(-1, 64).gather(1, y.reshape(-1, 1)).mean()
     loss.backward()
     assert torch.isfinite(ln.regions[0].head_ln.weight.grad).all()
+
+
+def test_read_heads_adds_patterns_for_free_and_h1_is_identical():
+    """`read_heads=1` must be bit-identical to the single-query read (head 0
+    REUSES self.q), and H>1 must only add (H-1)*d_q queries per dot while
+    keeping the context width, causality and differentiability intact."""
+    kw = dict(global_read=True, per_dot_logits=False, head_last_only=True,
+              n_passes=2)
+    base = build_iecnn(_cfg(**kw), 64)
+    h2 = build_iecnn(_cfg(**kw, read_heads=2), 64)
+    dots = base.regions[0].dots
+    n_extra = (dots.N * dots.d_q * (2 - 1)
+               * (1 if dots.shared else _cfg(**kw)["model"]["n_passes"]))
+    assert sum(p.numel() for p in h2.parameters()) - \
+        sum(p.numel() for p in base.parameters()) == n_extra
+    # H=1 path must be untouched: build the same model twice, compare
+    same = build_iecnn(_cfg(**kw, read_heads=1), 64)
+    same.load_state_dict(base.state_dict())
+    x = torch.randint(0, 64, (2, 12))
+    with torch.no_grad():
+        a = base(x)["final_log_probs"]
+        assert torch.equal(a, same(x)["final_log_probs"])
+        b = h2(x)["final_log_probs"]
+    assert (a - b).abs().max().item() > 1e-4          # H>1 really changes it
+    # causality at H=2
+    x2 = x.clone()
+    x2[:, -1] = (x2[:, -1] + 5) % 64
+    with torch.no_grad():
+        b2 = h2(x2)["final_log_probs"]
+    assert (b[:, :-1] - b2[:, :-1]).abs().max().item() < 1e-6
+    assert (b[:, -1] - b2[:, -1]).abs().max().item() > 1e-6
+    h2.train()
+    y = torch.randint(0, 64, (2, 12))
+    loss = -h2(x)["final_log_probs"].reshape(-1, 64).gather(1, y.reshape(-1, 1)).mean()
+    loss.backward()
+    assert h2.regions[0].dots.q_extra.grad is not None
+    assert torch.isfinite(h2.regions[0].dots.q_extra.grad).all()

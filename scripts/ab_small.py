@@ -59,7 +59,7 @@ def iecnn(cell="gru", lean=False, n_passes=3, n_dots=8, d_s=128, d=128,
           state_carry=False, carry_chunk=8, gla=False,
           global_exact=False, head_skip=False, break_scan=False,
           d_q=16, d_v=32, head_post=0, head_post_layers=1,
-          interleave=False, read_ln=False, head_ln=False):
+          interleave=False, read_ln=False, head_ln=False, read_heads=1):
     m = {
         "kind": "iecnn", "d": d, "d_q": d_q, "d_v": d_v, "d_s": d_s,
         "n_dots": n_dots, "n_regions": 1, "n_passes": n_passes,
@@ -95,6 +95,7 @@ def iecnn(cell="gru", lean=False, n_passes=3, n_dots=8, d_s=128, d=128,
         "interleave": interleave,
         "read_ln": read_ln,
         "head_ln": head_ln,
+        "read_heads": read_heads,
     }
     if window_reach is not None:
         m["window_reach"] = window_reach
@@ -641,6 +642,21 @@ ARMS = {
         "lug", True, n_passes=1, n_dots=3, d_s=96, d=192, per_dot_logits=False,
         global_read=True, spans=(8,), head_post=384, head_post_layers=4,
         head_untied=True), {"lr": 2e-3, "swa": 0.99}),
+    # --- multi-head read: more softmax PATTERNS, not more width -------------
+    # Each dot reads its window with ONE query today, so it cannot attend to
+    # the previous token and to the token six back at the same time; a
+    # transformer gets 4 patterns per layer for free. Heads split the existing
+    # d_v into H slices, so total context width, total value MACs and the ctx
+    # size are unchanged and the only new parameters are (H-1)*d_q per dot
+    # (48 for N=3 at H=2). H=1 is bit-identical to the current read.
+    "iecnn-n3-x4-p1-h2": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=192, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=384, head_post_layers=4,
+        read_heads=2), {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-n3-x4-p1-h4": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=192, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=384, head_post_layers=4,
+        read_heads=4), {"lr": 2e-3, "swa": 0.99}),
     "iecnn-d256-ds256-n6": ("iecnn", lambda: iecnn(
         "lug", True, n_passes=2, n_dots=6, d_s=256, d=256, per_dot_logits=False,
         global_read=True, spans=(8,)), {"lr": 2e-3, "swa": 0.99}),

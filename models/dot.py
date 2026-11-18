@@ -121,7 +121,7 @@ class DotPopulation(nn.Module):
                  in_ln: bool = False, share_cell: bool = False,
                  carry_state: bool = False, carry_chunk: int = 8,
                  gla: bool = False, global_exact: bool = False,
-                 break_scan: bool = False):
+                 break_scan: bool = False, read_heads: int = 1):
         super().__init__()
         self.N = n_dots
         self.d = d
@@ -189,6 +189,22 @@ class DotPopulation(nn.Module):
         g = torch.Generator().manual_seed(seed)
 
         self.q = nn.Parameter(torch.stack([_orth_cols(d_q, n_dots, g) for _ in range(p_layers)]))
+        # read_heads: several softmax PATTERNS per dot over the SAME window.
+        # Each dot currently reads its window with one query, i.e. one softmax
+        # over 8 slots, so a dot cannot simultaneously attend to (say) the
+        # previous token and the token 6 back. A transformer gets 4 patterns
+        # per layer for free. Heads split the existing d_v into H slices —
+        # total context width, total value MACs and total ctx size are all
+        # unchanged; the only new parameters are (H-1)*d_q per dot, and head 0
+        # reuses `self.q`, so H=1 is bit-identical and adds nothing.
+        self.read_heads = max(1, int(read_heads))
+        if self.read_heads > 1:
+            self.q_extra = nn.Parameter(torch.stack([
+                _orth_cols(d_q, n_dots * (self.read_heads - 1), g).view(
+                    n_dots, self.read_heads - 1, d_q)
+                for _ in range(p_layers)]))
+        else:
+            self.q_extra = None
         self.u_q = nn.Parameter(torch.stack(
             [torch.stack([_xavier(d_s, d_q, g) for _ in range(n_dots)]) for _ in range(p_layers)])) \
             if dynamic_query else None
@@ -847,6 +863,31 @@ class DotPopulation(nn.Module):
         cache_hit = cacheable and "ctx" in attn_cache
         if cache_hit:
             ctx = attn_cache["ctx"]                                     # [f, N, d_v]
+        elif (self.q_extra is not None and not self.dynamic_query
+              and q_add is None and self.read_mode != "secluded"):
+            # multi-head read: H independent slot distributions per dot, each
+            # over the SAME window, contracting its own d_v/H value slice.
+            # Free in MACs and in context width; only (H-1)*d_q new params.
+            q_all = torch.cat([self._sel(round_idx, self.q).unsqueeze(1),
+                               self._sel(round_idx, self.q_extra)], dim=1)
+            d_vh = self.d_v // self.read_heads
+            wv_h = wv.view(f, w, self.read_heads, d_vh)
+            vm = None
+            if valid_mask is not None:
+                vm = valid_mask.unsqueeze(0).expand(b, t, w).reshape(f, 1, w)
+            heads = []
+            for h in range(self.read_heads):
+                sc = torch.tensordot(wk, q_all[:, h], dims=([2], [1]))
+                sc = sc.permute(0, 2, 1) / math.sqrt(self.d_q)        # [f, N, w]
+                if self.d_bias is not None:
+                    sc = sc + self._sel(round_idx, self.d_bias).view(1, n, w)
+                if vm is not None:
+                    sc = sc.masked_fill(~vm, float("-inf"))
+                a = torch.nan_to_num(F.softmax(sc, dim=-1), nan=0.0)
+                heads.append(torch.bmm(a, wv_h[:, :, h]))             # [f,N,d_vh]
+            ctx = torch.cat(heads, dim=-1)                            # [f,N,d_v]
+            if cacheable:
+                attn_cache["ctx"] = ctx
         else:
             if self.dynamic_query:
                 s_f = state.reshape(f, n, self.d_s)
