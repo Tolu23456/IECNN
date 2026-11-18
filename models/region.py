@@ -150,6 +150,7 @@ class Region(nn.Module):
         # adds far slots nobody has to pay extra for.
         self.window_mode = str(m.get("window_mode", "contiguous"))
         self.window_reach = int(m.get("window_reach", self.span))
+        self.window_local = int(m.get("window_local", 6))
         emb_n = (self.span if self.window_mode == "contiguous"
                  else max(self.window_reach, self.span) + 1)
         self.rel_emb = nn.Embedding(emb_n, d_q)
@@ -178,13 +179,26 @@ class Region(nn.Module):
     # ------------------------------------------------------------------
     def _window_offsets(self, device) -> torch.Tensor:
         """Slot -> position offset. Slot span-1 is always the current token."""
-        if self.window_mode != "quad":
+        if self.window_mode == "contiguous":
             return torch.arange(self.span, device=device) - self.span + 1
         w = self.span
         reach = max(self.window_reach, w)
-        i = torch.arange(w, device=device, dtype=torch.float32)
-        dist = ((i / max(w - 1, 1)) ** 2 * reach).round().long()
-        dist[0] = 0
+        if self.window_mode == "hybrid":
+            # dense local band + geometric far band: the near slots keep full
+            # resolution (the bigram/local signal dominates next-token
+            # prediction) while the far slots reach `window_reach` for free.
+            h = min(int(getattr(self, "window_local", 6)), w)
+            parts = [torch.arange(h, device=device, dtype=torch.float32)]
+            rem = w - h
+            if rem > 0:
+                g = torch.exp(torch.linspace(math.log(max(h, 1)),
+                                             math.log(reach), rem))
+                parts.append(g.round().clamp(min=h))
+            dist = torch.cat(parts).round().long()[:w]
+        else:  # "quad": quadratic spacing 0 .. reach
+            i = torch.arange(w, device=device, dtype=torch.float32)
+            dist = ((i / max(w - 1, 1)) ** 2 * reach).round().long()
+            dist[0] = 0
         return (-dist).flip(0)        # ascending offsets, slot -1 = current
 
     def _window_memory(self, rows: torch.Tensor, device):

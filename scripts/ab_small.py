@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import sys
 import time
 
@@ -37,7 +38,7 @@ MARK_S = 30.0
 def iecnn(cell="gru", lean=False, n_passes=3, n_dots=8, d_s=128, d=128,
           spans=(16,), read_mode="soft", head_mode="hidden",
           per_dot_logits=True, window_mode="contiguous", window_reach=None,
-          seclusion_topk=0):
+          window_local=None, seclusion_topk=0):
     m = {
         "kind": "iecnn", "d": d, "d_q": 16, "d_v": 32, "d_s": d_s,
         "n_dots": n_dots, "n_regions": 1, "n_passes": n_passes,
@@ -53,6 +54,8 @@ def iecnn(cell="gru", lean=False, n_passes=3, n_dots=8, d_s=128, d=128,
     }
     if window_reach is not None:
         m["window_reach"] = window_reach
+    if window_local is not None:
+        m["window_local"] = window_local
     return {"model": m,
             "consensus": {"rho": 0.0, "kappa": 0.7},
             "training": {"compile_consensus": False, "dot_dropout": 0.0},
@@ -124,6 +127,24 @@ ARMS = {
     "iecnn-lite-p2n4-ds64-q64": ("iecnn", lambda: iecnn(
         "lug", True, n_passes=2, n_dots=4, d_s=64, per_dot_logits=False,
         window_mode="quad", window_reach=64)),
+    # hybrid multi-scale: 6 dense local slots + geometric far slots
+    "iecnn-lite-p2n4-h64": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=4, d_s=64, per_dot_logits=False,
+        window_mode="hybrid", window_reach=64)),
+    "iecnn-lite-p2n4-h32": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=4, d_s=64, per_dot_logits=False,
+        window_mode="hybrid", window_reach=32)),
+    "iecnn-lite-p2n4-ds80-h64": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=4, d_s=80, per_dot_logits=False,
+        window_mode="hybrid", window_reach=64)),
+    "iecnn-lite-p2n4-ds80": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=4, d_s=80, per_dot_logits=False)),
+    "iecnn-lite-p3n4-h64": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=3, n_dots=4, d_s=64, per_dot_logits=False,
+        window_mode="hybrid", window_reach=64)),
+    "iecnn-lite-p2n6-h64": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=6, d_s=64, per_dot_logits=False,
+        window_mode="hybrid", window_reach=64)),
 }
 
 
@@ -193,12 +214,15 @@ def pointer_audit(model) -> dict:
     }
 
 
+SEED = int(os.environ.get("ARM_SEED", "0"))
+
+
 def run(name: str, kind: str, model) -> dict:
-    torch.manual_seed(0)
+    torch.manual_seed(SEED)
     opt = torch.optim.AdamW(model.parameters(), lr=1e-3, betas=(0.9, 0.95),
                             weight_decay=0.01)
     n_par = sum(p.numel() for p in model.parameters())
-    gen = batches(0)
+    gen = batches(SEED)
     t0 = time.time()
     step = 0
     marks = []
@@ -222,7 +246,7 @@ def run(name: str, kind: str, model) -> dict:
             next_mark += MARK_S
     el = time.time() - t0
     final = round(val_bpc(model), 4)
-    row = {"arm": name, "kind": kind, "params": n_par, "steps": step,
+    row = {"arm": name, "kind": kind, "seed": SEED, "params": n_par, "steps": step,
            "tokens": step * B * T, "s_per_step": round(el / max(step, 1), 4),
            "s_per_1k_tokens": round(el / max(step * B * T / 1000, 1e-9), 3),
            "curve": marks, "bpc_final": final}
@@ -251,7 +275,7 @@ def main():
     rows = []
     for name in names:
         kind, mk = ARMS[name]
-        torch.manual_seed(0)
+        torch.manual_seed(SEED)
         cfg = mk()
         model = (build_transformer_baseline(cfg, V) if kind == "transformer"
                  else build_iecnn(cfg, V))
