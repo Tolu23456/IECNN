@@ -527,6 +527,23 @@ ARMS = {
         "lug", True, n_passes=2, n_dots=2, d_s=96, d=256, per_dot_logits=False,
         global_read=True, spans=(8,), head_post=512),
         {"lr": 2e-3, "swa": 0.99}),
+    # Depth is where the block pays: x2 beat both a wider block and a wider
+    # model at the same wall clock. Keep going, and test whether the block
+    # makes the SECOND PASS redundant -- each pass re-runs the whole cell, so
+    # dropping it nearly halves the step and doubles the token budget for a
+    # model whose per-position work now lives in the block.
+    "iecnn-d192-n2-pmlp-x3": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=2, d_s=96, d=192, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=384, head_post_layers=3),
+        {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-d192-n2-pmlp-x4": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=2, d_s=96, d=192, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=384, head_post_layers=4),
+        {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-d192-n2-pmlp-x2-p1": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=2, d_s=96, d=192, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=384, head_post_layers=2),
+        {"lr": 2e-3, "swa": 0.99}),
     "iecnn-d256-ds256-n6": ("iecnn", lambda: iecnn(
         "lug", True, n_passes=2, n_dots=6, d_s=256, d=256, per_dot_logits=False,
         global_read=True, spans=(8,)), {"lr": 2e-3, "swa": 0.99}),
