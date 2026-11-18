@@ -764,6 +764,26 @@ ARMS = {
         global_read=True, spans=(8,), head_post=256, head_post_layers=5,
         read_ln=True, head_ln=True, global_decay=True),
         {"lr": 2e-3, "swa": 0.99}),
+    # --- pool_first on the frontier: is 7% of the step free? ----------------
+    # The dot->stream readout (`p_out`) costs N*d_s*d MACs/token (55k at
+    # d192/d_s96/N3 = 7% of the step) and materialises [B,T,N,d] before the
+    # pool. Sharing ONE projection and pooling the d_s states first turns the
+    # sum_n w_n (s_n W_n) into (sum_n w_n s_n) W: same head, 1/N the MACs and
+    # 1/N the parameters, but only IF the per-dot W_n can be replaced by one
+    # W. The ledger calls this an "exact prune"; that is true of the algebra,
+    # not of the model (the per-dot matrices differ), so it gets measured
+    # here rather than assumed. A win means 7% of the step is free; a loss
+    # means the per-dot readout is doing real work, like the block stack.
+    "iecnn-n3-x5-p1-ln-decay-d128-pf": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=384, head_post_layers=5,
+        read_ln=True, head_ln=True, global_decay=True, pool_first=True),
+        {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-n3-x4-p1-ln-decay-pf": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=192, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=384, head_post_layers=4,
+        read_ln=True, head_ln=True, global_decay=True, pool_first=True),
+        {"lr": 2e-3, "swa": 0.99}),
     # --- the winning SHAPE at a smaller d, preserving w/d = 3 ---------------
     # The parameter axis that has ever paid is the block EXPANSION RATIO
     # w/d (3.0 at d128-w384 wins; 1.33 at d192-w256 loses), not the raw
