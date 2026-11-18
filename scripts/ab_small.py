@@ -640,10 +640,16 @@ def _fingerprint(path: str, n: int) -> str:
 
 train = load(TRAIN_PATH, N_TRAIN)
 val = load(VAL_PATH, N_VAL)
+# Device: the same harness runs on the 2-vCPU lab VM and on a GPU runner.
+# Everything that depends on the machine (threads, device) is a harness knob,
+# never an arm knob, so both arms in a session always share it.
+DEV = torch.device(os.environ.get("ARM_DEV")
+                   or ("cuda" if torch.cuda.is_available() else "cpu"))
 DATA_FP = f"{_fingerprint(TRAIN_PATH, N_TRAIN)}/{_fingerprint(VAL_PATH, N_VAL)}"
 print(f"train={TRAIN_PATH} val={VAL_PATH} | tokens train={train.numel()} "
       f"val={val.numel()} | B={B} T={T} valw={VALW} stride={VALSTRIDE} V={V} "
-      f"| budget {BUDGET:.0f}s/arm | data_fp {DATA_FP}", flush=True)
+      f"| device {DEV} | budget {BUDGET:.0f}s/arm | data_fp {DATA_FP}",
+      flush=True)
 
 
 _NT = None
@@ -658,8 +664,8 @@ def batches(seed: int = 0, n: int = None):
         # whole 150 s toy step, paid identically by both arms and buying
         # nothing. torch.rand + scale is the same uniform draw, ~50x cheaper.
         i = (torch.rand(n, generator=g) * span).long()
-        x = torch.stack([train[j:j + T] for j in i])
-        y = torch.stack([train[j + 1:j + 1 + T] for j in i])
+        x = torch.stack([train[j:j + T] for j in i]).to(DEV, non_blocking=True)
+        y = torch.stack([train[j + 1:j + 1 + T] for j in i]).to(DEV, non_blocking=True)
         yield x, y
 
 
@@ -670,8 +676,8 @@ def val_bpc(model, windows: int = None) -> float:
     tot, n = 0.0, 0
     for w in range(windows):
         i = w * T * VALSTRIDE
-        x = val[i:i + T].unsqueeze(0)
-        y = val[i + 1:i + 1 + T].unsqueeze(0)
+        x = val[i:i + T].unsqueeze(0).to(DEV)
+        y = val[i + 1:i + 1 + T].unsqueeze(0).to(DEV)
         if x.shape[1] < T:
             break
         lp = model(x)["final_log_probs"]
@@ -688,7 +694,7 @@ def pointer_audit(model) -> dict:
     r = model.regions[0]
     g = torch.Generator().manual_seed(7)
     i = torch.randint(0, train.numel() - T - 1, (8,), generator=g)
-    x = torch.stack([train[j:j + T] for j in i])
+    x = torch.stack([train[j:j + T] for j in i]).to(DEV)
     rows = region1_rows(model.embed(x))
     wind_k, _wv, valid = r._window_memory(rows, x.device)
     q = r.dots._sel(0, r.dots.q)
@@ -846,7 +852,7 @@ def main():
         torch.manual_seed(opts.get("seed", SEED))
         cfg = mk()
         model = (build_transformer_baseline(cfg, V) if kind == "transformer"
-                 else build_iecnn(cfg, V))
+                 else build_iecnn(cfg, V)).to(DEV)
         print(f"--- {name} ({sum(p.numel() for p in model.parameters())} params"
               f"{', lr ' + str(opts['lr']) if 'lr' in opts else ''})", flush=True)
         inner = model
