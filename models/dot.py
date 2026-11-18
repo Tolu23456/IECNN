@@ -101,7 +101,7 @@ class DotPopulation(nn.Module):
                  global_read: bool = False, read_schedule: str = "mix",
                  in_ln: bool = False, share_cell: bool = False,
                  carry_state: bool = False, carry_chunk: int = 8,
-                 gla: bool = False):
+                 gla: bool = False, global_exact: bool = False):
         super().__init__()
         self.N = n_dots
         self.d = d
@@ -263,6 +263,20 @@ class DotPopulation(nn.Module):
         # that ANY mechanism that adds parameters or gradient paths costs
         # 0.06-0.12 bpc at this budget. This one adds zero.
         self.gla = bool(gla)
+        # global_exact: replace the static-query prefix sum with a REAL
+        # causal softmax over every past key, with the query allowed to depend
+        # on the current token (q_add). Why this is not redundant with `gla`:
+        # gla is the LINEAR-attention approximation of this read (phi = elu+1,
+        # a [d_q,d_v] running state). It lost by +0.09 bpc, but a linear
+        # feature map is exactly the weak form of content addressing, so that
+        # result does not test the strong form. The static prefix sum is the
+        # other degenerate case (q independent of t), where softmax over the
+        # prefix is algebraically identical to a cumsum ratio — which makes
+        # `global_exact` with a static query a free exactness test for the
+        # whole family. Cost is O(T^2 * d_q) for the scores, but only for the
+        # dots that take the global read, at d_q=16, so at T=64 it is a few
+        # percent of a step; at T=256 it is the honest price of the test.
+        self.global_exact = bool(global_exact)
         n_cell = 1 if self.share_cell else n_dots
         self.in_ln = (nn.LayerNorm(gru_input_dim(d_v, d_s, message_dim,
                                                  self.slot_read_dim))
@@ -488,6 +502,9 @@ class DotPopulation(nn.Module):
         if self.gla:
             return self._global_ctx_linear(full_k, full_v, round_idx,
                                            q_add=q_add, cache=cache)
+        if self.global_exact:
+            return self._global_ctx_exact(full_k, full_v, round_idx,
+                                          q_add=q_add)
         b, t, _ = full_v.shape
         n = self.N
         # Keep the whole prefix scan in [B, T, ...] memory order. The obvious
@@ -549,6 +566,45 @@ class DotPopulation(nn.Module):
         num = torch.einsum("btnd,btdv->btnv", phiq, S)           # [B,T,N,d_v]
         den = torch.einsum("btnd,btd->btn", phiq, Z).clamp_min(1e-6)
         return num / den.unsqueeze(-1)
+
+    def _global_ctx_exact(self, full_k, full_v, round_idx: int,
+                          q_add=None) -> torch.Tensor:
+        """True causal softmax attention over the whole prefix, per dot.
+
+        `_global_ctx` (prefix sum) is the same function with a query that
+        cannot depend on t; `_global_ctx_linear` is its linear-attention
+        approximation. This is the non-degenerate version:
+
+            ctx[b,t,n,:] = sum_{s<=t} softmax_s(q[b,t,n].k[b,s]) v[b,s,:]
+
+        with q[b,t,n] = q0_n (+ q_add[b,t,n] when the caller wants a query
+        that depends on the current token). When q_add is None this is
+        algebraically identical to the cumsum read, which is why the pair
+        makes a free exactness test for the whole family.
+        """
+        b, t, dq = full_k.shape
+        n = self.N
+        q0 = self._sel(round_idx, self.q)                        # [N, d_q]
+        if q_add is not None:
+            qv = q0.view(1, 1, n, dq) + q_add.reshape(b, t, 1, dq)
+        else:
+            qv = q0.view(1, 1, n, dq).expand(b, t, n, dq)
+        sc = torch.einsum("btnd,bsd->btns", qv, full_k)          # [B,T,N,T]
+        sc = sc / math.sqrt(self.d_q)
+        # causal mask reused across calls (it depends only on T)
+        m = self._causal_mask(t, full_k.device, full_k.dtype)
+        sc = sc.masked_fill(~m, float("-inf"))
+        attn = torch.nan_to_num(F.softmax(sc, dim=-1), nan=0.0)
+        return torch.einsum("btns,bsv->btnv", attn, full_v)      # [B,T,N,d_v]
+
+    def _causal_mask(self, t: int, device, dtype) -> torch.Tensor:
+        cache = getattr(self, "_cmask", None)
+        if cache is not None and cache.shape[0] == t and cache.device == device:
+            return cache
+        i = torch.arange(t, device=device)
+        m = (i[:, None] >= i[None, :]).view(1, t, 1, t)
+        self._cmask = m
+        return m
 
     # ----- one pass --------------------------------------------------------
     def forward(self, wind_k, wind_v, valid_mask, h_pool, err_feat,

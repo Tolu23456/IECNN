@@ -56,7 +56,8 @@ def iecnn(cell="gru", lean=False, n_passes=3, n_dots=8, d_s=128, d=128,
           global_read=False, read_schedule="mix", head_untied=False,
           cell_ln=False, share_cell=False, query_from_input=False,
           id_lags=False, ngram_bias=0, head_rank=0,
-          state_carry=False, carry_chunk=8, gla=False):
+          state_carry=False, carry_chunk=8, gla=False,
+          global_exact=False, head_skip=False):
     m = {
         "kind": "iecnn", "d": d, "d_q": 16, "d_v": 32, "d_s": d_s,
         "n_dots": n_dots, "n_regions": 1, "n_passes": n_passes,
@@ -84,6 +85,8 @@ def iecnn(cell="gru", lean=False, n_passes=3, n_dots=8, d_s=128, d=128,
         "state_carry": state_carry,
         "carry_chunk": carry_chunk,
         "global_linear": gla,
+        "global_exact": global_exact,
+        "head_skip": head_skip,
     }
     if window_reach is not None:
         m["window_reach"] = window_reach
@@ -429,6 +432,24 @@ ARMS = {
         "lug", True, n_passes=2, n_dots=3, d_s=48, d=96, per_dot_logits=False,
         global_read=True, spans=(8,), gla=True, query_from_input=True),
         {"lr": 2e-3, "swa": 0.99}),
+    # --- the two zero-parameter mechanisms the mechanism audit asked for ---
+    # res: skip the current token's embedding past the cell and into the head.
+    # Today E[x_t] can only reach the logits through a softmax over 8 slots, a
+    # gated tanh and a 3-way weight; the transformer gets h = h + f(h) twice
+    # per block for free. 0 params, 0 time.
+    "iecnn-d96-res": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=3, d_s=48, d=96, per_dot_logits=False,
+        global_read=True, spans=(8,), head_skip=True),
+        {"lr": 2e-3, "swa": 0.99}),
+    # gx: the STRONG form of the far read — exact causal softmax over every
+    # past key, with a query that depends on the current token. `gla` was the
+    # linear-attention approximation of this and lost; the static prefix sum
+    # is the q-independent degenerate case. This is the only arm that tests
+    # "content-addressed far read" as such.
+    "iecnn-d96-gx": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=3, d_s=48, d=96, per_dot_logits=False,
+        global_read=True, spans=(8,), global_exact=True,
+        query_from_input=True), {"lr": 2e-3, "swa": 0.99}),
     # --- capacity at GPU scale (2026-11-18) -----------------------------
     # On the 2-vCPU box every capacity knob lost because it bought param-
     # eters with wall clock (the cell is elementwise-bound). On a GPU the
@@ -617,6 +638,13 @@ ARMS = {
         "lug", True, n_passes=2, n_dots=6, d_s=64, per_dot_logits=False,
         global_read=True), {"lr": 2e-3}),
     "tf-lr2": ("transformer", lambda: tf(96, 4, 3), {"lr": 2e-3}),
+    # The apples-to-apples control. The headline gap has always compared an
+    # IECNN tuned to lr 2e-3 WITH tail averaging against a transformer at
+    # lr 1e-3 with none — two knobs that were only ever tuned on the IECNN
+    # side. This arm gives the transformer the identical pair, so the gap can
+    # no longer be explained by the optimiser.
+    "tf-lr2-swa99": ("transformer", lambda: tf(96, 4, 3),
+                     {"lr": 2e-3, "swa": 0.99}),
     "tf-lr2-cos": ("transformer", lambda: tf(96, 4, 3),
                    {"lr": 2e-3, "sched": "cos"}),
     "tf-d96-l3-ctl": ("transformer", lambda: tf(96, 4, 3)),

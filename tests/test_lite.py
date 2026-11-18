@@ -694,3 +694,60 @@ def test_gla_is_causal_cached_and_differs_from_the_static_read():
     loss.backward()
     assert all(torch.isfinite(p.grad).all() for p in lin.parameters()
                if p.grad is not None)
+
+
+def test_exact_far_read_equals_the_prefix_sum_and_is_causal():
+    """`global_exact` with a STATIC query must reproduce the cumsum read: for a
+    query that cannot depend on t, softmax over the causal prefix is exactly
+    the normalised prefix sum. That equivalence makes this a free correctness
+    check on both implementations, and the content-addressed variant must
+    differ (otherwise `query_from_input` is silently a no-op on the far read,
+    which it was until now)."""
+    kw = dict(global_read=True, cell="lug", head_last_only=True,
+              per_dot_logits=False, n_passes=2)
+    m = build_iecnn(_cfg(**kw), 64)
+    dots = m.regions[0].dots
+    b, t, dq, dv = 2, 13, dots.d_q, dots.d_v
+    k = torch.randn(b, t, dq) * 0.7
+    v = torch.randn(b, t, dv) * 0.7
+    with torch.no_grad():
+        fast = dots._global_ctx(k, v, 0, cache={})
+        exact = dots._global_ctx_exact(k, v, 0)
+        err = (fast - exact).abs().max().item()
+        assert err < 1e-5, err
+        # causality: perturbing the future cannot move an earlier read
+        k2, v2 = k.clone(), v.clone()
+        k2[:, 7:] += 2.0
+        e2 = dots._global_ctx_exact(k2, v2, 0)
+        assert (exact[:, :7] - e2[:, :7]).abs().max().item() < 1e-6
+        assert (exact[:, 7:] - e2[:, 7:]).abs().max().item() > 1e-6
+        # a content-dependent query must actually change the read
+        q_add = torch.randn(b, t, dq) * 0.5
+        content = dots._global_ctx_exact(k, v, 0, q_add=q_add)
+        assert (content - exact).abs().max().item() > 1e-4
+
+
+def test_head_skip_changes_the_output_and_trains():
+    """`head_skip` must add the rows to the pooled state (0 params): the arm
+    has to produce different logits from the identical weights, stay
+    normalised, and still take a gradient step."""
+    base = build_iecnn(_cfg(global_read=True, per_dot_logits=False,
+                            head_last_only=True, n_passes=2), 64)
+    skip = build_iecnn(_cfg(global_read=True, per_dot_logits=False,
+                            head_last_only=True, n_passes=2, head_skip=True), 64)
+    assert (sum(p.numel() for p in base.parameters())
+            == sum(p.numel() for p in skip.parameters()))
+    skip.load_state_dict(base.state_dict())
+    x = torch.randint(0, 64, (2, 12))
+    with torch.no_grad():
+        a = base(x)["final_log_probs"]
+        b = skip(x)["final_log_probs"]
+        assert (a - b).abs().max().item() > 1e-3
+        assert torch.allclose(b.exp().sum(-1), torch.ones(2, 12), atol=1e-5)
+    skip.train()
+    y = torch.randint(0, 64, (2, 12))
+    lp = skip(x)["final_log_probs"]
+    loss = -lp.reshape(-1, 64).gather(1, y.reshape(-1, 1)).mean()
+    loss.backward()
+    assert all(torch.isfinite(p.grad).all() for p in skip.parameters()
+               if p.grad is not None)

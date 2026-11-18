@@ -202,12 +202,25 @@ class Region(nn.Module):
             share_cell=bool(m.get("share_cell", False)),
             carry_state=bool(m.get("state_carry", False)),
             carry_chunk=int(m.get("carry_chunk", 8)),
-            gla=bool(m.get("global_linear", False)))
+            gla=bool(m.get("global_linear", False)),
+            global_exact=bool(m.get("global_exact", False)))
         # Lean passes: in hidden mode the pooled shared head and the per-dot
         # e_state projection are only consumed on the LAST pass. With
         # head_last_only the earlier passes skip both (they still update the
         # dots' states and the weighting). Default false = unchanged.
         self.head_last_only = bool(m.get("head_last_only", False))
+        # head_skip (head_skip=True): add the region's own rows (for region 1,
+        # the token embedding itself) to the pooled state before the head.
+        #
+        # Nothing in the dot mechanism requires that E[x_t] reach the logits
+        # only through a softmax over 8 window slots, a gated tanh and a 3-way
+        # weight — but that is what happens today, and the transformer gets
+        # the alternative for free (h = h + sublayer(h) twice per block, plus
+        # an output matrix initialised from the embedding). This restores the
+        # skip at zero parameters and zero measurable time. It is also the
+        # cheapest possible test of "is the head information-starved?", which
+        # is a different question from "is the read information-starved?".
+        self.head_skip = bool(m.get("head_skip", False))
         # Per-dot vocab logits are consumed ONLY by the optional auxiliary
         # losses (oracle / boosted / decorrelation / confidence), and those
         # losses read exactly one number per dot: the log-prob of the true
@@ -606,6 +619,8 @@ class Region(nn.Module):
                 else:
                     h_mix = torch.einsum("bfn,bfnd->bfd", w,
                                          out.e_state)               # [B, T, d]
+                if self.head_skip:
+                    h_mix = h_mix + rows
                 logits = self._head_logits(h_mix.reshape(f, self.d), emb_table)
                 log_b = F.log_softmax(logits, dim=-1).reshape(b, t, -1)
 
@@ -636,6 +651,8 @@ class Region(nn.Module):
                 ).reshape(b, t, self.d)
             else:
                 h_mix = torch.einsum("bfn,bfnd->bfd", w_hard, e_state_last)
+            if self.head_skip:
+                h_mix = h_mix + rows
             logits = self._head_logits(h_mix.reshape(f, self.d), emb_table)
             log_final = F.log_softmax(logits, dim=-1).reshape(b, t, -1)
             w_out = w_hard
