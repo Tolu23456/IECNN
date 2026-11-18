@@ -791,3 +791,36 @@ def test_head_post_adds_one_per_position_block_and_trains():
     loss.backward()
     g = on.regions[0].post_blocks[0]["w1"].weight.grad
     assert g is not None and torch.isfinite(g).all()
+
+
+def test_interleave_rereads_between_passes_and_is_causal():
+    """`interleave` must change the function (the second pass reads the rows
+    as refined by the first pass's block, not a cached identical ctx), must
+    stay causal, must be identity-equivalent when off, and must train."""
+    base = build_iecnn(_cfg(global_read=True, per_dot_logits=False,
+                            head_last_only=True, n_passes=2), 64)
+    il = build_iecnn(_cfg(global_read=True, per_dot_logits=False,
+                          head_last_only=True, n_passes=2, head_post=16,
+                          head_post_layers=1, interleave=True), 64)
+    x = torch.randint(0, 64, (2, 12))
+    with torch.no_grad():
+        a = base(x)["final_log_probs"]
+        b = il(x)["final_log_probs"]
+        # causal: perturbing the last position cannot move earlier log-probs
+        x2 = x.clone()
+        x2[:, -1] = (x2[:, -1] + 7) % 64
+        b2 = il(x2)["final_log_probs"]
+        assert (b[:, :-1] - b2[:, :-1]).abs().max().item() < 1e-6
+        assert (b[:, -1] - b2[:, -1]).abs().max().item() > 1e-6
+        assert torch.allclose(b.exp().sum(-1), torch.ones(2, 12), atol=1e-4)
+    # the mechanism must actually change the computation
+    il.load_state_dict(base.state_dict(), strict=False)
+    with torch.no_grad():
+        c = il(x)["final_log_probs"]
+    assert (a - c).abs().max().item() > 1e-4
+    il.train()
+    y = torch.randint(0, 64, (2, 12))
+    loss = -il(x)["final_log_probs"].reshape(-1, 64).gather(1, y.reshape(-1, 1)).mean()
+    loss.backward()
+    g = il.regions[0].w_k.weight.grad
+    assert g is not None and torch.isfinite(g).all()

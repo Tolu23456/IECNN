@@ -58,7 +58,8 @@ def iecnn(cell="gru", lean=False, n_passes=3, n_dots=8, d_s=128, d=128,
           id_lags=False, ngram_bias=0, head_rank=0,
           state_carry=False, carry_chunk=8, gla=False,
           global_exact=False, head_skip=False, break_scan=False,
-          d_q=16, d_v=32, head_post=0, head_post_layers=1):
+          d_q=16, d_v=32, head_post=0, head_post_layers=1,
+          interleave=False):
     m = {
         "kind": "iecnn", "d": d, "d_q": d_q, "d_v": d_v, "d_s": d_s,
         "n_dots": n_dots, "n_regions": 1, "n_passes": n_passes,
@@ -91,6 +92,7 @@ def iecnn(cell="gru", lean=False, n_passes=3, n_dots=8, d_s=128, d=128,
         "break_scan": break_scan,
         "head_post": head_post,
         "head_post_layers": head_post_layers,
+        "interleave": interleave,
     }
     if window_reach is not None:
         m["window_reach"] = window_reach
@@ -561,6 +563,26 @@ ARMS = {
         "lug", True, n_passes=1, n_dots=3, d_s=96, d=192, per_dot_logits=False,
         global_read=True, spans=(8,), head_post=384, head_post_layers=3),
         {"lr": 2e-3, "swa": 0.99}),
+    # --- interleave: read -> block -> read -> block ------------------------
+    # A transformer re-MIXES positions at every layer (attention -> MLP ->
+    # attention); this model mixes once and then stacks MLPs, which is exactly
+    # why block depth saturated (x4 == x3). With `interleave`, each pass reads
+    # the rows as refined by the previous pass's block, so depth adds new
+    # MIXED information instead of re-processing the same gathered context.
+    # The read is cheap (~10k MAC/token vs attention's ~98k); the cost is one
+    # more cell pass, and the cell is now the small part of the step.
+    "iecnn-d192-n2-pmlp-il": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=2, d_s=96, d=192, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=384, head_post_layers=1,
+        interleave=True), {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-d192-n2-pmlp-x2-il": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=2, d_s=96, d=192, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=384, head_post_layers=2,
+        interleave=True), {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-d192-n2-pmlp-x2-il-p3": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=3, n_dots=2, d_s=96, d=192, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=384, head_post_layers=2,
+        interleave=True), {"lr": 2e-3, "swa": 0.99}),
     "iecnn-d256-ds256-n6": ("iecnn", lambda: iecnn(
         "lug", True, n_passes=2, n_dots=6, d_s=256, d=256, per_dot_logits=False,
         global_read=True, spans=(8,)), {"lr": 2e-3, "swa": 0.99}),

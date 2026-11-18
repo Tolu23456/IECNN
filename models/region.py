@@ -222,6 +222,15 @@ class Region(nn.Module):
         # cheapest possible test of "is the head information-starved?", which
         # is a different question from "is the read information-starved?".
         self.head_skip = bool(m.get("head_skip", False))
+        # interleave: the transformer-block structure the dots were missing.
+        # A transformer re-MIXES positions at every layer (attention -> MLP ->
+        # attention); this model mixed once, then stacked MLPs, which is
+        # exactly why block depth saturated (x4 == x3). With interleave, each
+        # pass reads the rows as REFINED by the previous pass's block, so
+        # depth adds new mixed information instead of re-processing the same
+        # gathered context. Cheap: the read is ~10k MAC/token against
+        # attention's ~98k.
+        self.interleave = bool(m.get("interleave", False))
         # Per-dot vocab logits are consumed ONLY by the optional auxiliary
         # losses (oracle / boosted / decorrelation / confidence), and those
         # losses read exactly one number per dot: the log-prob of the true
@@ -548,15 +557,24 @@ class Region(nn.Module):
         n = self.n_dots
         f = b * t
 
-        full_k = full_v = k_all = v_all = None
-        if self.global_read:
-            # ONE projection pair serves both the window gather and the
-            # global read (they read the same keys/values).
-            k_all, v_all = self._full_kv(rows)
-            full_k, full_v = k_all, v_all
-        q_add = rows.matmul(self.w_qi) if self.w_qi is not None else None
-        # pass-invariant exact-identity code (one GEMM per forward)
-        ctx_add = self._id_code(rows) if self.w_id is not None else None
+        def _read_inputs(r):
+            """Projections the read needs from a row stream.
+
+            Pulled out of the preamble so `interleave` can rebuild them from
+            an UPDATED row stream between passes: the rows feed only the read
+            (w_k/w_v), never the head, so refining them is safe.
+            """
+            fk = fv = ka = va = None
+            if self.global_read:
+                # ONE projection pair serves both the window gather and the
+                # global read (they read the same keys/values).
+                ka, va = self._full_kv(r)
+                fk, fv = ka, va
+            qa = r.matmul(self.w_qi) if self.w_qi is not None else None
+            ca = self._id_code(r) if self.w_id is not None else None
+            return ka, va, fk, fv, qa, ca
+
+        k_all, v_all, full_k, full_v, q_add, ctx_add = _read_inputs(rows)
 
         # Read windows. Normally every pass reads the SAME window, and the
         # attention cache is shared so the read is computed once (that is
@@ -564,7 +582,13 @@ class Region(nn.Module):
         # window_mode "bands" gives each pass its own band (pass 1 local,
         # later passes far), so each pass must also have its OWN cache —
         # a cached ctx from a different band would be a different input.
-        if self.window_mode == "bands":
+        if self.interleave:
+            # each pass reads the rows as they stood at the START of that
+            # pass, so the window is built inside the loop and nothing may be
+            # cached across passes.
+            winds = None
+            caches = [None] * self.n_passes
+        elif self.window_mode == "bands":
             winds = [self._window_memory(rows, device, p, k_all, v_all)
                      for p in range(self.n_passes)]
             # each pass reads its own band, so a ctx cached by one pass is
@@ -599,7 +623,13 @@ class Region(nn.Module):
             dot_mask[k] = 0.0
 
         for p in range(1, self.n_passes + 1):
-            wind_k, wind_v, valid = winds[p - 1]
+            if self.interleave:
+                # the rows moved between passes, so this pass's read must be
+                # rebuilt from the CURRENT rows (and cannot be cached).
+                wind_k, wind_v, valid = self._window_memory(
+                    rows, device, p - 1, k_all, v_all)
+            else:
+                wind_k, wind_v, valid = winds[p - 1]
             attn_cache = caches[p - 1]
             tau_p = tau0 * (self.kappa ** (p - 1))
             if p == 1:
@@ -636,6 +666,28 @@ class Region(nn.Module):
             if self.use_weights:
                 trust = tr_c
             w = w_c
+
+            if self.interleave and not last:
+                # The transformer-block step the dots were missing: a
+                # transformer re-MIXES positions at every layer, while this
+                # model mixed once and then stacked MLPs, which is why depth
+                # saturated (x4 == x3). Pool what this pass found, run the
+                # per-position block, and add it back into the row stream so
+                # the NEXT pass reads a refined representation. The dot read
+                # is ~10k MAC/token against attention's ~98k, so an extra
+                # read is cheap; the cell is run once per pass either way.
+                if self.pool_first:
+                    s_pool = torch.einsum("bfn,bfnd->bfd", w, out.state)
+                    upd = s_pool.reshape(f, self.d_s).matmul(
+                        self.dots._sel(p - 1, self.dots.p_out))
+                    upd = upd.reshape(b, t, self.d)
+                else:
+                    upd = torch.einsum(
+                        "bfn,bfnd,ndv->bfv", w, out.state,
+                        self.dots._sel(p - 1, self.dots.p_out))       # [B,T,d]
+                rows = rows + self._post(upd)
+                (k_all, v_all, full_k, full_v,
+                 q_add, ctx_add) = _read_inputs(rows)
 
             # ONE shared head on the pooled hidden state (last pass only when
             # head_last_only is set: earlier passes exist to refine the dots'
@@ -750,6 +802,13 @@ class Region(nn.Module):
     def _forward_prob(self, rows: torch.Tensor, emb_table: torch.Tensor,
                       tau0: float, hard_mode: bool, floor: float,
                       training: bool) -> dict:
+        if self.interleave:
+            # only the fast path implements the between-pass re-read; the
+            # prob-space path would silently read stale keys (and its
+            # consensus machinery is unused by every arm anyway).
+            raise NotImplementedError(
+                "interleave is implemented in _forward_hidden only; set "
+                "head_mode='hidden' (or fast_dot_math=True)")
         device = rows.device
         b, t = rows.shape[0], rows.shape[1]
         n = self.n_dots
