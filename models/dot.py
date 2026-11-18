@@ -31,6 +31,25 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+
+@torch.compiler.disable
+def _global_ctx_eager(dots, full_k, full_v, round_idx, q_add=None,
+                      cache=None):
+    """Run the prefix scan as an eager graph break.
+
+    Inductor's CUDA SplitScan lowering dies on the cumsum in `_global_ctx`
+    ('TypeError: list indices must be integers or slices, not NoneType') on
+    torch 2.11+cu130, whatever the axis or memory order; the CPU backend on
+    2.14 compiles the identical code fine. This wrapper compiles everything
+    around the read and leaves only the five-op scan eager, which costs one
+    graph break and recovers `torch.compile` for the whole arm (~24% of a
+    CPU step, and the d192 capacity arm is token-starved, so it matters).
+    Opt-in via the `break_scan` config key; off by default so the compiled
+    shape of every past measurement stays reproducible.
+    """
+    return dots._global_ctx(full_k, full_v, round_idx, q_add=q_add,
+                            cache=cache)
+
 ROUND_DIM = 16          # learned pass-index embedding (spec 01)
 ERR_DIM = 3             # error feature e (spec 01, section 5)
 
@@ -101,7 +120,8 @@ class DotPopulation(nn.Module):
                  global_read: bool = False, read_schedule: str = "mix",
                  in_ln: bool = False, share_cell: bool = False,
                  carry_state: bool = False, carry_chunk: int = 8,
-                 gla: bool = False, global_exact: bool = False):
+                 gla: bool = False, global_exact: bool = False,
+                 break_scan: bool = False):
         super().__init__()
         self.N = n_dots
         self.d = d
@@ -277,6 +297,8 @@ class DotPopulation(nn.Module):
         # dots that take the global read, at d_q=16, so at T=64 it is a few
         # percent of a step; at T=256 it is the honest price of the test.
         self.global_exact = bool(global_exact)
+        # break_scan: see _global_ctx_eager. CUDA-only Inductor workaround.
+        self.break_scan = bool(break_scan)
         n_cell = 1 if self.share_cell else n_dots
         self.in_ln = (nn.LayerNorm(gru_input_dim(d_v, d_s, message_dim,
                                                  self.slot_read_dim))
@@ -480,6 +502,15 @@ class DotPopulation(nn.Module):
         return s0.expand(*batch_shape, self.N, self.d_s).contiguous()
 
     # ----- global causal read ----------------------------------------------
+    def global_ctx(self, full_k, full_v, round_idx: int, q_add=None,
+                   cache: dict | None = None) -> torch.Tensor:
+        """Public entry point: honours `break_scan` (eager scan)."""
+        if self.break_scan:
+            return _global_ctx_eager(self, full_k, full_v, round_idx,
+                                     q_add=q_add, cache=cache)
+        return self._global_ctx(full_k, full_v, round_idx, q_add=q_add,
+                                cache=cache)
+
     def _global_ctx(self, full_k, full_v, round_idx: int,
                     q_add=None, cache: dict | None = None) -> torch.Tensor:
         """Exact causal attention over the whole prefix at O(T) time.
@@ -690,8 +721,8 @@ class DotPopulation(nn.Module):
 
         # ---- global causal read (same O(T) prefix-sum as the fast path) ----
         if self.global_read and full_k is not None:
-            g_ctx = self._global_ctx(full_k, full_v, round_idx,
-                                     q_add=q_add)                    # [B, T, N, d_v]
+            g_ctx = self.global_ctx(full_k, full_v, round_idx,
+                                    q_add=q_add)                     # [B, T, N, d_v]
             g_row = (self.g_glob[round_idx] if self.read_schedule == "split"
                      else self._sel(round_idx, self.g_glob))
             mix = torch.sigmoid(g_row).view(1, 1, n, 1)
@@ -869,9 +900,9 @@ class DotPopulation(nn.Module):
             if g_cacheable and "g_ctx" in attn_cache:
                 g_ctx = attn_cache["g_ctx"]
             else:
-                g_ctx = self._global_ctx(full_k, full_v, round_idx,
-                                         q_add=q_add,
-                                         cache=attn_cache if g_cacheable else None)
+                g_ctx = self.global_ctx(full_k, full_v, round_idx,
+                                        q_add=q_add,
+                                        cache=attn_cache if g_cacheable else None)
                 if g_cacheable:
                     attn_cache["g_ctx"] = g_ctx
             if self.read_schedule == "split":

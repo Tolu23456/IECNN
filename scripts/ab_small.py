@@ -57,7 +57,7 @@ def iecnn(cell="gru", lean=False, n_passes=3, n_dots=8, d_s=128, d=128,
           cell_ln=False, share_cell=False, query_from_input=False,
           id_lags=False, ngram_bias=0, head_rank=0,
           state_carry=False, carry_chunk=8, gla=False,
-          global_exact=False, head_skip=False):
+          global_exact=False, head_skip=False, break_scan=False):
     m = {
         "kind": "iecnn", "d": d, "d_q": 16, "d_v": 32, "d_s": d_s,
         "n_dots": n_dots, "n_regions": 1, "n_passes": n_passes,
@@ -87,6 +87,7 @@ def iecnn(cell="gru", lean=False, n_passes=3, n_dots=8, d_s=128, d=128,
         "global_linear": gla,
         "global_exact": global_exact,
         "head_skip": head_skip,
+        "break_scan": break_scan,
     }
     if window_reach is not None:
         m["window_reach"] = window_reach

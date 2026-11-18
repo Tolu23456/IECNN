@@ -751,3 +751,19 @@ def test_head_skip_changes_the_output_and_trains():
     loss.backward()
     assert all(torch.isfinite(p.grad).all() for p in skip.parameters()
                if p.grad is not None)
+
+
+def test_break_scan_is_numerically_identical():
+    """`break_scan` only changes WHERE Inductor may place a graph boundary
+    (CUDA workaround for the SplitScan codegen bug), never the arithmetic:
+    same weights must give bit-identical logits."""
+    base = build_iecnn(_cfg(global_read=True, per_dot_logits=False,
+                            head_last_only=True, n_passes=2), 64)
+    brk = build_iecnn(_cfg(global_read=True, per_dot_logits=False,
+                           head_last_only=True, n_passes=2, break_scan=True), 64)
+    brk.load_state_dict(base.state_dict())
+    x = torch.randint(0, 64, (2, 12))
+    with torch.no_grad():
+        a = base(x)["final_log_probs"]
+        b = brk(x)["final_log_probs"]
+    assert torch.equal(a, b), (a - b).abs().max().item()
