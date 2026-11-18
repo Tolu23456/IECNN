@@ -1,0 +1,1 @@
+step,lr,loss,bpc_val,bpc_p1,bpc_p2,bpc_p3,bpc_train,tau0,weight_entropy,L_w,elapsed_s,gn_total,gn_emb,gn_regions,gn_chain,gn_gate,gn_messages,gn_other
