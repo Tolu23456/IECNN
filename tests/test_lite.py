@@ -1080,3 +1080,23 @@ def test_global_decay_mix_k_collapses_to_one_timescale():
         1, y.reshape(-1, 1)).mean()
     loss.backward()
     assert torch.isfinite(three.g_decay.grad).all()
+
+
+def test_ablate_dot_is_a_diagnostic_only_path():
+    """`ablate_dot` exists so the audit can ask what one dot adds by dropping
+    it from the pool. It must not touch the default path AT ALL (bit-identical
+    log-probs at -1) and dropping a dot must give a finite, different answer."""
+    kw = dict(global_read=True, per_dot_logits=False, head_last_only=True,
+              n_passes=2)
+    m = build_iecnn(_cfg(**kw), 64)
+    m.eval()
+    x = torch.randint(0, 64, (2, 12))
+    with torch.no_grad():
+        a = m(x)["final_log_probs"]
+        b = m(x, ablate_dot=-1)["final_log_probs"]
+        assert torch.equal(a, b)
+        c = m(x, ablate_dot=0)["final_log_probs"]
+        d = m(x, ablate_dot=1)["final_log_probs"]
+    assert torch.isfinite(c).all() and torch.isfinite(d).all()
+    assert (a - c).abs().max().item() > 1e-5
+    assert (c - d).abs().max().item() > 1e-5

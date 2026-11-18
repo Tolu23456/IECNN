@@ -57,7 +57,8 @@ class IECNN(nn.Module):
 
     # ------------------------------------------------------------------
     def forward(self, input_ids: torch.Tensor, tau0: float = 1.0,
-                hard_mode: bool = False, floor: float = 0.0):
+                hard_mode: bool = False, floor: float = 0.0,
+                ablate_dot: int = -1):
         """input_ids [B, T] -> dict with final_log_probs [B, T, V] and details.
 
         `floor` is the per-dot weight floor eps (0.1/N in training; 0 late).
@@ -70,7 +71,7 @@ class IECNN(nn.Module):
         region_outputs = []
         for r, region in enumerate(self.regions):
             out = region(rows, emb_table, tau0=tau0, hard_mode=hard_mode,
-                         floor=floor, ids=input_ids)
+                         floor=floor, ids=input_ids, ablate_dot=ablate_dot)
             region_outputs.append(out)
             if r + 1 < self.R:
                 rows = next_region_rows(

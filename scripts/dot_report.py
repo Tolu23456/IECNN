@@ -92,13 +92,17 @@ def main():
     types = {"copy": [], "space": [], "digit": [], "other": []}
     conf_probs, conf_ok = [], []
 
+    wins = []
+    for w in range(N_WINDOWS):
+        i = w * T * A.VALSTRIDE
+        x = A.val[i:i + T].unsqueeze(0).to(DEV)
+        y = A.val[i + 1:i + 1 + T].unsqueeze(0).to(DEV)
+        if x.shape[1] < T:
+            break
+        wins.append((x, y))
+
     with torch.no_grad():
-        for w in range(N_WINDOWS):
-            i = w * T * A.VALSTRIDE
-            x = A.val[i:i + T].unsqueeze(0).to(DEV)
-            y = A.val[i + 1:i + 1 + T].unsqueeze(0).to(DEV)
-            if x.shape[1] < T:
-                break
+        for x, y in wins:
             out = probe(x)
             lp = out["final_log_probs"]                        # [1,T,V]
             pp = out["per_pass_last_region"][-1]
@@ -171,6 +175,23 @@ def main():
                     d = types[name]
                     d.append((dnll[0][m].mean(0).cpu(), dhit[0][m].float()
                               .mean(0).cpu()))
+    # ---- what does each dot actually ADD? -----------------------------
+    # Drop one dot from the pool (renormalised, so it stays a convex mix) and
+    # re-measure. A dot whose removal costs nothing is redundant no matter how
+    # differently it reads; a dot whose removal costs more than 1/N of the
+    # committee's error is carrying more than its share.
+    abl = []
+    with torch.no_grad():
+        for k in range(n):
+            nll, hit, cnt = 0.0, 0, 0
+            for x, y in wins:
+                lp = probe(x, ablate_dot=k)["final_log_probs"]
+                nll += F.nll_loss(lp.reshape(-1, V), y.reshape(-1),
+                                  reduction="sum").item()
+                hit += lp.argmax(-1).eq(y).sum().item()
+                cnt += y.numel()
+            abl.append({"bpc": nll / cnt / math.log(2), "top1": hit / cnt})
+
     if not acc["ntok"]:
         print("no val windows", flush=True)
         return
@@ -209,6 +230,7 @@ def main():
         idx = order[int(q * len(order) / 10):int((q + 1) * len(order) / 10)]
         dec.append(round(co[idx].mean().item(), 3))
     rep["accuracy_by_confidence_decile"] = dec
+    rep["ablate_one_dot"] = abl
 
     print("\n=== DOT REPORT", flush=True)
     print(f"{ARM}  params {rep['params']}  bpc {rep['bpc']:.4f}  "
@@ -232,6 +254,12 @@ def main():
     print(f"gate weight on the best dot {rep['gate_weight_on_best_dot']:.3f} "
           f"(uniform = {1.0 / n:.3f})", flush=True)
     print("accuracy by confidence decile", dec, flush=True)
+    print(f"drop one dot (full bpc {rep['bpc']:.4f} "
+          f"top1 {rep['top1']:.3f}):", flush=True)
+    for k, a in enumerate(abl):
+        print(f"  without dot {k}: bpc {a['bpc']:.4f} "
+              f"({a['bpc'] - rep['bpc']:+.4f})  top1 {a['top1']:.3f} "
+              f"({a['top1'] - rep['top1']:+.3f})", flush=True)
     for name, d in rep["types"].items():
         print(f"  {name:<6} bpc {[round(v, 3) for v in d['bpc']]} "
               f"top1 {[round(v, 3) for v in d['top1']]}", flush=True)
