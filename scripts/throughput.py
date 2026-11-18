@@ -1,101 +1,107 @@
-"""Harness throughput probe: how many tokens/second can this 2-vCPU box do?
+"""Where does a toy step's time actually go: fixed per-step overhead, or work
+per token?  Runs the two arms that matter at several batch sizes and reports
+tokens/second, so we know whether raising B (a harness knob both arms share)
+buys real throughput or only makes each step slower.
 
-The toy protocol compares bpc at equal wall clock, so the harness's own
-tokens/s is part of the score: a 20% throughput gain is ~20% more tokens
-seen, which is worth more than most architecture tweaks at a 150 s budget.
-
-Both architectures are probed at the SAME batch/threads (whatever wins is
-then used for both arms — this is a property of the machine, not of IECNN).
-
-  python3 scripts/throughput.py            # default grid
-  ARM_BS=8,16 python3 scripts/throughput.py
-
-Only the train step is timed (model build and the first 3 warmup steps are
-excluded), so the numbers are directly comparable to ab_small's s/step.
+No corpus, no val: random bytes, same shapes as the 150 s harness.  Deliberately
+short (a few seconds per point) — this decides whether a B sweep is worth a
+real batch, so it must not cost one.
 """
-from __future__ import annotations
-
 import os
-import statistics
 import sys
 import time
 
 import torch
-import torch.nn.functional as F
 
-sys.path.insert(0, "/content/IECNN")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+torch.set_num_threads(2)
 
-from models.iecnn import build_iecnn          # noqa: E402
 from models.baselines import build_transformer_baseline  # noqa: E402
+from models.iecnn import build_iecnn                     # noqa: E402
 
-T = 64
 V = 256
-STEPS = 25
+T = int(os.environ.get("TP_T", "64"))
+DEV = torch.device("cpu")
 
 
 def iecnn_cfg():
-    return {"model": {
-        "kind": "iecnn", "d": 128, "d_q": 16, "d_v": 32, "d_s": 64,
-        "n_dots": 4, "n_regions": 1, "n_passes": 2, "spans": [16],
-        "use_weights": True, "use_messages": False, "pooling": "log_linear",
-        "head_mode": "hidden", "read_mode": "soft",
-        "share_pass_params": True, "dynamic_query": False,
-        "use_cross_region": False, "fast_dot_math": True,
-        "cache_attention": True, "cell": "lug", "head_last_only": True,
-        "per_dot_logits": False, "global_read": True,
-    }, "consensus": {"rho": 0.0, "kappa": 0.7},
+    return {
+        "model": {
+            "kind": "iecnn", "d": 96, "d_q": 16, "d_v": 32, "d_s": 48,
+            "n_dots": 3, "n_regions": 1, "n_passes": 2, "spans": [8],
+            "use_weights": True, "use_messages": False,
+            "pooling": "log_linear", "head_mode": "hidden",
+            "read_mode": "soft", "share_pass_params": True,
+            "dynamic_query": False, "use_cross_region": False,
+            "fast_dot_math": True, "cache_attention": True,
+            "cell": "lug", "head_last_only": False, "per_dot_logits": False,
+            "window_mode": "contiguous", "seclusion_topk": 0,
+            "pool_first": False, "slot_slots": 0, "dot_dist_bias": False,
+            "global_read": True, "read_schedule": "mix", "head_untied": False,
+            "cell_ln": False, "share_cell": False, "query_from_input": False,
+            "id_lags": False, "ngram_bias": 0, "head_rank": 0,
+            "state_carry": False, "carry_chunk": 8, "global_linear": False,
+        },
+        "consensus": {"rho": 0.0, "kappa": 0.7},
         "training": {"compile_consensus": False, "dot_dropout": 0.0},
-        "data": {"seq_len": T}}
+        "data": {"seq_len": T},
+    }
 
 
 def tf_cfg():
     return {"model": {"kind": "transformer", "d_model": 96, "n_heads": 4,
-                      "n_layers": 3},
+                      "n_layers": 3, "ngram_bias": 0},
             "data": {"seq_len": T}}
 
 
-def timed(model, b: int) -> tuple[float, float]:
-    g = torch.Generator().manual_seed(0)
-    data = torch.randint(0, V, (200_000,), generator=g)
+def bench(model, B, steps=12, compile_it=True):
+    model = model.to(DEV).train()
+    if compile_it:
+        model = torch.compile(model)
     opt = torch.optim.AdamW(model.parameters(), lr=1e-3, betas=(0.9, 0.95),
                             weight_decay=0.01)
-    ts = []
-    for i in range(STEPS + 3):
-        j = torch.randint(0, data.numel() - T - 1, (b,), generator=g)
-        x = torch.stack([data[k:k + T] for k in j])
-        y = torch.stack([data[k + 1:k + 1 + T] for k in j])
-        t0 = time.perf_counter()
+    x = torch.randint(0, V, (B, T), device=DEV)
+    y = torch.randint(0, V, (B, T), device=DEV)
+    ce = torch.nn.functional.cross_entropy
+
+    def one():
         out = model(x)
-        loss = F.cross_entropy(out["final_log_probs"].reshape(-1, V),
-                               y.reshape(-1))
+        loss = ce(out["final_log_probs"].reshape(-1, V), y.reshape(-1))
         opt.zero_grad(set_to_none=True)
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         opt.step()
-        dt = time.perf_counter() - t0
-        if i >= 3:
-            ts.append(dt)
-    per_step = statistics.median(ts)
-    tok_s = b * T / per_step
-    return per_step, tok_s
+
+    for _ in range(3):          # warm-up (and compile warm-up, unmeasured)
+        one()
+    t0 = time.time()
+    for _ in range(steps):
+        one()
+    dt = (time.time() - t0) / steps
+    tok = B * T
+    print(f"B={B:<3} {tok:>5} tok/step  {dt*1000:7.2f} ms/step  "
+          f"{tok/dt:9.0f} tok/s  {dt/tok*1e6:6.1f} us/tok", flush=True)
+    return dt, tok / dt
 
 
-def main() -> None:
-    bs = [int(v) for v in os.environ.get("ARM_BS", "8,16,32,64").split(",")]
-    threads = [int(v) for v in os.environ.get("ARM_THREADS_LIST", "1,2").split(",")]
-    print(f"{'arch':<8}{'B':>5}{'thr':>5}{'s/step':>9}{'tok/s':>10}"
-          f"{'us/1k tok':>11}")
-    for nthr in threads:
-        torch.set_num_threads(nthr)
-        for b in bs:
-            for name, build in (("iecnn", lambda: build_iecnn(iecnn_cfg(), V)),
-                                ("tf", lambda: build_transformer_baseline(tf_cfg(), V))):
-                torch.manual_seed(0)
-                m = build()
-                m.train()
-                per_step, tok_s = timed(m, b)
-                print(f"{name:<8}{b:>5}{nthr:>5}{per_step:>9.4f}{tok_s:>10.0f}"
-                      f"{1e6 / tok_s:>11.1f}", flush=True)
+for name, mk in (("iecnn-d96", lambda: build_iecnn(iecnn_cfg(), V)),
+                 ("tf-d96-l3", lambda: build_transformer_baseline(tf_cfg(), V))):
+    print(f"--- {name} (T={T}, compiled, 2 threads)", flush=True)
+    for B in (8, 16, 32, 64):
+        torch.manual_seed(0)
+        bench(mk(), B)
+    print(flush=True)
 
-
-if __name__ == "__main__":
-    main()
+# how much of a step is not proportional to B: fit t(B) = a + b*B on the
+# iecnn curve and report the fixed share at B=8.
+print("--- fixed-overhead estimate (iecnn)", flush=True)
+ts = []
+for B in (8, 32):
+    torch.manual_seed(0)
+    dt, _ = bench(build_iecnn(iecnn_cfg(), V), B, steps=16)
+    ts.append((B, dt))
+(b1, t1), (b2, t2) = ts
+slope = (t2 - t1) / (b2 - b1)
+fixed = t1 - slope * b1
+print(f"t(B) = {fixed*1000:.2f} ms + {slope*1e6:.2f} us * B   "
+      f"=> fixed share at B=8: {fixed/t1*100:.0f}%", flush=True)

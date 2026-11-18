@@ -703,6 +703,30 @@ def val_bpc(model, windows: int = None) -> float:
 
 
 @torch.no_grad()
+def train_bpc(model, n_batches: int = 48) -> float:
+    """In-sample bpc on fresh draws from the training split.
+
+    The whole strategy turned on an unmeasured assumption: that the IECNN
+    plateau at ~3.29 is a CAPACITY limit (train bpc also stuck) rather than
+    overfitting (train bpc far below val). Every capacity knob was pruned on
+    wall-clock grounds, so if the model is actually overfitting then the GPU
+    capacity lane is the wrong direction entirely and cheap regularisation is
+    the right one. One extra forward pass per batch settles it at ~1 s/arm.
+    """
+    model.eval()
+    gen = batches(seed=1234)
+    tot, n = 0.0, 0
+    for _ in range(n_batches):
+        x, y = next(gen)
+        lp = model(x)["final_log_probs"]
+        tot += F.nll_loss(lp.reshape(-1, V), y.reshape(-1),
+                          reduction="sum").item()
+        n += y.numel()
+    model.train()
+    return tot / n / math.log(2)
+
+
+@torch.no_grad()
 def pointer_audit(model) -> dict:
     """How the N dots pick tokens: distinct picks + distance distribution."""
     r = model.regions[0]
@@ -805,12 +829,13 @@ def run(name: str, kind: str, model, lr: float = None,
             for p, a in zip(model.parameters(), ema):
                 p.copy_(a)
     final = round(val_bpc(em), 4)
+    tr_bpc = round(train_bpc(em), 4)
     row = {"arm": name, "kind": kind, "seed": sd, "lr": lr0, "sched": sched,
            "swa": swa, "data_fp": DATA_FP,
            "params": n_par, "steps": step,
            "tokens": step * nb * T, "s_per_step": round(el / max(step, 1), 4),
            "s_per_1k_tokens": round(el / max(step * nb * T / 1000, 1e-9), 3),
-           "curve": marks, "bpc_final": final}
+           "curve": marks, "bpc_final": final, "bpc_train": tr_bpc}
     if kind == "iecnn":
         row["pointers"] = pointer_audit(em)
     print("RESULT " + json.dumps(row), flush=True)
@@ -878,14 +903,16 @@ def main():
     print(f"\n=== SUMMARY (equal wall-clock {BUDGET:.0f}s/arm, "
           f"common {common_tok/1e6:.2f}M tokens) ===", flush=True)
     hdr = f"{'arm':<18}{'params':>8}{'steps':>7}{'tokens':>9}{'s/step':>9}" \
-          f"{'s/1k tok':>10}{'bpc_fin':>9}{'bpc@eqtok':>11}"
+          f"{'s/1k tok':>10}{'bpc_fin':>9}{'bpc@eqtok':>11}{'bpc_tr':>8}{'gap':>7}"
     print(hdr, flush=True)
     for r in rows:
         be = bpc_at(r["curve"], common_tok)
+        gap = r["bpc_train"] - r["bpc_final"]
         print(f"{r['arm']:<18}{r['params']:>8}{r['steps']:>7}"
               f"{r['tokens']/1e6:>8.2f}M{r['s_per_step']:>9.4f}"
               f"{r['s_per_1k_tokens']:>10.2f}{r['bpc_final']:>9.4f}"
-              f"{('%.4f' % be) if be is not None else '   -':>11}", flush=True)
+              f"{('%.4f' % be) if be is not None else '   -':>11}"
+              f"{r['bpc_train']:>8.4f}{gap:>+7.4f}", flush=True)
         if "pointers" in r:
             print(f"{'':<18}pointers {r['pointers']}", flush=True)
     print("\nJSON " + json.dumps(rows), flush=True)
