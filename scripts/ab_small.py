@@ -43,7 +43,7 @@ def iecnn(cell="gru", lean=False, n_passes=3, n_dots=8, d_s=128, d=128,
           window_local=None, seclusion_topk=0, pool_first=False,
           slot_slots=0, dist_bias=False, dynamic_query=False,
           global_read=False, read_schedule="mix", head_untied=False,
-          cell_ln=False, share_cell=False):
+          cell_ln=False, share_cell=False, query_from_input=False):
     m = {
         "kind": "iecnn", "d": d, "d_q": 16, "d_v": 32, "d_s": d_s,
         "n_dots": n_dots, "n_regions": 1, "n_passes": n_passes,
@@ -64,6 +64,7 @@ def iecnn(cell="gru", lean=False, n_passes=3, n_dots=8, d_s=128, d=128,
         "head_untied": head_untied,
         "cell_ln": cell_ln,
         "share_cell": share_cell,
+        "query_from_input": query_from_input,
     }
     if window_reach is not None:
         m["window_reach"] = window_reach
@@ -287,6 +288,17 @@ ARMS = {
         "lug", True, n_passes=1, n_dots=4, d_s=64, per_dot_logits=False,
         global_read=True, spans=(32,), window_mode="hybrid",
         window_reach=64), {"lr": 2e-3}),
+    # --- content-dependent query (the one thing attention has) ----------
+    # q_t = q_n + W x_t on the WINDOW read only (the global read keeps its
+    # static query so the O(T) prefix sum survives). W zero-init.
+    "iecnn-lr2-g8-qin": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=4, d_s=64, per_dot_logits=False,
+        global_read=True, spans=(8,), query_from_input=True),
+        {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-lr2-g8-qin-s16": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=4, d_s=64, per_dot_logits=False,
+        global_read=True, query_from_input=True),
+        {"lr": 2e-3, "swa": 0.99}),
     # --- cheapest committee: N and d_s are the two cost knobs left ------
     # Every 10% off the step is worth ~10% more tokens at equal wall clock,
     # which is exactly the size of the bpc gap we are trying to open.

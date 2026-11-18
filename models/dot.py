@@ -412,7 +412,7 @@ class DotPopulation(nn.Module):
                 want_log_pi: bool = True,
                 slot_table: torch.Tensor | None = None,
                 want_e_state: bool = True, full_k=None,
-                full_v=None) -> DotOutputs:
+                full_v=None, q_add=None) -> DotOutputs:
         """One pass for all dots at all positions simultaneously.
 
         wind_k    [B, T, w, d_q]   windowed, rel-distance-added keys
@@ -441,11 +441,11 @@ class DotPopulation(nn.Module):
                                       err_feat, round_idx, msg_in, state,
                                       emb_table, attn_cache, want_log_pi,
                                       slot_table, want_e_state, full_k,
-                                      full_v)
+                                      full_v, q_add)
         return self._forward_reference(wind_k, wind_v, valid_mask, h_pool,
                                        err_feat, round_idx, msg_in, state,
                                        emb_table, want_log_pi, slot_table,
-                                       want_e_state, full_k, full_v)
+                                       want_e_state, full_k, full_v, q_add)
 
     # the einsum-per-op version, kept for the equivalence test and as a
     # reference implementation of spec 01 (slower: einsum re-plans paths the
@@ -455,7 +455,7 @@ class DotPopulation(nn.Module):
                            want_log_pi: bool = True,
                            slot_table: torch.Tensor | None = None,
                            want_e_state: bool = True, full_k=None,
-                           full_v=None) -> DotOutputs:
+                           full_v=None, q_add=None) -> DotOutputs:
         b, t, w = wind_k.shape[0], wind_k.shape[1], wind_k.shape[2]
         device = wind_k.device
 
@@ -465,7 +465,12 @@ class DotPopulation(nn.Module):
                 + torch.einsum("bfnd,ndj->bfnj", state, self._sel(round_idx, self.u_q))
             scores = torch.einsum("bfwj,bfnj->bfnw", wind_k, q_dyn)     # read by query
         else:
-            scores = torch.einsum("bfwj,nj->bfnw", wind_k, self._sel(round_idx, self.q))
+            if q_add is not None:
+                qa = self._sel(round_idx, self.q).view(1, 1, n, self.d_q) + q_add
+                scores = torch.einsum("bfwj,bfnj->bfnw", wind_k, qa)
+            else:
+                scores = torch.einsum("bfwj,nj->bfnw", wind_k,
+                                      self._sel(round_idx, self.q))
         scores = scores / math.sqrt(self.d_q)
         if self.d_bias is not None:
             scores = scores + self._sel(round_idx, self.d_bias).view(1, 1, n, w)
@@ -564,7 +569,7 @@ class DotPopulation(nn.Module):
                       want_log_pi: bool = True,
                       slot_table: torch.Tensor | None = None,
                       want_e_state: bool = True, full_k=None,
-                      full_v=None) -> DotOutputs:
+                      full_v=None, q_add=None) -> DotOutputs:
         b, t, w = wind_k.shape[0], wind_k.shape[1], wind_k.shape[2]
         f = b * t
         n = self.N
@@ -599,10 +604,17 @@ class DotPopulation(nn.Module):
                 # read by query: scores[n, f?, w] per position: contract d_q
                 scores = torch.einsum("fwj,fnj->fnw", wk, q_dyn)
             else:
-                # one GEMM: [f*w, d_q] @ [d_q, N] -> [f, w, N]
-                scores = torch.tensordot(wk, self._sel(round_idx, self.q),
-                                         dims=([2], [1]))
-                scores = scores.permute(0, 2, 1)                        # [f, N, w]
+                if q_add is not None:
+                    # content-dependent query: q_t = q_n + W x_t. Zero-init
+                    # of W, so this starts exactly as the static-query model
+                    # and can only move away from it if it pays.
+                    qa = self._sel(round_idx, self.q).unsqueeze(0) + q_add
+                    scores = torch.einsum("fwj,fnj->fnw", wk, qa)       # [f, N, w]
+                else:
+                    # one GEMM: [f*w, d_q] @ [d_q, N] -> [f, w, N]
+                    scores = torch.tensordot(wk, self._sel(round_idx, self.q),
+                                             dims=([2], [1]))
+                    scores = scores.permute(0, 2, 1)                    # [f, N, w]
             scores = scores / math.sqrt(self.d_q)
             if self.d_bias is not None:
                 scores = scores + self._sel(round_idx, self.d_bias).view(1, n, w)

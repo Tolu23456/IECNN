@@ -112,6 +112,16 @@ class Region(nn.Module):
         # tied embedding. Same compute per token (d*V either way), +d*V
         # parameters; the transformer baseline has always had one, so tying
         # was an unexamined handicap on our side of a like-for-like test.
+        # query_from_input: the WINDOW read's query becomes q_n + W x_t, i.e.
+        # content-dependent, which is the one thing a transformer's attention
+        # has and our static-query read does not. W is zero-initialised, so
+        # the model starts bit-identical to the static version and keeps the
+        # term only if it pays. The GLOBAL read stays static on purpose: the
+        # O(T) prefix-sum trick needs a position-independent query, and that
+        # mechanism is worth more than the extra conditioning there.
+        self.q_from_input = bool(m.get("query_from_input", False))
+        self.w_qi = (nn.Parameter(torch.zeros(self.d, self.d_q))
+                     if self.q_from_input else None)
         self.head_untied = bool(m.get("head_untied", False))
         if self.head_untied:
             w = torch.empty(self.d, vocab_size)
@@ -444,6 +454,7 @@ class Region(nn.Module):
             # global read (they read the same keys/values).
             k_all, v_all = self._full_kv(rows)
             full_k, full_v = k_all, v_all
+        q_add = rows.matmul(self.w_qi) if self.w_qi is not None else None
 
         # Read windows. Normally every pass reads the SAME window, and the
         # attention cache is shared so the read is computed once (that is
@@ -507,7 +518,7 @@ class Region(nn.Module):
                             emb_table=emb_table, attn_cache=attn_cache,
                             want_log_pi=want_pi, slot_table=slots,
                             want_e_state=want_e, full_k=full_k,
-                            full_v=full_v)
+                            full_v=full_v, q_add=q_add)
             state_prev = out.state
             if slots is not None:
                 # e13: detached scan — the table this pass wrote is read by
@@ -610,6 +621,7 @@ class Region(nn.Module):
         if self.global_read:
             k_all, v_all = self._full_kv(rows)
             full_k, full_v = k_all, v_all
+        q_add = rows.matmul(self.w_qi) if self.w_qi is not None else None
 
         # same per-pass band machinery as _forward_hidden (bands mode gives
         # each pass its own window, so each needs its own attention cache)
@@ -678,7 +690,8 @@ class Region(nn.Module):
             out = self.dots(wind_k, wind_v, valid, h_pool, err, round_idx=p - 1,
                             msg_in=msg_read if p > 1 else None, state=state,
                             emb_table=emb_table, attn_cache=attn_cache,
-                            slot_table=slots, full_k=full_k, full_v=full_v)
+                            slot_table=slots, full_k=full_k, full_v=full_v,
+                            q_add=q_add)
             state_prev = out.state
             if slots is not None:
                 slots = self.dots.update_slots(state_prev, slots, p - 1)

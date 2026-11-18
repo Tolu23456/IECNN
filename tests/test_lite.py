@@ -432,3 +432,32 @@ def test_share_cell_is_exact_and_enables_more_dots():
 
     c4, c8 = cell_params(n4), cell_params(n8)
     assert c4 == c8, (c4, c8)
+
+
+def test_query_from_input_starts_static_and_stays_causal():
+    """query_from_input must (a) be bit-identical to the static-query model
+    at init (W=0), (b) actually react to the CURRENT token, and (c) still
+    leak nothing from the future — the query depends on position t only."""
+    kw = dict(global_read=True, head_last_only=True, per_dot_logits=False,
+              n_passes=2, cell="lug")
+    base = build_iecnn(_cfg(**kw), 64)
+    qin = build_iecnn(_cfg(query_from_input=True, **kw), 64)
+    qin.load_state_dict(base.state_dict(), strict=False)   # w_qi stays 0
+    base.eval(); qin.eval()
+    x = torch.randint(0, 64, (2, 12))
+    assert torch.allclose(_fwd(base, x), _fwd(qin, x), atol=1e-7, rtol=1e-7)
+
+    with torch.no_grad():                       # turn the term on
+        qin.regions[0].w_qi.normal_(std=0.5)
+    a = _fwd(qin, x)
+    x2 = x.clone()
+    x2[:, 9] = (x2[:, 9] + 7) % 64              # perturb the FUTURE token
+    b = _fwd(qin, x2)
+    assert (a[:, :9] - b[:, :9]).abs().max().item() < 1e-6
+    assert (a[:, 9:] - b[:, 9:]).abs().max().item() > 1e-6
+
+    x3 = x.clone()
+    x3[:, 5] = (x3[:, 5] + 11) % 64             # perturb a PAST-position token
+    c = _fwd(qin, x3)
+    assert (a[:, 5] - c[:, 5]).abs().max().item() > 1e-6, \
+        "input-conditioned query did not react to its own token"
