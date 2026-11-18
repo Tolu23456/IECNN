@@ -583,6 +583,21 @@ ARMS = {
         "lug", True, n_passes=3, n_dots=2, d_s=96, d=192, per_dot_logits=False,
         global_read=True, spans=(8,), head_post=384, head_post_layers=2,
         interleave=True), {"lr": 2e-3, "swa": 0.99}),
+    # Depth had NOT saturated at x4 with one pass (2.1035 < 2.1571 < 2.1918),
+    # and N=3 paid too (2.1022 at x3). Push both, and test interleave at the
+    # population that works.
+    "iecnn-d192-n3-pmlp-x4-p1": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=192, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=384, head_post_layers=4),
+        {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-d192-n2-pmlp-x6-p1": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=2, d_s=96, d=192, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=384, head_post_layers=6),
+        {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-d192-n3-pmlp-x2-il": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=3, d_s=96, d=192, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=384, head_post_layers=2,
+        interleave=True), {"lr": 2e-3, "swa": 0.99}),
     "iecnn-d256-ds256-n6": ("iecnn", lambda: iecnn(
         "lug", True, n_passes=2, n_dots=6, d_s=256, d=256, per_dot_logits=False,
         global_read=True, spans=(8,)), {"lr": 2e-3, "swa": 0.99}),
