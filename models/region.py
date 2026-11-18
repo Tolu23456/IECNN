@@ -245,6 +245,22 @@ class Region(nn.Module):
         self.cache_attention = bool(m.get("cache_attention", True))
         self.w_k = nn.Linear(d, d_q, bias=False)
         self.w_v = nn.Linear(d, d_v, bias=False)
+        # post_mlp (head_post: width, 0 = off): a per-position block AFTER the
+        # population is pooled and BEFORE the tied head:
+        #     u = LN(h_mix); h = h_mix + W2 gelu(W1 u)
+        # This is the one major component of a transformer block the dots do
+        # not have. The transformer spends ~2/3 of its parameters on exactly
+        # this (d -> 4d -> d after attention), which is why it fits train 0.3
+        # bpc lower and still generalises better; IECNN's pooling averages N
+        # state vectors and hands the result straight to a tied head, so the
+        # layer that does the per-position nonlinear work is missing. The
+        # dot READ is much cheaper than attention (~10k vs ~98k MAC/token), so
+        # this is where that saving gets reinvested.
+        self.head_post = int(m.get("head_post", 0))
+        if self.head_post > 0:
+            self.post_ln = nn.LayerNorm(d)
+            self.post_w1 = nn.Linear(d, self.head_post)
+            self.post_w2 = nn.Linear(self.head_post, d)
         # Time axis of the read window. "contiguous" (default) = the last
         # `span` tokens, one slot each. "quad" = the same number of slots
         # spread quadratically from distance 0 out to `window_reach`, so the
@@ -327,6 +343,12 @@ class Region(nn.Module):
             dist = ((i / max(w - 1, 1)) ** 2 * reach).round().long()
             dist[0] = 0
         return (-dist).flip(0)        # ascending offsets, slot -1 = current
+
+    def _post(self, h: torch.Tensor) -> torch.Tensor:
+        """Per-position residual block after pooling (0 = identity)."""
+        if self.head_post <= 0:
+            return h
+        return h + self.post_w2(F.gelu(self.post_w1(self.post_ln(h))))
 
     def _head_logits(self, h: torch.Tensor, emb_table: torch.Tensor):
         """[.., d] -> [.., V]. Tied embedding (default), an untied head, or
@@ -622,6 +644,7 @@ class Region(nn.Module):
                                          out.e_state)               # [B, T, d]
                 if self.head_skip:
                     h_mix = h_mix + rows
+                h_mix = self._post(h_mix)
                 logits = self._head_logits(h_mix.reshape(f, self.d), emb_table)
                 log_b = F.log_softmax(logits, dim=-1).reshape(b, t, -1)
 
@@ -654,6 +677,7 @@ class Region(nn.Module):
                 h_mix = torch.einsum("bfn,bfnd->bfd", w_hard, e_state_last)
             if self.head_skip:
                 h_mix = h_mix + rows
+            h_mix = self._post(h_mix)
             logits = self._head_logits(h_mix.reshape(f, self.d), emb_table)
             log_final = F.log_softmax(logits, dim=-1).reshape(b, t, -1)
             w_out = w_hard

@@ -767,3 +767,27 @@ def test_break_scan_is_numerically_identical():
         a = base(x)["final_log_probs"]
         b = brk(x)["final_log_probs"]
     assert torch.equal(a, b), (a - b).abs().max().item()
+
+
+def test_head_post_adds_one_per_position_block_and_trains():
+    """`head_post` must be a residual block: identity when off, a real
+    per-position nonlinearity when on, same leading shape, normalised
+    log-probs, and still differentiable."""
+    off = build_iecnn(_cfg(global_read=True, per_dot_logits=False,
+                           head_last_only=True, n_passes=2), 64)
+    on = build_iecnn(_cfg(global_read=True, per_dot_logits=False,
+                          head_last_only=True, n_passes=2, head_post=32), 64)
+    on.load_state_dict(off.state_dict(), strict=False)
+    x = torch.randint(0, 64, (2, 12))
+    with torch.no_grad():
+        a = off(x)["final_log_probs"]
+        b = on(x)["final_log_probs"]
+    assert a.shape == b.shape
+    assert (a - b).abs().max().item() > 1e-4
+    assert torch.allclose(b.exp().sum(-1), torch.ones(2, 12), atol=1e-4)
+    on.train()
+    y = torch.randint(0, 64, (2, 12))
+    loss = -on(x)["final_log_probs"].reshape(-1, 64).gather(1, y.reshape(-1, 1)).mean()
+    loss.backward()
+    g = on.regions[0].post_w1.weight.grad
+    assert g is not None and torch.isfinite(g).all()

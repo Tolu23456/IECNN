@@ -58,7 +58,7 @@ def iecnn(cell="gru", lean=False, n_passes=3, n_dots=8, d_s=128, d=128,
           id_lags=False, ngram_bias=0, head_rank=0,
           state_carry=False, carry_chunk=8, gla=False,
           global_exact=False, head_skip=False, break_scan=False,
-          d_q=16, d_v=32):
+          d_q=16, d_v=32, head_post=0):
     m = {
         "kind": "iecnn", "d": d, "d_q": d_q, "d_v": d_v, "d_s": d_s,
         "n_dots": n_dots, "n_regions": 1, "n_passes": n_passes,
@@ -89,6 +89,7 @@ def iecnn(cell="gru", lean=False, n_passes=3, n_dots=8, d_s=128, d=128,
         "global_exact": global_exact,
         "head_skip": head_skip,
         "break_scan": break_scan,
+        "head_post": head_post,
     }
     if window_reach is not None:
         m["window_reach"] = window_reach
@@ -489,6 +490,23 @@ ARMS = {
     "iecnn-d192-dv96": ("iecnn", lambda: iecnn(
         "lug", True, n_passes=2, n_dots=4, d_s=128, d=192, per_dot_logits=False,
         global_read=True, spans=(8,), d_v=96), {"lr": 2e-3, "swa": 0.99}),
+    # --- the missing block: per-position MLP after pooling ----------------
+    # The dots' read is ~10k MAC/token against attention's ~98k, but the cell
+    # spends ~412k/token at d192 (N=4 x 179-dim input projection + 128->192
+    # output projection) against ~172k for an entire tf block, and there is no
+    # per-position MLP. These two arms spend the read's saving where the
+    # transformer puts 2/3 of its parameters: LN + residual + GELU MLP after
+    # the population is pooled. Cheap dots (n_dots=2, d_s=64) keep the total
+    # cost near tf's, so it is a cost-matched architectural test, not a
+    # "throw parameters at it" test.
+    "iecnn-d128-n2-pmlp": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=2, d_s=64, d=128, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=256),
+        {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-d192-n2-pmlp": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=2, d_s=96, d=192, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=384),
+        {"lr": 2e-3, "swa": 0.99}),
     "iecnn-d256-ds256-n6": ("iecnn", lambda: iecnn(
         "lug", True, n_passes=2, n_dots=6, d_s=256, d=256, per_dot_logits=False,
         global_read=True, spans=(8,)), {"lr": 2e-3, "swa": 0.99}),
@@ -948,6 +966,13 @@ def main():
         opts = entry[2] if len(entry) > 2 else {}
         torch.manual_seed(opts.get("seed", SEED))
         cfg = mk()
+        # Harness-level knob (never an arm knob): when torch.compile is on but
+        # Inductor's CUDA SplitScan lowering cannot handle the prefix scan,
+        # every IECNN arm gets the eager graph boundary around that one
+        # function. Applied uniformly so a compile comparison stays fair.
+        if (os.environ.get("ARM_BREAK_SCAN") == "1"
+                and cfg.get("model", {}).get("kind") == "iecnn"):
+            cfg["model"]["break_scan"] = True
         model = (build_transformer_baseline(cfg, V) if kind == "transformer"
                  else build_iecnn(cfg, V)).to(DEV)
         print(f"--- {name} ({sum(p.numel() for p in model.parameters())} params"
