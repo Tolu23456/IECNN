@@ -605,24 +605,25 @@ ARMS = {
     # embeddings, and any mechanism that writes back into `rows` (interleave,
     # deep stacks) makes that stream's scale depth-dependent.
     # head_ln: final LN before the tied output matrix (transformer ln_f).
-    "iecnn-n3-x3-p1-readln": ("iecnn", lambda: iecnn(
+    "iecnn-n3-x4-p1-ln": ("iecnn", lambda: iecnn(
         "lug", True, n_passes=1, n_dots=3, d_s=96, d=192, per_dot_logits=False,
-        global_read=True, spans=(8,), head_post=384, head_post_layers=3,
-        read_ln=True), {"lr": 2e-3, "swa": 0.99}),
-    "iecnn-n3-x3-p1-headln": ("iecnn", lambda: iecnn(
-        "lug", True, n_passes=1, n_dots=3, d_s=96, d=192, per_dot_logits=False,
-        global_read=True, spans=(8,), head_post=384, head_post_layers=3,
-        head_ln=True), {"lr": 2e-3, "swa": 0.99}),
-    "iecnn-n3-x3-p1-ln": ("iecnn", lambda: iecnn(
-        "lug", True, n_passes=1, n_dots=3, d_s=96, d=192, per_dot_logits=False,
-        global_read=True, spans=(8,), head_post=384, head_post_layers=3,
+        global_read=True, spans=(8,), head_post=384, head_post_layers=4,
         read_ln=True, head_ln=True), {"lr": 2e-3, "swa": 0.99}),
     # the ordered receptive field: span 8 -> 16 (4x the ordered range for ~4%
     # of the read's negligible cost). Was pruned on the 2-vCPU toy, where any
     # added fitting power is punished and both arms memorise.
-    "iecnn-n3-x3-p1-s16": ("iecnn", lambda: iecnn(
+    "iecnn-n3-x4-p1-s16": ("iecnn", lambda: iecnn(
         "lug", True, n_passes=1, n_dots=3, d_s=96, d=192, per_dot_logits=False,
-        global_read=True, spans=(16,), head_post=384, head_post_layers=3),
+        global_read=True, spans=(16,), head_post=384, head_post_layers=4),
+        {"lr": 2e-3, "swa": 0.99}),
+    # depth and population both still pay at x4/N3, so push each once more.
+    "iecnn-n3-x5-p1": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=192, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=384, head_post_layers=5),
+        {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-n4-x4-p1": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=4, d_s=96, d=192, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=384, head_post_layers=4),
         {"lr": 2e-3, "swa": 0.99}),
     "iecnn-d256-ds256-n6": ("iecnn", lambda: iecnn(
         "lug", True, n_passes=2, n_dots=6, d_s=256, d=256, per_dot_logits=False,
