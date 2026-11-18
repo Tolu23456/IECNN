@@ -1044,7 +1044,8 @@ def test_global_decay_mix_k_collapses_to_one_timescale():
     kw = dict(global_read=True, per_dot_logits=False, head_last_only=True,
               n_passes=2, global_decay=True)
     one = build_iecnn(_cfg(**kw), 64).regions[0].dots
-    three = build_iecnn(_cfg(**kw, global_decay_k=3), 64).regions[0].dots
+    m_three = build_iecnn(_cfg(**kw, global_decay_k=3), 64)
+    three = m_three.regions[0].dots
     n = lambda m: sum(p.numel() for p in m.parameters())
     assert n(three) - n(one) == one.N * 2
     b, t = 2, 16
@@ -1072,10 +1073,10 @@ def test_global_decay_mix_k_collapses_to_one_timescale():
         hi = torch.stack(reads).max(0).values
         assert (m >= lo - 1e-5).all() and (m <= hi + 1e-5).all()
         assert (m - reads[1]).abs().max().item() > 1e-4
-    three.train()
+    m_three.train()
     x = torch.randint(0, 64, (2, 12))
     y = torch.randint(0, 64, (2, 12))
-    loss = -three(x)["final_log_probs"].reshape(-1, 64).gather(
+    loss = -m_three(x)["final_log_probs"].reshape(-1, 64).gather(
         1, y.reshape(-1, 1)).mean()
     loss.backward()
     assert torch.isfinite(three.g_decay.grad).all()
