@@ -992,3 +992,43 @@ def test_global_decay_does_not_overflow_at_long_contexts():
         v3[:, 1999] += 10.0
         moved = (ctx[:, 2000] - d._global_ctx(k, v3, 0)[:, 2000]).abs().mean()
         assert 0.05 < moved.item() < 1.0, moved
+
+
+def test_post_share_trades_parameters_for_depth():
+    """The block stack is 74% of the model and it is n copies of the same
+    shape, so "all" must apply ONE block n times (one block of parameters,
+    n blocks of compute) and "up" must share only the up-projection. The
+    shared stack must compute exactly what the explicit stack computes."""
+    kw = dict(global_read=True, per_dot_logits=False, head_last_only=True,
+              n_passes=2, head_post=32, head_post_layers=4)
+    base = build_iecnn(_cfg(**kw), 64)
+    allsh = build_iecnn(_cfg(**kw, post_share="all"), 64)
+    upsh = build_iecnn(_cfg(**kw, post_share="up"), 64)
+    n = lambda m: sum(p.numel() for p in m.parameters())
+    r = base.regions[0]
+    n_blk = sum(p.numel() for p in r.post_blocks[0].parameters())
+    assert len(allsh.regions[0].post_blocks) == 1
+    assert allsh.regions[0].post_repeat == 4
+    assert n(base) - n(allsh) == 3 * n_blk
+    # "up" keeps every per-block ln and w2, and only the [d, w] w1 is shared
+    assert n(base) - n(upsh) == 3 * r.post_blocks[0]["w1"].weight.numel()
+    # and the shared stack is the same function as the explicit one
+    h = torch.randn(3, 5, r.post_blocks[0]["ln"].normalized_shape[0])
+    with torch.no_grad():
+        blk = allsh.regions[0].post_blocks[0]
+        want = h
+        for _ in range(4):
+            want = want + blk["w2"](torch.nn.functional.gelu(
+                blk["w1"](blk["ln"](want))))
+        got = allsh.regions[0]._post(h)
+    assert (got - want).abs().max().item() < 1e-6
+    # gradients must reach the single shared block from every application
+    allsh.train()
+    x = torch.randint(0, 64, (2, 12))
+    y = torch.randint(0, 64, (2, 12))
+    loss = -allsh(x)["final_log_probs"].reshape(-1, 64).gather(
+        1, y.reshape(-1, 1)).mean()
+    loss.backward()
+    assert allsh.regions[0].post_blocks[0]["w1"].weight.grad is not None
+    assert torch.isfinite(
+        allsh.regions[0].post_blocks[0]["w1"].weight.grad).all()

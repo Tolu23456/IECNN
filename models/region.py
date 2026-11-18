@@ -281,12 +281,30 @@ class Region(nn.Module):
         # this is where that saving gets reinvested.
         self.head_post = int(m.get("head_post", 0))
         n_post = int(m.get("head_post_layers", 1)) if self.head_post > 0 else 0
+        # post_share: how many parameter copies the block stack keeps.
+        #   "none" (default) — n_post independent blocks, 384*w + 960 each.
+        #   "all"  — ONE block applied n_post times (a universal-transformer
+        #            stack): depth of compute, cost of one block in parameters
+        #            and in optimiser state.
+        #   "up"   — one shared up-projection, per-block LN and down-projection
+        #            (blocks share a feature basis but keep their own readout).
+        # The stack is 74% of the model's parameters, and a block that is
+        # applied twice does strictly more function composition than two
+        # blocks that are never forced to agree, so if sharing is even close
+        # it is the cheapest parameter win available.
+        self.post_share = str(m.get("post_share", "none"))
+        n_store = 1 if self.post_share == "all" else n_post
         self.post_blocks = nn.ModuleList()
-        for _ in range(n_post):
-            self.post_blocks.append(nn.ModuleDict({
+        for _ in range(n_store):
+            blk = nn.ModuleDict({
                 "ln": nn.LayerNorm(d),
-                "w1": nn.Linear(d, self.head_post),
-                "w2": nn.Linear(self.head_post, d)}))
+                "w2": nn.Linear(self.head_post, d)})
+            if self.post_share != "up":
+                blk["w1"] = nn.Linear(d, self.head_post)
+            self.post_blocks.append(blk)
+        self.post_w1 = (nn.Linear(d, self.head_post)
+                        if self.post_share == "up" else None)
+        self.post_repeat = n_post if self.post_share == "all" else 1
         # Time axis of the read window. "contiguous" (default) = the last
         # `span` tokens, one slot each. "quad" = the same number of slots
         # spread quadratically from distance 0 out to `window_reach`, so the
@@ -378,8 +396,14 @@ class Region(nn.Module):
         have already mixed the prefix, so this is where depth can act on the
         gathered context at O(1) cost in T.
         """
+        if self.post_share == "all":
+            blk = self.post_blocks[0]
+            for _ in range(self.post_repeat):
+                h = h + blk["w2"](F.gelu(blk["w1"](blk["ln"](h))))
+            return h
         for blk in self.post_blocks:
-            h = h + blk["w2"](F.gelu(blk["w1"](blk["ln"](h))))
+            w1 = blk["w1"] if self.post_w1 is None else self.post_w1
+            h = h + blk["w2"](F.gelu(w1(blk["ln"](h))))
         return h
 
     def _head_logits(self, h: torch.Tensor, emb_table: torch.Tensor):
