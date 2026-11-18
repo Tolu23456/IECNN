@@ -60,7 +60,8 @@ def iecnn(cell="gru", lean=False, n_passes=3, n_dots=8, d_s=128, d=128,
           global_exact=False, head_skip=False, break_scan=False,
           d_q=16, d_v=32, head_post=0, head_post_layers=1,
           interleave=False, read_ln=False, head_ln=False, read_heads=1,
-          global_decay=False, post_share="none", global_decay_k=1):
+          global_decay=False, post_share="none", global_decay_k=1,
+          gate_agree=False):
     m = {
         "kind": "iecnn", "d": d, "d_q": d_q, "d_v": d_v, "d_s": d_s,
         "n_dots": n_dots, "n_regions": 1, "n_passes": n_passes,
@@ -74,6 +75,7 @@ def iecnn(cell="gru", lean=False, n_passes=3, n_dots=8, d_s=128, d=128,
         "window_mode": window_mode,
         "seclusion_topk": seclusion_topk,
         "pool_first": pool_first,
+        "gate_agree": gate_agree,
         "slot_slots": slot_slots,
         "dot_dist_bias": dist_bias,
         "global_read": global_read,
@@ -763,6 +765,24 @@ ARMS = {
         "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
         global_read=True, spans=(8,), head_post=256, head_post_layers=5,
         read_ln=True, head_ln=True, global_decay=True),
+        {"lr": 2e-3, "swa": 0.99}),
+    # --- the gate is blind to the committee (gate_agree) --------------------
+    # gamma is a scalar read of a dot's OWN state, so the gate cannot express
+    # "this dot disagrees with the other two". Audit finding: the gate is
+    # near-uniform (0.29/0.37/0.34 vs 0.333), i.e. the pool is close to a
+    # plain mean of three specialists. gate_agree adds one number per dot:
+    # cosine(state_n, mean_m state_m) at the same position. Zero-initialised,
+    # N scalars, ~0.4% of the step. If a real gate is worth anything, this is
+    # the cheapest information it is currently missing.
+    "iecnn-n3-x5-p1-ln-decay-d128-ga": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=384, head_post_layers=5,
+        read_ln=True, head_ln=True, global_decay=True, gate_agree=True),
+        {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-n3-x4-p1-ln-decay-ga": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=192, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=384, head_post_layers=4,
+        read_ln=True, head_ln=True, global_decay=True, gate_agree=True),
         {"lr": 2e-3, "swa": 0.99}),
     # --- SEED REPLICATION of the headline claim -----------------------------
     # The d128 family beats tf by 0.007 (x4) / 0.018 (x5) in one session. The

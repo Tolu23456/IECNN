@@ -1120,3 +1120,32 @@ def test_pool_only_dot_is_the_trained_path_one_hot():
         assert torch.isfinite(o).all()
         assert o.shape == a.shape
     assert (outs[0] - outs[1]).abs().max().item() > 1e-5
+
+
+def test_gate_agree_is_inert_at_init_and_trains():
+    """gate_agree gives the gate the one thing it cannot see: whether a dot
+    agrees with the committee. Zero init means the arm must start
+    bit-identical to the arm without it, and the scalars must actually
+    receive gradient (otherwise the mechanism silently does nothing)."""
+    kw = dict(global_read=True, per_dot_logits=False, head_last_only=True,
+              n_passes=1, n_dots=3)
+    base = build_iecnn(_cfg(**kw), 64).eval()
+    m = build_iecnn(_cfg(gate_agree=True, **kw), 64).eval()
+    sd = base.state_dict()
+    m.load_state_dict({k: v for k, v in m.state_dict().items()
+                       if k in sd}, strict=False)
+    x = torch.randint(0, 64, (2, 12))
+    with torch.no_grad():
+        assert torch.allclose(base(x)["final_log_probs"],
+                              m(x)["final_log_probs"], atol=1e-6)
+        # a non-zero scale must move the output
+        m.regions[0].c_agree.fill_(2.0)
+    assert not torch.allclose(base(x)["final_log_probs"],
+                              m(x)["final_log_probs"], atol=1e-6)
+    m.train()
+    m.regions[0].c_agree.zero_()
+    out = m(x)
+    out["final_log_probs"].exp().gather(
+        -1, torch.zeros(2, 12, 1, dtype=torch.long)).sum().backward()
+    g = m.regions[0].c_agree.grad
+    assert g is not None and torch.isfinite(g).all()

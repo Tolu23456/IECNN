@@ -108,6 +108,15 @@ class Region(nn.Module):
         # and without ever materializing [B,T,N,d]. Must be set BEFORE the
         # DotPopulation is built (it decides p_out's shape).
         self.pool_first = bool(m.get("pool_first", False))
+        # gate_agree: the gate's only view of a dot is gamma, a scalar read
+        # of that dot's OWN state — it cannot see the committee. One number
+        # per dot closing that hole: the cosine between the dot's state and
+        # the population mean this position. A dot that disagrees with the
+        # other two is either the one that found something or the one that
+        # went wrong, and nothing in the current gate can express either.
+        # Cost is N*d_s MAC-equivalents per token (~0.4% of the step) and the
+        # scale starts at zero, so the model begins bit-identical to no-gate.
+        self.gate_agree = bool(m.get("gate_agree", False))
         # head_untied: an independent output matrix [d, V] instead of the
         # tied embedding. Same compute per token (d*V either way), +d*V
         # parameters; the transformer baseline has always had one, so tying
@@ -143,6 +152,12 @@ class Region(nn.Module):
         self.id_dim = int(m.get("id_dim", 0)) or d_v
         self.w_id = (nn.Parameter(torch.zeros(self.d, self.n_dots * self.id_dim))
                      if self.id_lags else None)
+        # one scalar per (pass, dot): how much weight to give the dot's
+        # agreement with the population mean. Zero-init => the mechanism is
+        # inert until it is trained, so an arm either keeps it or loses it on
+        # merit and never because of an init accident.
+        self.c_agree = (nn.Parameter(torch.zeros(self.n_dots))
+                        if self.gate_agree else None)
         self.ngram_r = int(m.get("ngram_bias", 0))
         if self.ngram_r > 0:
             e1 = torch.empty(vocab_size, self.ngram_r)
@@ -701,8 +716,18 @@ class Region(nn.Module):
             if last:
                 e_state_last = out.e_state
 
+            gam = out.gamma
+            if self.c_agree is not None:
+                # cos(s_n, mean_m s_m) per position: one number saying whether
+                # this dot is with the committee or on its own. The mean is
+                # over dots at the SAME position, so it is causal by
+                # construction and needs no extra pass.
+                mstate = out.state.mean(dim=2, keepdim=True)
+                cos = torch.nn.functional.cosine_similarity(
+                    out.state, mstate.expand_as(out.state), dim=-1)
+                gam = gam + self.c_agree.view(1, 1, n) * cos
             tr_c, w_c = self._pass_hidden(
-                out.gamma, out.trust_term,
+                gam, out.trust_term,
                 trust.reshape(b, t, n) if trust is not None else None,
                 dot_mask, tau_p, 0.0 if hard_mode else floor)
             if self.use_weights:
