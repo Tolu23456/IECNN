@@ -764,6 +764,24 @@ ARMS = {
         global_read=True, spans=(8,), head_post=256, head_post_layers=5,
         read_ln=True, head_ln=True, global_decay=True),
         {"lr": 2e-3, "swa": 0.99}),
+    # --- SEED REPLICATION of the headline claim -----------------------------
+    # The d128 family beats tf by 0.007 (x4) / 0.018 (x5) in one session. The
+    # seed noise on a single run is 0.02-0.05, so that is not yet evidence;
+    # the ledger's own rule says a claim needs >=2 seeds or a margin above the
+    # noise. These are the SAME configs with seed 1, and the seed-0 twins run
+    # in the same session, so the comparison is paired and drift-free.
+    "tf-swa-s1": ("transformer", lambda: tf(96, 4, 3),
+                  {"swa": 0.995, "seed": 1}),
+    "iecnn-n3-x5-p1-ln-decay-d128-s1": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=384, head_post_layers=5,
+        read_ln=True, head_ln=True, global_decay=True),
+        {"lr": 2e-3, "swa": 0.99, "seed": 1}),
+    "iecnn-n3-x4-p1-ln-decay-d128-s1": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=384, head_post_layers=4,
+        read_ln=True, head_ln=True, global_decay=True),
+        {"lr": 2e-3, "swa": 0.99, "seed": 1}),
     # --- pool_first on the frontier: is 7% of the step free? ----------------
     # The dot->stream readout (`p_out`) costs N*d_s*d MACs/token (55k at
     # d192/d_s96/N3 = 7% of the step) and materialises [B,T,N,d] before the
