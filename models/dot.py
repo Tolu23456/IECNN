@@ -588,17 +588,24 @@ class DotPopulation(nn.Module):
         if self.g_decay is not None:
             # ctx_t = sum_{s<=t} e_s gam^(t-s) v_s / sum_{s<=t} e_s gam^(t-s)
             # is still two prefix sums: weight term s by gam^(-s) before the
-            # scan and the common gam^(-t) cancels in the ratio. Literal
-            # gam^(-s) overflows float32 once gam^(-T) > 3e38 (gam < 0.71 at
-            # T=256), so scan gam^((T-1)-s) instead: multiplying EVERY term by
-            # the same constant gam^(T-1) cannot change the ratio, this form
-            # is <= 1 everywhere, and it underflows old positions to zero in
-            # exactly the order the decay says they stop mattering. No T limit.
+            # scan and the common gam^(-t) cancels in the ratio. Two ways to
+            # break float32 here and both are real: gam^(-T) > 3e38 overflows
+            # (gam < 0.71 at T=256), and folding by gam^((T-1)-s) instead
+            # UNDERFLOWS the early terms to zero — at T=256 with gam<0.9 the
+            # whole prefix sums to 0 and the read returns zeros. Keep the
+            # weights >= 1 (folding by gam^(-s)) and bound the top end by
+            # construction with a T-aware floor: gam >= exp(-60/T) means the
+            # largest weight is gam^(-(T-1)) <= e^60 = 1e26, which is 12
+            # decades inside float32's range and still sharp enough that
+            # position 0 is e^-60 of the newest term, i.e. numerically absent.
+            # At T=4096 that floor is 0.9855, which is the honest limit: a
+            # sharper per-step decay than that has no reachable history.
             gam = torch.sigmoid(self._sel(round_idx, self.g_decay))
-            gam = gam.clamp(1e-4, 0.99999).view(1, 1, n)
-            expo = ((t - 1) - torch.arange(t, device=e.device, dtype=e.dtype)
-                    ).view(1, t, 1)
-            e = e * torch.exp(expo * torch.log(gam))
+            gmin = math.exp(-60.0 / max(t - 1, 1))
+            gam = gam.clamp(gmin, 0.99999).view(1, 1, n)
+            inv = torch.exp((-torch.arange(t, device=e.device, dtype=e.dtype)
+                             ).view(1, t, 1) * torch.log(gam))
+            e = e * inv
         cum_e = torch.cumsum(e, dim=1)                               # [B, T, N]
         ev = e.unsqueeze(-1) * full_v.unsqueeze(2)                   # [B, T, N, d_v]
         cum_ev = torch.cumsum(ev, dim=1)                              # [B, T, N, d_v]

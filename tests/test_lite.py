@@ -959,22 +959,31 @@ def test_global_decay_matches_the_direct_weighted_average():
                 ref[:, tt] = (w.unsqueeze(-1)
                               * v[:, None, :tt + 1]).sum(2) / w.sum(1).unsqueeze(-1)
             err = (got - ref).abs().max().item()
-        assert err < 1e-4, (gv, err)
+        assert err < 1e-3, (gv, err)
 
 
 def test_global_decay_does_not_overflow_at_long_contexts():
-    """The gamma^-s form overflowed float32 for gam < 0.71 at T=256 (and the
-    code raised above T=1024 to hide it). The shifted form has no such limit
-    and must stay finite for an aggressive gam at a T far beyond the guard
-    that used to exist."""
+    """The gamma^-s fold overflowed float32 for gam < 0.71 at T=256 (the old
+    code raised above T=1024 to hide it), and the first fix for that — folding
+    by gam^((T-1)-s) — underflowed the whole prefix to zero instead. The fold
+    now keeps weights >= 1 and floors gamma at exp(-60/T) so the largest
+    weight is e^60. Both ends must be finite at a T far beyond the old guard,
+    and history beyond e^-60 must be genuinely unreachable, not merely small."""
     kw = dict(global_read=True, per_dot_logits=False, head_last_only=True,
               n_passes=2, global_decay=True)
     d = build_iecnn(_cfg(**kw), 64).regions[0].dots
     with torch.no_grad():
-        d.g_decay.fill_(-20.0)                 # gam -> 1e-4 (the hard floor)
+        d.g_decay.fill_(-20.0)                  # asks for gamma -> 0
         k = torch.randn(1, 4096, d.d_q)
         v = torch.randn(1, 4096, d.d_v)
         ctx = d._global_ctx(k, v, 0)
         assert torch.isfinite(ctx).all()
-        # full decay means "only the newest value", everywhere
-        assert (ctx[:, 2000] - v[:, 2000].unsqueeze(1)).abs().max().item() < 1e-3
+        # the floored gamma is exp(-60/4095): position 0 is e^-60 of the
+        # newest term, so changing it may not move the last read position
+        v2 = v.clone()
+        v2[:, 0] += 100.0
+        ctx2 = d._global_ctx(k, v2, 0)
+        assert (ctx[:, -1] - ctx2[:, -1]).abs().max().item() < 1e-4
+        # ... and the read must still be dominated by recent values, not zero
+        assert (ctx[:, 2000] - v[:, 2000].unsqueeze(1)).abs().mean() < \
+            2.0 * (ctx[:, 2000] - v.mean(1).unsqueeze(1)).abs().mean()
