@@ -490,14 +490,25 @@ class DotPopulation(nn.Module):
                                            q_add=q_add, cache=cache)
         b, t, _ = full_v.shape
         n = self.N
-        sc = torch.einsum("bsj,nj->bns", full_k, self._sel(round_idx, self.q))
-        sc = sc / math.sqrt(self.d_q)
-        e = torch.exp(sc - sc.amax(-1, keepdim=True))
-        cum_e = torch.cumsum(e, dim=-1)                              # [B, N, T]
-        ev = e.unsqueeze(2) * full_v.transpose(1, 2).unsqueeze(1)     # [B, N, d_v, T]
-        cum_ev = torch.cumsum(ev, dim=-1)
-        g = cum_ev / cum_e.unsqueeze(2).clamp_min(1e-9)                # [B,N,d_v,T]
-        return g.permute(0, 3, 1, 2).contiguous()                    # [B, T, N, d_v]
+        # Keep the whole prefix scan in [B, T, ...] memory order. The obvious
+        # [B, N, T] formulation gets there by permuting a contiguous [B,T,N]
+        # bmm result, i.e. it hands downstream pointwise ops a (768, 1, 3)
+        # strided buffer; torch.compile's Inductor then mis-codegens that
+        # buffer on CUDA (size [32,3,256], stride [768,1,3]) and the whole
+        # arm crashes at the first step. Scanning along dim=1 is the same
+        # arithmetic with no permutes anywhere and returns the layout the
+        # caller wants, so it is both faster to trace and no slower to run.
+        sc = torch.matmul(full_k, self._sel(round_idx, self.q).t())
+        sc = sc / math.sqrt(self.d_q)                                # [B, T, N]
+        # Stabilise over TIME (dim=1), exactly as the [B,N,T] version did over
+        # its last dim: a per-position constant cancels in the ratio either
+        # way, but the time-axis max keeps the cumsum terms O(1) so float32
+        # does not lose digits in the prefix sum.
+        e = torch.exp(sc - sc.amax(dim=1, keepdim=True))
+        cum_e = torch.cumsum(e, dim=1)                               # [B, T, N]
+        ev = e.unsqueeze(-1) * full_v.unsqueeze(2)                   # [B, T, N, d_v]
+        cum_ev = torch.cumsum(ev, dim=1)                              # [B, T, N, d_v]
+        return cum_ev / cum_e.unsqueeze(-1).clamp_min(1e-9)
 
     def _global_ctx_linear(self, full_k, full_v, round_idx: int,
                            q_add=None, cache: dict | None = None) -> torch.Tensor:
