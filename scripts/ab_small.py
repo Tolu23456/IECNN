@@ -851,6 +851,18 @@ ARMS = {
         global_read=True, spans=(8,), head_post=512, head_post_layers=3,
         read_ln=True, head_ln=True, global_decay=True),
         {"lr": 2e-3, "swa": 0.99, "compile": "noscan"}),
+    # --- is the long-budget PLATEAU an optimisation artefact? --------------
+    # At 900 s the d128 arms flatten at ~2.01-2.03 while tf keeps falling to
+    # 1.84, and bpc_train flattens with them (1.892 vs val 1.952), so it is not
+    # variance. One candidate is simply the learning rate: every arm in this
+    # ledger runs a CONSTANT lr tuned for 180 s runs (2e-3 for iecnn, 1e-3 for
+    # tf), and 30k+ steps at 2e-3 may be bouncing around a basin the
+    # transformer quietly anneals into. Same arm, halved lr, nothing else.
+    "iecnn-n3-x3-p1-ln-decay-d128-w512-lr1": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=512, head_post_layers=3,
+        read_ln=True, head_ln=True, global_decay=True),
+        {"lr": 1e-3, "swa": 0.99}),
     # --- a compile-friendly read: prefix SUM -> masked MATMUL --------------
     # The one graph break the region was forced to keep is an eager boundary
     # around the prefix scan (Inductor's SplitScan lowering crashed on CUDA).
