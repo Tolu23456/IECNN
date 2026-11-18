@@ -122,6 +122,55 @@ class Region(nn.Module):
         self.q_from_input = bool(m.get("query_from_input", False))
         self.w_qi = (nn.Parameter(torch.zeros(self.d, self.d_q))
                      if self.q_from_input else None)
+        # --- exact-token-identity pathways (2026-11-18) -------------------
+        # The read is a POOLED window: it tells a dot what the neighbourhood
+        # *means*, not which tokens are in it. Byte-level text is strongly
+        # order-2 (val set: H0=4.82, H1=3.85, H2=3.68 bits/byte), so exact
+        # short-range identity is the cheapest signal a softmax-pooled read
+        # throws away. Two independent, near-zero-MAC paths:
+        #   id_lags  : dot n gets rows[t-(n+1)] projected into its VALUE
+        #              width and ADDED to the pooled ctx. No new cell input
+        #              width, no extra cell GEMM — one [d -> N*id_dim] GEMM
+        #              per forward (4.2M MACs at N=4,d=128,id=16) plus a
+        #              shift/stack. Each dot is born with its own lag, so
+        #              the committee is a multi-lag n-gram mixture.
+        #   ngram_bias: a rank-r factorised order-1 term on the head logits,
+        #              bias = E1[x_{t-1}] @ E2^T (2*V*r params, 4.2M MACs at
+        #              r=32). Starts as a weak random bigram, not neutral:
+        #              a product of two zero-initialised factors has zero
+        #              gradient, so both factors must start non-zero.
+        self.id_lags = bool(m.get("id_lags", False))
+        self.id_dim = int(m.get("id_dim", 0)) or d_v
+        self.w_id = (nn.Parameter(torch.zeros(self.d, self.n_dots * self.id_dim))
+                     if self.id_lags else None)
+        self.ngram_r = int(m.get("ngram_bias", 0))
+        if self.ngram_r > 0:
+            e1 = torch.empty(vocab_size, self.ngram_r)
+            e2 = torch.empty(vocab_size, self.ngram_r)
+            nn.init.normal_(e1, std=0.02)
+            nn.init.normal_(e2, std=0.02)
+            self.ng_e1 = nn.Parameter(e1)
+            self.ng_e2 = nn.Parameter(e2)
+        else:
+            self.ng_e1 = None
+            self.ng_e2 = None
+        # head_rank: low-rank output head logits = (h A) B with A [d,r],
+        # B [r,V]. The tied head costs d*V MACs/token (12.6M at d=96,V=256)
+        # — as much as the whole cell. A rank-r bottleneck cuts that to
+        # r*(d+V), e.g. 11.3M -> 5.9M at d=96/r=48. Not tied to the
+        # embedding; the memory rows keep their own embedding.
+        self.head_rank = int(m.get("head_rank", 0))
+        if self.head_rank > 0 and not bool(m.get("head_untied", False)):
+            a = torch.empty(self.d, self.head_rank)
+            b = torch.empty(self.head_rank, vocab_size)
+            nn.init.normal_(a, std=1.0 / math.sqrt(self.d))
+            nn.init.normal_(b, std=0.02)
+            self.w_head_a = nn.Parameter(a)
+            self.w_head_b = nn.Parameter(b)
+        else:
+            self.head_rank = 0
+            self.w_head_a = None
+            self.w_head_b = None
         self.head_untied = bool(m.get("head_untied", False))
         if self.head_untied:
             w = torch.empty(self.d, vocab_size)
@@ -150,7 +199,9 @@ class Region(nn.Module):
             global_read=self.global_read,
             read_schedule=str(m.get("read_schedule", "mix")),
             in_ln=bool(m.get("cell_ln", False)),
-            share_cell=bool(m.get("share_cell", False)))
+            share_cell=bool(m.get("share_cell", False)),
+            carry_state=bool(m.get("state_carry", False)),
+            carry_chunk=int(m.get("carry_chunk", 8)))
         # Lean passes: in hidden mode the pooled shared head and the per-dot
         # e_state projection are only consumed on the LAST pass. With
         # head_last_only the earlier passes skip both (they still update the
@@ -263,7 +314,10 @@ class Region(nn.Module):
         return (-dist).flip(0)        # ascending offsets, slot -1 = current
 
     def _head_logits(self, h: torch.Tensor, emb_table: torch.Tensor):
-        """[.., d] -> [.., V]. Tied embedding (default) or an untied head."""
+        """[.., d] -> [.., V]. Tied embedding (default), an untied head, or
+        the low-rank bottleneck (h A) B."""
+        if self.head_rank > 0:
+            return h.matmul(self.w_head_a).matmul(self.w_head_b)
         if self.w_head is not None:
             return h.matmul(self.w_head)
         return h.matmul(emb_table.t())
@@ -455,6 +509,8 @@ class Region(nn.Module):
             k_all, v_all = self._full_kv(rows)
             full_k, full_v = k_all, v_all
         q_add = rows.matmul(self.w_qi) if self.w_qi is not None else None
+        # pass-invariant exact-identity code (one GEMM per forward)
+        ctx_add = self._id_code(rows) if self.w_id is not None else None
 
         # Read windows. Normally every pass reads the SAME window, and the
         # attention cache is shared so the read is computed once (that is
@@ -518,7 +574,7 @@ class Region(nn.Module):
                             emb_table=emb_table, attn_cache=attn_cache,
                             want_log_pi=want_pi, slot_table=slots,
                             want_e_state=want_e, full_k=full_k,
-                            full_v=full_v, q_add=q_add)
+                            full_v=full_v, q_add=q_add, ctx_add=ctx_add)
             state_prev = out.state
             if slots is not None:
                 # e13: detached scan — the table this pass wrote is read by
@@ -599,20 +655,49 @@ class Region(nn.Module):
                 "per_pass": per_pass,
                 "state_final": state_prev}
 
+    def _id_code(self, rows: torch.Tensor) -> torch.Tensor:
+        """[B,T,d] -> [B,T,N,id_dim]: dot n sees the EXACT token at lag n+1.
+
+        Region 1's rows ARE the token embeddings, so a time shift of the rows
+        is a token shift — no token ids needed, and deeper regions get the
+        same mechanism on their own row sequence. Position t reads rows[t-k-1]
+        (zero where t-k-1 < 0): strictly causal, no wrap-around.
+        """
+        b, t, _ = rows.shape
+        n = self.n_dots
+        p = rows.matmul(self.w_id).reshape(b, t, n, self.id_dim)  # ONE GEMM
+        p = F.pad(p, (0, 0, 0, 0, n, 0))                # n zero rows up front
+        return torch.stack([p[:, n - k - 1: n - k - 1 + t, k]
+                            for k in range(n)], dim=2)   # [B,T,N,id_dim]
+
     # ------------------------------------------------------------------
     def forward(self, rows: torch.Tensor, emb_table: torch.Tensor,
                 tau0: float = 1.0, hard_mode: bool = False,
-                floor: float = 0.0, training: bool | None = None) -> dict:
+                floor: float = 0.0, training: bool | None = None,
+                ids: torch.Tensor | None = None) -> dict:
         """rows [B, T, d] -> the region's consensus and diagnostics.
 
         floor: the per-dot weight floor eps (spec 04 section 3); callers hand
         0.1/N during training and 0 for the final phase / inference.
+        ids: input token ids [B, T], only consumed by the ngram_bias term.
         """
         if training is None:
             training = self.training
         if self.head_mode == "hidden":
-            return self._forward_hidden(rows, emb_table, tau0, hard_mode,
-                                        floor, training)
+            out = self._forward_hidden(rows, emb_table, tau0, hard_mode,
+                                       floor, training)
+        else:
+            out = self._forward_prob(rows, emb_table, tau0, hard_mode,
+                                     floor, training)
+        if self.ng_e1 is not None and ids is not None:
+            # exact order-1 prior on the head logits; a lookup + one GEMM.
+            prior = self.ng_e1[ids].matmul(self.ng_e2.t())      # [B,T,V]
+            out["log_b"] = F.log_softmax(out["log_b"] + prior, dim=-1)
+        return out
+
+    def _forward_prob(self, rows: torch.Tensor, emb_table: torch.Tensor,
+                      tau0: float, hard_mode: bool, floor: float,
+                      training: bool) -> dict:
         device = rows.device
         b, t = rows.shape[0], rows.shape[1]
         n = self.n_dots
@@ -622,6 +707,8 @@ class Region(nn.Module):
             k_all, v_all = self._full_kv(rows)
             full_k, full_v = k_all, v_all
         q_add = rows.matmul(self.w_qi) if self.w_qi is not None else None
+        # pass-invariant exact-identity code (one GEMM per forward)
+        ctx_add = self._id_code(rows) if self.w_id is not None else None
 
         # same per-pass band machinery as _forward_hidden (bands mode gives
         # each pass its own window, so each needs its own attention cache)
@@ -691,7 +778,7 @@ class Region(nn.Module):
                             msg_in=msg_read if p > 1 else None, state=state,
                             emb_table=emb_table, attn_cache=attn_cache,
                             slot_table=slots, full_k=full_k, full_v=full_v,
-                            q_add=q_add)
+                            q_add=q_add, ctx_add=ctx_add)
             state_prev = out.state
             if slots is not None:
                 slots = self.dots.update_slots(state_prev, slots, p - 1)

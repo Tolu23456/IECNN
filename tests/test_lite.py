@@ -461,3 +461,167 @@ def test_query_from_input_starts_static_and_stays_causal():
     c = _fwd(qin, x3)
     assert (a[:, 5] - c[:, 5]).abs().max().item() > 1e-6, \
         "input-conditioned query did not react to its own token"
+
+
+def test_id_lags_are_exact_shifted_identities():
+    """id_lags: dot k must be injected with rows[t-k-1] (its own lag), zero
+    before the sequence start, and never with a future row."""
+    kw = dict(global_read=True, head_last_only=True, per_dot_logits=False,
+              n_passes=2, cell="lug", id_lags=True)
+    model = build_iecnn(_cfg(**kw), 64)
+    r = model.regions[0]
+    with torch.no_grad():
+        r.w_id.normal_(std=0.2)                   # non-trivial projection
+    # w_id is [d, N*id]: blocks of `id` are dot-major, so view d x N x id
+    w = r.w_id.reshape(r.d, r.n_dots, r.id_dim).permute(1, 0, 2)
+    rows = torch.randn(2, 12, r.d) * 0.3
+    code = r._id_code(rows)                       # [B,T,N,id_dim]
+    T = rows.shape[1]
+    for k in range(r.n_dots):
+        lag = k + 1
+        # position t >= lag reads rows[t-lag] through dot k's projection
+        want = rows[:, :T - lag].matmul(w[k])
+        got = code[:, lag:, k]
+        assert torch.allclose(got, want, atol=1e-6), (k, (got - want).abs().max())
+        # positions before the lag read exactly zero (no wrap-around)
+        assert code[:, :lag, k].abs().max().item() == 0.0
+
+    model.eval()
+    x = torch.randint(0, 64, (2, 12))
+    a = _fwd(model, x)
+    x2 = x.clone(); x2[:, 9] = (x2[:, 9] + 7) % 64      # future token
+    b = _fwd(model, x2)
+    assert (a[:, :9] - b[:, :9]).abs().max().item() < 1e-6
+
+
+def test_ngram_bias_is_a_normalised_order1_prior():
+    """ngram_bias adds E1[x_{t-1}] @ E2^T to the head logits: valid log-probs,
+    uses exactly the previous token, and changes nothing when ids are absent."""
+    kw = dict(global_read=True, head_last_only=True, per_dot_logits=False,
+              n_passes=2, cell="lug")
+    base = build_iecnn(_cfg(**kw), 64).eval()
+    ng = build_iecnn(_cfg(ngram_bias=32, **kw), 64)
+    ng.load_state_dict(base.state_dict(), strict=False)
+    ng.eval()
+    x = torch.randint(0, 64, (2, 12))
+    r = ng.regions[0]
+    with torch.no_grad():
+        a = _fwd(base, x)
+        b = _fwd(ng, x)
+        # ids=None must skip the term exactly (other callers/tests rely on it)
+        no_ids = r(ng.embed(x), ng.embed.weight, ids=None)["log_b"]
+        assert torch.allclose(no_ids, a, atol=1e-6), "bias leaked without ids"
+        assert torch.allclose(b.exp().sum(-1), torch.ones(2, 12), atol=1e-5)
+        # exact wiring: log_b == log_softmax(head + prior), prior at t reads
+        # E1[x_{t-1}] (zero at t=0), and nothing else
+        raw = torch.randn(2, 12, 64) * 0.5
+        orig = r._forward_hidden
+        r._forward_hidden = lambda *a, **k: {"log_b": raw}
+        try:
+            got = r(ng.embed(x), ng.embed.weight, ids=x)["log_b"]
+        finally:
+            r._forward_hidden = orig
+    # position t predicts x_{t+1} and has already seen x_t, so the exact
+    # order-1 term is E1[x_t] — always in the causal past, no shift needed
+    prior = r.ng_e1[x].matmul(r.ng_e2.t())
+    want = torch.log_softmax(raw + prior, dim=-1)
+    assert torch.allclose(got, want, atol=1e-6), (got - want).abs().max()
+    assert prior.abs().max().item() > 0.0
+
+
+def test_head_rank_matches_its_factors_and_is_cheaper():
+    """head_rank must compute (h A) B — no hidden extra term — and must beat
+    the tied head on MACs (r*(d+V) < d*V)."""
+    kw = dict(global_read=True, head_last_only=True, per_dot_logits=False,
+              n_passes=2, cell="lug", d=32)
+    model = build_iecnn(_cfg(head_rank=12, **kw), 64).eval()
+    r = model.regions[0]
+    h = torch.randn(7, r.d)
+    got = r._head_logits(h, model.embed.weight)
+    want = h.matmul(r.w_head_a).matmul(r.w_head_b)
+    assert torch.allclose(got, want, atol=1e-6), (got - want).abs().max()
+    assert r.head_rank * (r.d + 64) < r.d * 64, "rank head must be cheaper"
+    x = torch.randint(0, 64, (2, 12))
+    lp = _fwd(model, x)
+    assert lp.shape == (2, 12, 64)
+    assert torch.allclose(lp.exp().sum(-1), torch.ones(2, 12), atol=1e-5)
+
+
+def test_carry_scan_matches_sequential_loop():
+    """_carry_scan must implement s_t = a_t*s_{t-1} + b_t EXACTLY, for any T
+    (including T not divisible by the chunk size), for any chunk size, and
+    with the initial state reaching position 0."""
+    dots = build_iecnn(_cfg(cell="lug", state_carry=True), 64).regions[0].dots
+    torch.manual_seed(0)
+    for t in (1, 7, 8, 12, 16, 64):
+        for c in (1, 3, 8, 16):
+            dots.carry_chunk = c
+            a = torch.sigmoid(torch.randn(2, t, 3, 5))
+            bb = torch.randn(2, t, 3, 5) * 0.1
+            s0 = torch.randn(2, 3, 5)
+            got = dots._carry_scan(a, bb, s0)
+            s = s0
+            want = []
+            for i in range(t):
+                s = a[:, i] * s + bb[:, i]
+                want.append(s)
+            want = torch.stack(want, 1)
+            assert got.shape == want.shape, (t, c, got.shape, want.shape)
+            err = (got - want).abs().max().item()
+            assert err < 1e-6, (t, c, err)
+
+
+def test_carry_scan_is_differentiable_everywhere():
+    """The scan is trained through: every position contributes gradient to
+    a, b and to the sequence-start state."""
+    dots = build_iecnn(_cfg(cell="lug", state_carry=True), 64).regions[0].dots
+    a = torch.sigmoid(torch.randn(2, 12, 3, 5)).requires_grad_(True)
+    bb = torch.randn(2, 12, 3, 5, requires_grad=True)
+    s0 = torch.randn(2, 3, 5, requires_grad=True)
+    out = dots._carry_scan(a, bb, s0)
+    out.pow(2).sum().backward()
+    for name, g in (("a", a.grad), ("b", bb.grad), ("s0", s0.grad)):
+        assert g is not None and torch.isfinite(g).all(), name
+    assert a.grad.abs().sum() > 0 and bb.grad.abs().sum() > 0 and s0.grad.abs().sum() > 0
+
+
+def test_state_carry_reaches_past_the_window_and_stays_causal():
+    """With global_read OFF, the only way information can travel further
+    back than the read window is the carried state. Perturbing position 2
+    (outside position 11's 8-token window) must change position 11 and must
+    NOT change positions before 2."""
+    kw = dict(global_read=False, head_last_only=True, per_dot_logits=False,
+              n_passes=2, cell="lug", state_carry=True, spans=[8])
+    m = build_iecnn(_cfg(**kw), 64).eval()
+    x = torch.randint(0, 64, (1, 12))
+    with torch.no_grad():
+        a = _fwd(m, x)
+        x2 = x.clone()
+        x2[0, 2] = (int(x2[0, 2]) + 9) % 64
+        b = _fwd(m, x2)
+    assert (a[:, :2] - b[:, :2]).abs().max().item() < 1e-6, "carry leaked the future"
+    assert (a[:, 11] - b[:, 11]).abs().max().item() > 1e-6, \
+        "carried state did not reach past the window"
+
+
+def test_state_carry_trains_and_differs_from_reset():
+    """state_carry is a real change of computation (not a no-op), it runs a
+    full backward, and it keeps every parameter finite."""
+    kw = dict(global_read=True, head_last_only=True, per_dot_logits=False,
+              n_passes=2, cell="lug")
+    base = build_iecnn(_cfg(**kw), 64)
+    car = build_iecnn(_cfg(state_carry=True, **kw), 64)
+    car.load_state_dict(base.state_dict())
+    base.eval(); car.eval()
+    x = torch.randint(0, 64, (2, 12))
+    assert (_fwd(base, x) - _fwd(car, x)).abs().max().item() > 1e-5
+
+    car.train()
+    opt = torch.optim.AdamW(car.parameters(), lr=1e-3)
+    y = torch.randint(0, 64, (2, 12))
+    for _ in range(2):
+        lp = car(x)["final_log_probs"]
+        loss = -lp.reshape(-1, 64).gather(1, y.reshape(-1, 1)).mean()
+        opt.zero_grad(); loss.backward(); opt.step()
+    assert math.isfinite(loss.item())
+    assert all(torch.isfinite(p).all() for p in car.parameters())

@@ -29,7 +29,18 @@ ONLY = sys.argv[2].split(",") if len(sys.argv) > 2 else None
 # of the machine/harness, never of one architecture).
 B = int(os.environ.get("ARM_B", 8))
 torch.set_num_threads(int(os.environ.get("ARM_THREADS", 2)))
-T = 64
+# Context, corpus and val sampling are harness knobs (both arms always get
+# the same value). Defaults reproduce the 2-vCPU toy exactly.
+T = int(os.environ.get("ARM_T", 64))
+TRAIN_PATH = os.environ.get("ARM_TRAIN", "data/toy_train.txt")
+VAL_PATH = os.environ.get("ARM_VAL", "data/toy_val.txt")
+N_TRAIN = int(os.environ.get("ARM_NTRAIN", 4_000_000))
+N_VAL = int(os.environ.get("ARM_NVAL", 60_000))
+VALW = int(os.environ.get("ARM_VALW", 160))
+# val windows are contiguous from the start by default (the toy val is only
+# 60 KB). On a multi-MB val set set ARM_VALSTRIDE>1 to spread the windows
+# over the whole file instead of scoring only its first 40 KB.
+VALSTRIDE = int(os.environ.get("ARM_VALSTRIDE", 1))
 V = 256                      # byte-level toy vocab
 MARK_S = 30.0
 
@@ -43,7 +54,9 @@ def iecnn(cell="gru", lean=False, n_passes=3, n_dots=8, d_s=128, d=128,
           window_local=None, seclusion_topk=0, pool_first=False,
           slot_slots=0, dist_bias=False, dynamic_query=False,
           global_read=False, read_schedule="mix", head_untied=False,
-          cell_ln=False, share_cell=False, query_from_input=False):
+          cell_ln=False, share_cell=False, query_from_input=False,
+          id_lags=False, ngram_bias=0, head_rank=0,
+          state_carry=False, carry_chunk=8):
     m = {
         "kind": "iecnn", "d": d, "d_q": 16, "d_v": 32, "d_s": d_s,
         "n_dots": n_dots, "n_regions": 1, "n_passes": n_passes,
@@ -65,6 +78,11 @@ def iecnn(cell="gru", lean=False, n_passes=3, n_dots=8, d_s=128, d=128,
         "cell_ln": cell_ln,
         "share_cell": share_cell,
         "query_from_input": query_from_input,
+        "id_lags": id_lags,
+        "ngram_bias": ngram_bias,
+        "head_rank": head_rank,
+        "state_carry": state_carry,
+        "carry_chunk": carry_chunk,
     }
     if window_reach is not None:
         m["window_reach"] = window_reach
@@ -76,9 +94,10 @@ def iecnn(cell="gru", lean=False, n_passes=3, n_dots=8, d_s=128, d=128,
             "data": {"seq_len": T}}
 
 
-def tf(d_model=96, n_heads=4, n_layers=3):
+def tf(d_model=96, n_heads=4, n_layers=3, ngram_bias=0):
     return {"model": {"kind": "transformer", "d_model": d_model,
-                      "n_heads": n_heads, "n_layers": n_layers},
+                      "n_heads": n_heads, "n_layers": n_layers,
+                      "ngram_bias": ngram_bias},
             "data": {"seq_len": T}}
 
 
@@ -314,6 +333,146 @@ ARMS = {
     "iecnn-lr2-g8-n4-p1": ("iecnn", lambda: iecnn(
         "lug", True, n_passes=1, n_dots=4, d_s=64, per_dot_logits=False,
         global_read=True, spans=(8,)), {"lr": 2e-3, "swa": 0.99}),
+    # --- cost frontier at equal wall clock (compiled) -------------------
+    # torch.compile fuses the elementwise cell graph on CPU: measured
+    # -24% s/step for IECNN vs -5% for the transformer (GEMM-bound), so the
+    # cheap-config frontier must be re-mapped with compilation ON.
+    "iecnn-lr2-g8-n3-ds48-p1": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=48, per_dot_logits=False,
+        global_read=True, spans=(8,)), {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-lr2-g8-n2-ds48": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=2, d_s=48, per_dot_logits=False,
+        global_read=True, spans=(8,)), {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-lr2-g8-n3-ds32": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=3, d_s=32, per_dot_logits=False,
+        global_read=True, spans=(8,)), {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-lr2-g8-n3-ds48-d96": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=3, d_s=48, d=96, per_dot_logits=False,
+        global_read=True, spans=(8,)), {"lr": 2e-3, "swa": 0.99}),
+    # --- head width d: the biggest remaining GEMM (2026-11-18) ----------
+    # logits = h[d] @ E[d,V]; at d=128 that is 16.8M MACs/step, comparable to
+    # the whole cell. d also sets the memory-row width. Compiled 150 s run
+    # showed d=128 DEGRADING after ~2M tokens (4.06 -> 4.19) while d=96 kept
+    # falling (4.29 -> 4.05): the wide head is not just expensive, it is
+    # worse-conditioned at this budget.
+    "iecnn-lr2-g8-n3-ds48-d80": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=3, d_s=48, d=80, per_dot_logits=False,
+        global_read=True, spans=(8,)), {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-lr2-g8-n3-ds48-d64": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=3, d_s=48, d=64, per_dot_logits=False,
+        global_read=True, spans=(8,)), {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-lr2-g8-n3-ds64-d96": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=3, d_s=64, d=96, per_dot_logits=False,
+        global_read=True, spans=(8,)), {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-lr2-g8-n4-ds48-d96": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=4, d_s=48, d=96, per_dot_logits=False,
+        global_read=True, spans=(8,)), {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-lr2-g8-n3-ds48-d96-b32": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=3, d_s=48, d=96, per_dot_logits=False,
+        global_read=True, spans=(8,)), {"lr": 2e-3, "swa": 0.99, "batch": 32}),
+    # lr / swa retune on the d96 shape (150 s now buys ~7700 steps, 35% more
+    # than when lr 2e-3 was chosen at ~5100 steps).
+    "iecnn-g8-d96-lr15": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=3, d_s=48, d=96, per_dot_logits=False,
+        global_read=True, spans=(8,)), {"lr": 1.5e-3, "swa": 0.99}),
+    "iecnn-g8-d96-lr25": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=3, d_s=48, d=96, per_dot_logits=False,
+        global_read=True, spans=(8,)), {"lr": 2.5e-3, "swa": 0.99}),
+    "iecnn-g8-d96-swa995": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=3, d_s=48, d=96, per_dot_logits=False,
+        global_read=True, spans=(8,)), {"lr": 2e-3, "swa": 0.995}),
+    "iecnn-lr2-g8-n3-ds48-d96-r48": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=3, d_s=48, d=96, per_dot_logits=False,
+        global_read=True, spans=(8,), head_rank=48),
+        {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-lr2-g8-n3-ds48-d96-r24": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=3, d_s=48, d=96, per_dot_logits=False,
+        global_read=True, spans=(8,), head_rank=24),
+        {"lr": 2e-3, "swa": 0.99}),
+    # --- content-addressed read + exact identity, on the d96 shape ------
+    # The d96 control reads with a STATIC query: "a dot always asks the same
+    # question of every window", so it can only average the window, never
+    # address it by content. query_from_input gives each dot a query built
+    # from the CURRENT token (q_t = q_n + W x_t, W zero-init) so slot scores
+    # become "how much does this past token look like the one I am holding".
+    # Cost: one [d,d_q] GEMM, no extra reads, still causal.
+    # id/ng are the batch-19 mechanisms retested on the current corpus split
+    # (the old split was book-disjoint; this one is same-source, so identity
+    # copying is worth more here). Same flags, same code.
+    "iecnn-d96-qin": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=3, d_s=48, d=96, per_dot_logits=False,
+        global_read=True, spans=(8,), query_from_input=True),
+        {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-d96-id": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=3, d_s=48, d=96, per_dot_logits=False,
+        global_read=True, spans=(8,), id_lags=True),
+        {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-d96-ng": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=3, d_s=48, d=96, per_dot_logits=False,
+        global_read=True, spans=(8,), ngram_bias=32),
+        {"lr": 2e-3, "swa": 0.99}),
+    # --- cross-position state carry (2026-11-18) ------------------------
+    # The cell has always RESET to the learned s0 at every position, so the
+    # dots are a per-position committee and all temporal structure lives in
+    # the fixed read window. A toy measurement put the reset at ~0.42 bpc
+    # (reset 4.21 vs carry 3.79), the largest single lever measured so far.
+    # state_carry turns the cell into an exact scan over the sequence (gate
+    # loses its state term -> affine recurrence -> two-level scan, no
+    # division). lr variants because a 64-step recurrence changes the
+    # effective gradient scale; c16 doubles the chunk depth of the scan.
+    "iecnn-d96-carry": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=3, d_s=48, d=96, per_dot_logits=False,
+        global_read=True, spans=(8,), state_carry=True),
+        {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-d96-carry-lr15": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=3, d_s=48, d=96, per_dot_logits=False,
+        global_read=True, spans=(8,), state_carry=True),
+        {"lr": 1.5e-3, "swa": 0.99}),
+    "iecnn-d96-carry-lr25": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=3, d_s=48, d=96, per_dot_logits=False,
+        global_read=True, spans=(8,), state_carry=True),
+        {"lr": 2.5e-3, "swa": 0.99}),
+    "iecnn-d96-carry-c16": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=3, d_s=48, d=96, per_dot_logits=False,
+        global_read=True, spans=(8,), state_carry=True, carry_chunk=16),
+        {"lr": 2e-3, "swa": 0.99}),
+    # --- op-shape: rows per step at equal wall clock (2026-11-18) -------
+    # Measured throughput (scripts/throughput.py) is 15.5k tok/s at B=8 but
+    # 21k at B=32 for the same model: bigger steps are cheaper per token.
+    # Wall clock is fixed, so a wider step buys tokens; the question is
+    # whether the loss of update frequency costs more than the tokens gain.
+    "tf-swa-b32": ("transformer", lambda: tf(96, 4, 3),
+                   {"swa": 0.995, "batch": 32}),
+    "iecnn-lr2-g8-n3-ds48-b16": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=3, d_s=48, per_dot_logits=False,
+        global_read=True, spans=(8,)), {"lr": 2e-3, "swa": 0.99, "batch": 16}),
+    "iecnn-lr2-g8-n3-ds48-b32": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=3, d_s=48, per_dot_logits=False,
+        global_read=True, spans=(8,)), {"lr": 2e-3, "swa": 0.99, "batch": 32}),
+    "iecnn-lr2-g8-n3-ds48-b32-lr4": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=3, d_s=48, per_dot_logits=False,
+        global_read=True, spans=(8,)), {"lr": 4e-3, "swa": 0.99, "batch": 32}),
+    # --- exact-identity pathways (2026-11-18) ---------------------------
+    # The read is a POOLED window: it carries what the neighbourhood means,
+    # not which tokens are in it. Order-2 byte entropy on the val set is
+    # 3.68 bpc while these models sit at ~4.0, so exact short-range identity
+    # is the largest cheap signal still on the table.
+    #   id : dot n is injected with the exact token at lag n+1 (one GEMM,
+    #        no extra cell width: the code is added to the value channel).
+    #   ng : a rank-32 factorised order-1 prior on the head logits
+    #        (lookup + one GEMM, 16k params).
+    "iecnn-lr2-g8-n3-ds48-id": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=3, d_s=48, per_dot_logits=False,
+        global_read=True, spans=(8,), id_lags=True),
+        {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-lr2-g8-n3-ds48-ng": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=3, d_s=48, per_dot_logits=False,
+        global_read=True, spans=(8,), ngram_bias=32),
+        {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-lr2-g8-n3-ds48-id-ng": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=3, d_s=48, per_dot_logits=False,
+        global_read=True, spans=(8,), id_lags=True, ngram_bias=32),
+        {"lr": 2e-3, "swa": 0.99}),
     # --- ONE shared cell, N specialised reads ---------------------------
     # The cell is the expensive part and it is 4 tiny GEMMs (one per dot).
     # Sharing it across dots makes it ONE wide GEMM (~4x the rows, same
@@ -391,6 +550,11 @@ ARMS = {
         global_read=True, spans=(8,)), {"lr": 3e-3, "swa": 0.995}),
     # --- tail weight averaging (free: no extra training steps) ----------
     "tf-swa": ("transformer", lambda: tf(96, 4, 3), {"swa": 0.995}),
+    # fairness control: the transformer gets the identical rank-32 exact
+    # order-1 prior, so "IECNN + prior" is never compared against a
+    # handicapped baseline.
+    "tf-swa-ng": ("transformer", lambda: tf(96, 4, 3, ngram_bias=32),
+                  {"swa": 0.995}),
     "iecnn-lr2-plain-swa": ("iecnn", lambda: iecnn(
         "lug", True, n_passes=2, n_dots=4, d_s=64, per_dot_logits=False),
         {"lr": 2e-3, "swa": 0.995}),
@@ -442,34 +606,52 @@ def load(path: str, n: int) -> torch.Tensor:
     return torch.frombuffer(raw, dtype=torch.uint8).long()
 
 
-train = load("data/toy_train.txt", 4_000_000)
-val = load("data/toy_val.txt", 60_000)
-print(f"tokens train={train.numel()} val={val.numel()} | B={B} T={T} V={V} "
-      f"| budget {BUDGET:.0f}s/arm", flush=True)
+def _fingerprint(path: str, n: int) -> str:
+    """md5 (first 10 hex) of the bytes actually used — hashed as RAW BYTES
+    so it matches `md5sum`, not as an int64 tensor.
+
+    The toy files on the lab VM were silently regenerated on 2026-11-18
+    11:09 (book-disjoint split -> same-source split). Every arm moved 0.72
+    bpc at once, which looked like a mechanism win until the corpus was
+    hashed. Absolute bpc is only comparable between runs with the SAME
+    fingerprint; the in-session control arm still governs every claim.
+    """
+    import hashlib
+    return hashlib.md5(open(path, "rb").read(n)).hexdigest()[:10]
+
+
+train = load(TRAIN_PATH, N_TRAIN)
+val = load(VAL_PATH, N_VAL)
+DATA_FP = f"{_fingerprint(TRAIN_PATH, N_TRAIN)}/{_fingerprint(VAL_PATH, N_VAL)}"
+print(f"train={TRAIN_PATH} val={VAL_PATH} | tokens train={train.numel()} "
+      f"val={val.numel()} | B={B} T={T} valw={VALW} stride={VALSTRIDE} V={V} "
+      f"| budget {BUDGET:.0f}s/arm | data_fp {DATA_FP}", flush=True)
 
 
 _NT = None
 
 
-def batches(seed: int = 0):
+def batches(seed: int = 0, n: int = None):
+    n = B if n is None else int(n)
     g = torch.Generator().manual_seed(seed)
     span = train.numel() - T - 1
     while True:
         # torch.randint over a 4M range measured at 1.19 ms/step — 3.4% of a
         # whole 150 s toy step, paid identically by both arms and buying
         # nothing. torch.rand + scale is the same uniform draw, ~50x cheaper.
-        i = (torch.rand(B, generator=g) * span).long()
+        i = (torch.rand(n, generator=g) * span).long()
         x = torch.stack([train[j:j + T] for j in i])
         y = torch.stack([train[j + 1:j + 1 + T] for j in i])
         yield x, y
 
 
 @torch.no_grad()
-def val_bpc(model, windows: int = 48) -> float:
+def val_bpc(model, windows: int = None) -> float:
+    windows = VALW if windows is None else windows
     model.eval()
     tot, n = 0.0, 0
     for w in range(windows):
-        i = w * T
+        i = w * T * VALSTRIDE
         x = val[i:i + T].unsqueeze(0)
         y = val[i + 1:i + 1 + T].unsqueeze(0)
         if x.shape[1] < T:
@@ -512,14 +694,20 @@ BASE_LR = float(os.environ.get("ARM_LR", "1e-3"))
 
 
 def run(name: str, kind: str, model, lr: float = None,
-        seed: int = None, sched: str = None, swa: float = 0.0) -> dict:
+        seed: int = None, sched: str = None, swa: float = 0.0,
+        eval_model=None, batch: int = None) -> dict:
     lr0 = BASE_LR if lr is None else float(lr)
     sd = SEED if seed is None else int(seed)
     torch.manual_seed(sd)
     opt = torch.optim.AdamW(model.parameters(), lr=1e-3, betas=(0.9, 0.95),
                             weight_decay=0.01)
     n_par = sum(p.numel() for p in model.parameters())
-    gen = batches(sd)
+    em = eval_model if eval_model is not None else model
+    # per-arm batch override: same wall clock, same data, same everything
+    # except how many rows a step carries (op-shape experiment; the harness
+    # default is still one batch for the whole machine).
+    nb = B if batch is None else int(batch)
+    gen = batches(sd, nb)
     sched = sched or ""
     # Tail weight averaging (SWA/EMA). With a constant lr the last steps
     # bounce around the minimum; averaging the tail is a free variance
@@ -528,6 +716,19 @@ def run(name: str, kind: str, model, lr: float = None,
     ema = None
     if swa:
         ema = [p.detach().clone() for p in model.parameters()]
+    # torch.compile: the first calls trace/autotune and are 1-2 orders of
+    # magnitude slower than a steady-state step. They must be paid BEFORE the
+    # wall-clock budget starts, otherwise the arm is timed on its compiler.
+    warm_steps = int(os.environ.get("ARM_WARM", "10")) \
+        if os.environ.get("ARM_COMPILE") == "1" else 0
+    for _ in range(warm_steps):
+        x, y = next(gen)
+        out = model(x)
+        loss = F.cross_entropy(out["final_log_probs"].reshape(-1, V),
+                               y.reshape(-1))
+        opt.zero_grad(set_to_none=True)
+        loss.backward()
+        opt.step()
     t0 = time.time()
     step = 0
     marks = []
@@ -558,22 +759,22 @@ def run(name: str, kind: str, model, lr: float = None,
                                     alpha=1.0 - swa)
         el = time.time() - t0
         if el >= next_mark:
-            marks.append([int(step * B * T), round(val_bpc(model), 4), step])
+            marks.append([int(step * nb * T), round(val_bpc(em), 4), step])
             next_mark += MARK_S
     el = time.time() - t0
     if ema is not None:
         with torch.no_grad():
             for p, a in zip(model.parameters(), ema):
                 p.copy_(a)
-    final = round(val_bpc(model), 4)
+    final = round(val_bpc(em), 4)
     row = {"arm": name, "kind": kind, "seed": sd, "lr": lr0, "sched": sched,
-           "swa": swa,
+           "swa": swa, "data_fp": DATA_FP,
            "params": n_par, "steps": step,
-           "tokens": step * B * T, "s_per_step": round(el / max(step, 1), 4),
-           "s_per_1k_tokens": round(el / max(step * B * T / 1000, 1e-9), 3),
+           "tokens": step * nb * T, "s_per_step": round(el / max(step, 1), 4),
+           "s_per_1k_tokens": round(el / max(step * nb * T / 1000, 1e-9), 3),
            "curve": marks, "bpc_final": final}
     if kind == "iecnn":
-        row["pointers"] = pointer_audit(model)
+        row["pointers"] = pointer_audit(em)
     print("RESULT " + json.dumps(row), flush=True)
     return row
 
@@ -630,7 +831,10 @@ def main():
                  else build_iecnn(cfg, V))
         print(f"--- {name} ({sum(p.numel() for p in model.parameters())} params"
               f"{', lr ' + str(opts['lr']) if 'lr' in opts else ''})", flush=True)
-        rows.append(run(name, kind, model, **opts))
+        inner = model
+        if os.environ.get("ARM_COMPILE") == "1":
+            model = torch.compile(model)
+        rows.append(run(name, kind, model, eval_model=inner, **opts))
 
     common_tok = min(r["tokens"] for r in rows)
     print(f"\n=== SUMMARY (equal wall-clock {BUDGET:.0f}s/arm, "

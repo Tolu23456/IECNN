@@ -41,7 +41,8 @@ class TransformerLanguageModel(nn.Module):
 
     context_length = 256
 
-    def __init__(self, vocab_size: int, d: int, n_heads: int, n_layers: int, seq_len: int = 256):
+    def __init__(self, vocab_size: int, d: int, n_heads: int, n_layers: int,
+                 seq_len: int = 256, ngram_r: int = 0):
         super().__init__()
         self.vocab_size = vocab_size
         self.seq_len = seq_len
@@ -59,6 +60,20 @@ class TransformerLanguageModel(nn.Module):
         self.out = nn.Parameter(torch.zeros(vocab_size, d))
         with torch.no_grad():
             self.out.copy_(self.embed.weight)
+        # fairness control: the SAME rank-r exact order-1 prior the IECNN
+        # arms get (see models/region.py). Identical compute and params, so a
+        # head-to-head stays like-for-like.
+        self.ngram_r = int(ngram_r)
+        if self.ngram_r > 0:
+            e1 = torch.empty(vocab_size, self.ngram_r)
+            e2 = torch.empty(vocab_size, self.ngram_r)
+            nn.init.normal_(e1, std=0.02)
+            nn.init.normal_(e2, std=0.02)
+            self.ng_e1 = nn.Parameter(e1)
+            self.ng_e2 = nn.Parameter(e2)
+        else:
+            self.ng_e1 = None
+            self.ng_e2 = None
 
     def forward(self, x: torch.Tensor, hard_mode: bool = False) -> dict:
         """Causal forward; returns dict with logits and final_log_probs."""
@@ -69,6 +84,8 @@ class TransformerLanguageModel(nn.Module):
             h = block(h)
         h = self.ln_f(h)
         logits = F.linear(h, self.out)
+        if self.ng_e1 is not None:
+            logits = logits + self.ng_e1[x].matmul(self.ng_e2.t())
         return {"logits": logits,
                 "final_log_probs": F.log_softmax(logits, dim=-1)}
 
@@ -119,4 +136,5 @@ def build_transformer_baseline(config: dict, vocab_size: int):
         n_heads=int(m.get("n_heads", 4)),
         n_layers=int(m.get("n_layers", 4)),
         seq_len=int(config.get("data", {}).get("seq_len", 256)),
+        ngram_r=int(m.get("ngram_bias", 0)),
     )

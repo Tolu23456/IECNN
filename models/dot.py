@@ -99,7 +99,8 @@ class DotPopulation(nn.Module):
                  slot_decay: float = 0.5, cell: str = "gru",
                  share_out: bool = False, dist_bias: bool = False,
                  global_read: bool = False, read_schedule: str = "mix",
-                 in_ln: bool = False, share_cell: bool = False):
+                 in_ln: bool = False, share_cell: bool = False,
+                 carry_state: bool = False, carry_chunk: int = 8):
         super().__init__()
         self.N = n_dots
         self.d = d
@@ -220,6 +221,27 @@ class DotPopulation(nn.Module):
         # projection, so specialisation happens on the READ side — which is
         # where the pointer audit says the committee actually differs.
         self.share_cell = bool(share_cell)
+        # carry_state: the dot state RECURS ACROSS POSITIONS instead of
+        # resetting at every position. Up to now the cell was applied
+        # position-wise (state = learned s0 at every t, all passes), i.e. the
+        # dots were a per-position MLP with a committee; the only temporal
+        # structure came from the fixed read window and the global prefix-sum.
+        # A toy measurement (reset 4.21 vs carry 3.79 bpc) says this reset is
+        # worth ~0.4 bpc, which is larger than any mechanism kept so far.
+        #
+        # Making it exact AND cheap needs one change to the cell: the gate
+        # loses its state term,  z = sigmoid(x W_z + b)  instead of
+        # z = sigmoid(x W_z + u * s + b), because the latter is non-linear in
+        # s and cannot be scanned. The cell then becomes an SRU-style
+        # diagonal linear recurrence
+        #     s_t = z_t * s_{t-1} + (1 - z_t) * tanh(x_t W_h + b_h)
+        # which is affine in s and therefore has an EXACT parallel scan.
+        # _carry_scan does it in two levels (carry_chunk positions composed
+        # per chunk, then one short loop over chunk carries) with NO division
+        # and no cumprod blow-up: within-chunk products have <= carry_chunk
+        # factors, so the gate products stay in range.
+        self.carry_state = bool(carry_state)
+        self.carry_chunk = int(carry_chunk)
         n_cell = 1 if self.share_cell else n_dots
         self.in_ln = (nn.LayerNorm(gru_input_dim(d_v, d_s, message_dim,
                                                  self.slot_read_dim))
@@ -366,6 +388,53 @@ class DotPopulation(nn.Module):
                                     wv.unsqueeze(1)).squeeze(-2)    # [f, N, d_v]
         return ctx_hard + (ctx_soft - ctx_soft.detach())
 
+    # ----- exact cross-position state scan ---------------------------------
+    def _carry_scan(self, a: torch.Tensor, bb: torch.Tensor,
+                    s_init: torch.Tensor) -> torch.Tensor:
+        """Exact s_t = a_t * s_{t-1} + b_t for t = 0..T-1, s_{-1} = s_init.
+
+        Two-level scan: compose the affine map inside each chunk of C
+        positions (C-1 steps over the whole chunk batch), then one short
+        sequential pass over the K = T/C chunk carries, then broadcast each
+        position's own A_i / B_i against its chunk's incoming state. Total
+        sequential depth C-1 + K instead of T, and every step is a tiny
+        elementwise op on [B, K, N, d_s].
+
+        No division anywhere (unlike the usual cumprod/cumprod-ratio trick,
+        which loses all precision once the running product underflows), and
+        the products never span more than C gates.
+        """
+        b, t, n, d = a.shape
+        c = max(1, min(int(self.carry_chunk), t))
+        pad = (-t) % c
+        if pad:
+            a = F.pad(a, (0, 0, 0, 0, 0, pad))
+            bb = F.pad(bb, (0, 0, 0, 0, 0, pad))
+        t2 = t + pad
+        k = t2 // c
+        a = a.reshape(b, k, c, n, d)
+        bb = bb.reshape(b, k, c, n, d)
+
+        # s_i = A_i * s_in + B_i  (exact affine prefix inside the chunk)
+        As = [a[:, :, 0]]
+        Bs = [bb[:, :, 0]]
+        for i in range(1, c):
+            As.append(As[-1] * a[:, :, i])
+            Bs.append(Bs[-1] * a[:, :, i] + bb[:, :, i])
+        A = torch.stack(As, dim=2)                                  # [b,k,c,n,d]
+        Bv = torch.stack(Bs, dim=2)
+
+        # chunk carries: K sequential steps on [b,n,d]
+        carry = s_init
+        prev = []
+        for j in range(k):
+            prev.append(carry)
+            carry = A[:, j, c - 1] * carry + Bv[:, j, c - 1]
+        prev = torch.stack(prev, dim=1)                              # [b,k,n,d]
+
+        s = A * prev.unsqueeze(2) + Bv                               # broadcast
+        return s.reshape(b, t2, n, d)[:, :t]
+
     def initial_state(self, batch_shape) -> torch.Tensor:
         """Broadcast learned s0 to [*batch_shape, N, d_s] for pass 1.
 
@@ -412,7 +481,7 @@ class DotPopulation(nn.Module):
                 want_log_pi: bool = True,
                 slot_table: torch.Tensor | None = None,
                 want_e_state: bool = True, full_k=None,
-                full_v=None, q_add=None) -> DotOutputs:
+                full_v=None, q_add=None, ctx_add=None) -> DotOutputs:
         """One pass for all dots at all positions simultaneously.
 
         wind_k    [B, T, w, d_q]   windowed, rel-distance-added keys
@@ -441,11 +510,12 @@ class DotPopulation(nn.Module):
                                       err_feat, round_idx, msg_in, state,
                                       emb_table, attn_cache, want_log_pi,
                                       slot_table, want_e_state, full_k,
-                                      full_v, q_add)
+                                      full_v, q_add, ctx_add)
         return self._forward_reference(wind_k, wind_v, valid_mask, h_pool,
                                        err_feat, round_idx, msg_in, state,
                                        emb_table, want_log_pi, slot_table,
-                                       want_e_state, full_k, full_v, q_add)
+                                       want_e_state, full_k, full_v, q_add,
+                                       ctx_add)
 
     # the einsum-per-op version, kept for the equivalence test and as a
     # reference implementation of spec 01 (slower: einsum re-plans paths the
@@ -455,7 +525,7 @@ class DotPopulation(nn.Module):
                            want_log_pi: bool = True,
                            slot_table: torch.Tensor | None = None,
                            want_e_state: bool = True, full_k=None,
-                           full_v=None, q_add=None) -> DotOutputs:
+                           full_v=None, q_add=None, ctx_add=None) -> DotOutputs:
         b, t, w = wind_k.shape[0], wind_k.shape[1], wind_k.shape[2]
         device = wind_k.device
 
@@ -466,7 +536,8 @@ class DotPopulation(nn.Module):
             scores = torch.einsum("bfwj,bfnj->bfnw", wind_k, q_dyn)     # read by query
         else:
             if q_add is not None:
-                qa = self._sel(round_idx, self.q).view(1, 1, n, self.d_q) + q_add
+                qa = (self._sel(round_idx, self.q).view(1, 1, n, self.d_q)
+                      + q_add.unsqueeze(2))
                 scores = torch.einsum("bfwj,bfnj->bfnw", wind_k, qa)
             else:
                 scores = torch.einsum("bfwj,nj->bfnw", wind_k,
@@ -493,6 +564,12 @@ class DotPopulation(nn.Module):
             mix = torch.sigmoid(g_row).view(1, 1, n, 1)
             ctx = (1.0 - mix) * ctx + mix * g_ctx
 
+        # exact-identity injection: dot n carries the token at lag n+1 into
+        # its value channel (pass-invariant, so it is added after the cache
+        # lookup and never written back into the cache).
+        if ctx_add is not None:
+            ctx = ctx + ctx_add.reshape(b, t, n, self.d_v)
+
         # ---- GRU step (all dots at once) ----------------------------------
         parts = [ctx, h_pool, err_feat,
                  self.round_emb.weight[round_idx].expand(b, t, self.N, ROUND_DIM)]
@@ -517,9 +594,22 @@ class DotPopulation(nn.Module):
                                   self._sel(round_idx, self.w_ih_lug))
             g2 = g2 + self._sel(round_idx, self.b_lug)
             iz, ih = g2.chunk(2, dim=-1)
-            z = torch.sigmoid(
-                iz + self._sel(round_idx, self.u_lug) * state)
-            s_new = (1.0 - z) * torch.tanh(ih) + z * state
+            if self.carry_state:
+                # reference: the same recurrence written as the naive
+                # per-position loop (slow, obviously correct; used by the
+                # equivalence test against _carry_scan).
+                z = torch.sigmoid(iz)
+                hh = torch.tanh(ih)
+                s = state[:, 0]
+                outs = []
+                for tt in range(t):
+                    s = (1.0 - z[:, tt]) * hh[:, tt] + z[:, tt] * s
+                    outs.append(s)
+                s_new = torch.stack(outs, dim=1)
+            else:
+                z = torch.sigmoid(
+                    iz + self._sel(round_idx, self.u_lug) * state)
+                s_new = (1.0 - z) * torch.tanh(ih) + z * state
         else:
             in_gates = torch.einsum("bfni,niq->bfnq", x, self._sel(round_idx, self.w_ih))
             hid_gates = torch.einsum("bfnd,ndq->bfnq", state, self._sel(round_idx, self.w_hh))
@@ -569,7 +659,7 @@ class DotPopulation(nn.Module):
                       want_log_pi: bool = True,
                       slot_table: torch.Tensor | None = None,
                       want_e_state: bool = True, full_k=None,
-                      full_v=None, q_add=None) -> DotOutputs:
+                      full_v=None, q_add=None, ctx_add=None) -> DotOutputs:
         b, t, w = wind_k.shape[0], wind_k.shape[1], wind_k.shape[2]
         f = b * t
         n = self.N
@@ -608,7 +698,8 @@ class DotPopulation(nn.Module):
                     # content-dependent query: q_t = q_n + W x_t. Zero-init
                     # of W, so this starts exactly as the static-query model
                     # and can only move away from it if it pays.
-                    qa = self._sel(round_idx, self.q).unsqueeze(0) + q_add
+                    qa = (self._sel(round_idx, self.q).view(1, n, self.d_q)
+                          + q_add.reshape(f, 1, self.d_q))
                     scores = torch.einsum("fwj,fnj->fnw", wk, qa)       # [f, N, w]
                 else:
                     # one GEMM: [f*w, d_q] @ [d_q, N] -> [f, w, N]
@@ -655,6 +746,12 @@ class DotPopulation(nn.Module):
             mix = torch.sigmoid(g_row).view(1, n, 1)
             ctx = (1.0 - mix) * ctx + mix * g_ctx.reshape(f, n, self.d_v)
 
+        # exact-identity injection: dot n carries the token at lag n+1 into
+        # its value channel (pass-invariant, so it is added after the cache
+        # lookup and never written back into the cache).
+        if ctx_add is not None:
+            ctx = ctx + ctx_add.reshape(f, n, self.d_v)
+
         # ---- GRU step (batched GEMM per dot over merged [B*T]) ------------
         parts = [ctx, h_pool.reshape(f, n, self.d_s), err_feat.reshape(f, n, 3),
                  self.round_emb.weight[round_idx].expand(f, n, -1)]
@@ -685,8 +782,17 @@ class DotPopulation(nn.Module):
                 g2 = (g2.transpose(0, 1)
                       + self._sel(round_idx, self.b_lug).unsqueeze(0))
             iz, ih = g2.chunk(2, dim=-1)
-            z = torch.sigmoid(iz + self._sel(round_idx, self.u_lug).unsqueeze(0) * s_f)
-            s_new = (1.0 - z) * torch.tanh(ih) + z * s_f                # [f, N, d_s]
+            if self.carry_state:
+                # SRU-form gate (no state term: it is what makes the scan
+                # exact) + cross-position carry.
+                z = torch.sigmoid(iz).reshape(b, t, n, self.d_s)
+                hh = torch.tanh(ih).reshape(b, t, n, self.d_s)
+                s_new = self._carry_scan(
+                    z, (1.0 - z) * hh, state.reshape(b, t, n, self.d_s)[:, 0]
+                ).reshape(f, n, self.d_s)
+            else:
+                z = torch.sigmoid(iz + self._sel(round_idx, self.u_lug).unsqueeze(0) * s_f)
+                s_new = (1.0 - z) * torch.tanh(ih) + z * s_f                # [f, N, d_s]
         else:
             w_ih_b = self._sel(round_idx, self.w_ih)                    # [N, in, 3h]
             in_gates = torch.bmm(x.transpose(0, 1), w_ih_b)             # [N, f, 3h]

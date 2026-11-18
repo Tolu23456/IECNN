@@ -70,7 +70,7 @@ class IECNN(nn.Module):
         region_outputs = []
         for r, region in enumerate(self.regions):
             out = region(rows, emb_table, tau0=tau0, hard_mode=hard_mode,
-                         floor=floor)
+                         floor=floor, ids=input_ids)
             region_outputs.append(out)
             if r + 1 < self.R:
                 rows = next_region_rows(
