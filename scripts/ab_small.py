@@ -429,6 +429,20 @@ ARMS = {
         "lug", True, n_passes=2, n_dots=3, d_s=48, d=96, per_dot_logits=False,
         global_read=True, spans=(8,), gla=True, query_from_input=True),
         {"lr": 2e-3, "swa": 0.99}),
+    # --- capacity at GPU scale (2026-11-18) -----------------------------
+    # On the 2-vCPU box every capacity knob lost because it bought param-
+    # eters with wall clock (the cell is elementwise-bound). On a GPU the
+    # step is launch-bound, so the same parameters are nearly free and the
+    # only question left is whether the architecture can USE them.
+    # d192/ds128/N4 ~ 0.5M params; d256/ds256/N6 ~ 1.6M; matched tf below.
+    "iecnn-d192-ds128-n4": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=4, d_s=128, d=192, per_dot_logits=False,
+        global_read=True, spans=(8,)), {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-d256-ds256-n6": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=6, d_s=256, d=256, per_dot_logits=False,
+        global_read=True, spans=(8,)), {"lr": 2e-3, "swa": 0.99}),
+    "tf-d192-l6": ("transformer", lambda: tf(192, 4, 6), {"swa": 0.995}),
+    "tf-d128-l4": ("transformer", lambda: tf(128, 4, 4), {"swa": 0.995}),
     # --- cross-position state carry (2026-11-18) ------------------------
     # The cell has always RESET to the learned s0 at every position, so the
     # dots are a per-position committee and all temporal structure lives in
