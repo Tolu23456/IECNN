@@ -851,6 +851,25 @@ ARMS = {
         global_read=True, spans=(8,), head_post=512, head_post_layers=3,
         read_ln=True, head_ln=True, global_decay=True),
         {"lr": 2e-3, "swa": 0.99, "compile": "noscan"}),
+    # --- a compile-friendly read: prefix SUM -> masked MATMUL --------------
+    # The one graph break the region was forced to keep is an eager boundary
+    # around the prefix scan (Inductor's SplitScan lowering crashed on CUDA).
+    # `global_exact` computes the same static-query far read as a lower-
+    # triangular masked matmul instead: no scan, nothing for Inductor to
+    # refuse, and with a STATIC query it is the same function up to numerics,
+    # so a bpc difference would be a bug. Cost is T*d_v*N MAC per token
+    # (~24k at T=256, d_v=32, N=3 = ~3% of the wide-shallow block), which
+    # compile would repay many times over if it works.
+    "iecnn-n3-x3-p1-ln-decay-d128-w512-gx": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=512, head_post_layers=3,
+        read_ln=True, head_ln=True, global_decay=True, global_exact=True),
+        {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-n3-x3-p1-ln-decay-d128-w512-gx-c": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=512, head_post_layers=3,
+        read_ln=True, head_ln=True, global_decay=True, global_exact=True),
+        {"lr": 2e-3, "swa": 0.99, "compile": True}),
     "tf-swa-cro": ("transformer", lambda: tf(96, 4, 3),
                    {"swa": 0.995, "compile": "reduce-overhead"}),
     # --- the cheap end of the frontier: is x3 enough? ----------------------
