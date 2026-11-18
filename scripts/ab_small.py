@@ -57,9 +57,10 @@ def iecnn(cell="gru", lean=False, n_passes=3, n_dots=8, d_s=128, d=128,
           cell_ln=False, share_cell=False, query_from_input=False,
           id_lags=False, ngram_bias=0, head_rank=0,
           state_carry=False, carry_chunk=8, gla=False,
-          global_exact=False, head_skip=False, break_scan=False):
+          global_exact=False, head_skip=False, break_scan=False,
+          d_q=16, d_v=32):
     m = {
-        "kind": "iecnn", "d": d, "d_q": 16, "d_v": 32, "d_s": d_s,
+        "kind": "iecnn", "d": d, "d_q": d_q, "d_v": d_v, "d_s": d_s,
         "n_dots": n_dots, "n_regions": 1, "n_passes": n_passes,
         "spans": list(spans), "use_weights": True, "use_messages": False,
         "pooling": "log_linear", "head_mode": head_mode,
@@ -475,6 +476,19 @@ ARMS = {
     "iecnn-d128-ds96-n4": ("iecnn", lambda: iecnn(
         "lug", True, n_passes=2, n_dots=4, d_s=96, d=128, per_dot_logits=False,
         global_read=True, spans=(8,)), {"lr": 2e-3, "swa": 0.99}),
+    # --- widening the READ instead of the model -------------------------
+    # Every capacity sweep so far widened d and d_s, which are the expensive
+    # axes: d enters the head (d*vocab) and the cell input (d*d_s), both
+    # quadratic. The read itself is only d_q=16 / d_v=32 wide and its cost is
+    # linear in d_v (a [T,N,d_v] gather and one bmm), so this is capacity that
+    # costs tokens at a third of the rate. At d192 the context is 32 dims
+    # summarising a 128-dim state, which looks like the obvious starvation.
+    "iecnn-d192-dv64": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=4, d_s=128, d=192, per_dot_logits=False,
+        global_read=True, spans=(8,), d_v=64), {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-d192-dv96": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=4, d_s=128, d=192, per_dot_logits=False,
+        global_read=True, spans=(8,), d_v=96), {"lr": 2e-3, "swa": 0.99}),
     "iecnn-d256-ds256-n6": ("iecnn", lambda: iecnn(
         "lug", True, n_passes=2, n_dots=6, d_s=256, d=256, per_dot_logits=False,
         global_read=True, spans=(8,)), {"lr": 2e-3, "swa": 0.99}),
