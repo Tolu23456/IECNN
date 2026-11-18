@@ -711,6 +711,26 @@ ARMS = {
         global_read=True, spans=(8,), head_post=384, head_post_layers=4,
         read_ln=True, head_ln=True, global_decay=True),
         {"lr": 2e-3, "swa": 0.99}),
+    # d128 beat tf per step AND per token at 1.37x its parameters, while w256
+    # at d192 was the worst arm in the same session. Both cut ~200k, so the
+    # axis is not the parameter count: it is the block's EXPANSION RATIO
+    # (w/d), 3.0 at d128-w384 vs 1.33 at d192-w256. These arms push the
+    # winning stream width instead: depth at d128, and d160 as a third point.
+    "iecnn-n3-x5-p1-ln-decay-d128": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=384, head_post_layers=5,
+        read_ln=True, head_ln=True, global_decay=True),
+        {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-n3-x6-p1-ln-decay-d128": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=384, head_post_layers=6,
+        read_ln=True, head_ln=True, global_decay=True),
+        {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-n3-x5-p1-ln-decay-d160": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=160, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=384, head_post_layers=5,
+        read_ln=True, head_ln=True, global_decay=True),
+        {"lr": 2e-3, "swa": 0.99}),
     "iecnn-n3-x4-p1-ln-decay-h2": ("iecnn", lambda: iecnn(
         "lug", True, n_passes=1, n_dots=3, d_s=96, d=192, per_dot_logits=False,
         global_read=True, spans=(8,), head_post=384, head_post_layers=4,
