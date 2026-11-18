@@ -1131,9 +1131,11 @@ def test_gate_agree_is_inert_at_init_and_trains():
               n_passes=1, n_dots=3)
     base = build_iecnn(_cfg(**kw), 64).eval()
     m = build_iecnn(_cfg(gate_agree=True, **kw), 64).eval()
-    sd = base.state_dict()
-    m.load_state_dict({k: v for k, v in m.state_dict().items()
-                       if k in sd}, strict=False)
+    # copy BASE's weights INTO m (m has one extra parameter, c_agree, which
+    # must stay at its zero init) — loading the other way round would leave
+    # the two models with different random weights and the test would fail
+    # for the wrong reason.
+    m.load_state_dict(base.state_dict(), strict=False)
     x = torch.randint(0, 64, (2, 12))
     with torch.no_grad():
         assert torch.allclose(base(x)["final_log_probs"],
