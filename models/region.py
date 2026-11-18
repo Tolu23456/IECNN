@@ -222,6 +222,18 @@ class Region(nn.Module):
         # cheapest possible test of "is the head information-starved?", which
         # is a different question from "is the read information-starved?".
         self.head_skip = bool(m.get("head_skip", False))
+        # read_ln / head_ln: the two LayerNorms a transformer has and this
+        # model never did (2*d params each, negligible time).
+        #
+        # read_ln normalises the row stream BEFORE it is projected to keys and
+        # values. Today the read sees raw embeddings, and with `interleave`
+        # (or a deep block stack feeding back into rows) it sees an unnormalised
+        # sum whose scale depends on depth — exactly the pathology pre-LN exists
+        # to prevent. head_ln is the final LN before the output matrix
+        # (transformer ln_f): the tied head multiplies h by E^T, so the logit
+        # scale is currently whatever the pooled dot state happens to be.
+        self.read_ln = nn.LayerNorm(d) if m.get("read_ln", False) else None
+        self.head_ln = nn.LayerNorm(d) if m.get("head_ln", False) else None
         # interleave: the transformer-block structure the dots were missing.
         # A transformer re-MIXES positions at every layer (attention -> MLP ->
         # attention); this model mixed once, then stacked MLPs, which is
@@ -564,6 +576,8 @@ class Region(nn.Module):
             an UPDATED row stream between passes: the rows feed only the read
             (w_k/w_v), never the head, so refining them is safe.
             """
+            if self.read_ln is not None:
+                r = self.read_ln(r)
             fk = fv = ka = va = None
             if self.global_read:
                 # ONE projection pair serves both the window gather and the
@@ -706,6 +720,8 @@ class Region(nn.Module):
                 if self.head_skip:
                     h_mix = h_mix + rows
                 h_mix = self._post(h_mix)
+                if self.head_ln is not None:
+                    h_mix = self.head_ln(h_mix)
                 logits = self._head_logits(h_mix.reshape(f, self.d), emb_table)
                 log_b = F.log_softmax(logits, dim=-1).reshape(b, t, -1)
 
@@ -739,6 +755,8 @@ class Region(nn.Module):
             if self.head_skip:
                 h_mix = h_mix + rows
             h_mix = self._post(h_mix)
+            if self.head_ln is not None:
+                h_mix = self.head_ln(h_mix)
             logits = self._head_logits(h_mix.reshape(f, self.d), emb_table)
             log_final = F.log_softmax(logits, dim=-1).reshape(b, t, -1)
             w_out = w_hard

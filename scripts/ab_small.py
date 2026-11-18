@@ -59,7 +59,7 @@ def iecnn(cell="gru", lean=False, n_passes=3, n_dots=8, d_s=128, d=128,
           state_carry=False, carry_chunk=8, gla=False,
           global_exact=False, head_skip=False, break_scan=False,
           d_q=16, d_v=32, head_post=0, head_post_layers=1,
-          interleave=False):
+          interleave=False, read_ln=False, head_ln=False):
     m = {
         "kind": "iecnn", "d": d, "d_q": d_q, "d_v": d_v, "d_s": d_s,
         "n_dots": n_dots, "n_regions": 1, "n_passes": n_passes,
@@ -93,6 +93,8 @@ def iecnn(cell="gru", lean=False, n_passes=3, n_dots=8, d_s=128, d=128,
         "head_post": head_post,
         "head_post_layers": head_post_layers,
         "interleave": interleave,
+        "read_ln": read_ln,
+        "head_ln": head_ln,
     }
     if window_reach is not None:
         m["window_reach"] = window_reach
@@ -598,6 +600,30 @@ ARMS = {
         "lug", True, n_passes=2, n_dots=3, d_s=96, d=192, per_dot_logits=False,
         global_read=True, spans=(8,), head_post=384, head_post_layers=2,
         interleave=True), {"lr": 2e-3, "swa": 0.99}),
+    # --- the two LayerNorms a transformer has and this model never did ------
+    # read_ln: normalise rows before w_k/w_v. Today the read sees raw
+    # embeddings, and any mechanism that writes back into `rows` (interleave,
+    # deep stacks) makes that stream's scale depth-dependent.
+    # head_ln: final LN before the tied output matrix (transformer ln_f).
+    "iecnn-n3-x3-p1-readln": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=192, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=384, head_post_layers=3,
+        read_ln=True), {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-n3-x3-p1-headln": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=192, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=384, head_post_layers=3,
+        head_ln=True), {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-n3-x3-p1-ln": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=192, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=384, head_post_layers=3,
+        read_ln=True, head_ln=True), {"lr": 2e-3, "swa": 0.99}),
+    # the ordered receptive field: span 8 -> 16 (4x the ordered range for ~4%
+    # of the read's negligible cost). Was pruned on the 2-vCPU toy, where any
+    # added fitting power is punished and both arms memorise.
+    "iecnn-n3-x3-p1-s16": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=192, per_dot_logits=False,
+        global_read=True, spans=(16,), head_post=384, head_post_layers=3),
+        {"lr": 2e-3, "swa": 0.99}),
     "iecnn-d256-ds256-n6": ("iecnn", lambda: iecnn(
         "lug", True, n_passes=2, n_dots=6, d_s=256, d=256, per_dot_logits=False,
         global_read=True, spans=(8,)), {"lr": 2e-3, "swa": 0.99}),

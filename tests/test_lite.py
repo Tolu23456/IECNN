@@ -824,3 +824,27 @@ def test_interleave_rereads_between_passes_and_is_causal():
     loss.backward()
     g = il.regions[0].w_k.weight.grad
     assert g is not None and torch.isfinite(g).all()
+
+
+def test_read_ln_and_head_ln_are_real_and_cheap():
+    """Both flags must change the function, add only LayerNorm parameters
+    (2*d each), keep log-probs normalised, and train."""
+    kw = dict(global_read=True, per_dot_logits=False, head_last_only=True,
+              n_passes=2, head_post=16, head_post_layers=1)
+    base = build_iecnn(_cfg(**kw), 64)
+    ln = build_iecnn(_cfg(**kw, read_ln=True, head_ln=True), 64)
+    nb = sum(p.numel() for p in base.parameters())
+    nl = sum(p.numel() for p in ln.parameters())
+    assert nl - nb == 4 * _cfg(**kw)["model"]["d"], nl - nb
+    ln.load_state_dict(base.state_dict(), strict=False)
+    x = torch.randint(0, 64, (2, 12))
+    with torch.no_grad():
+        a = base(x)["final_log_probs"]
+        b = ln(x)["final_log_probs"]
+    assert (a - b).abs().max().item() > 1e-4
+    assert torch.allclose(b.exp().sum(-1), torch.ones(2, 12), atol=1e-4)
+    ln.train()
+    y = torch.randint(0, 64, (2, 12))
+    loss = -ln(x)["final_log_probs"].reshape(-1, 64).gather(1, y.reshape(-1, 1)).mean()
+    loss.backward()
+    assert torch.isfinite(ln.regions[0].head_ln.weight.grad).all()
