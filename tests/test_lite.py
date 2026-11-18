@@ -954,10 +954,11 @@ def test_global_decay_matches_the_direct_weighted_average():
             sc = k @ d.q[0].t() / math.sqrt(d.d_q)             # [B,T,N]
             ref = torch.zeros_like(got)
             for tt in range(t):
-                w = torch.exp(sc[:, :tt + 1] - sc[:, tt:tt + 1])
-                w = w * gam ** torch.arange(tt, -1, -1).float()
-                ref[:, tt] = (w.unsqueeze(-1)
-                              * v[:, None, :tt + 1]).sum(2) / w.sum(1).unsqueeze(-1)
+                w = torch.exp(sc[:, :tt + 1] - sc[:, tt:tt + 1])  # [B,s,N]
+                w = w * gam ** torch.arange(tt, -1, -1).float()   # [B,s,N]
+                w = w.permute(0, 2, 1).unsqueeze(-1)              # [B,N,s,1]
+                ref[:, tt] = ((w * v[:, None, :tt + 1]).sum(2)
+                              / w.sum(2))
             err = (got - ref).abs().max().item()
         assert err < 1e-3, (gv, err)
 
@@ -984,6 +985,10 @@ def test_global_decay_does_not_overflow_at_long_contexts():
         v2[:, 0] += 100.0
         ctx2 = d._global_ctx(k, v2, 0)
         assert (ctx[:, -1] - ctx2[:, -1]).abs().max().item() < 1e-4
-        # ... and the read must still be dominated by recent values, not zero
-        assert (ctx[:, 2000] - v[:, 2000].unsqueeze(1)).abs().mean() < \
-            2.0 * (ctx[:, 2000] - v.mean(1).unsqueeze(1)).abs().mean()
+        # ... and the decay must still be active: with the floored gamma the
+        # previous value carries (1-gam) ~ 1.5% of the mass, so moving it by
+        # 10 has to move the read, while moving position 0 must not.
+        v3 = v.clone()
+        v3[:, 1999] += 10.0
+        moved = (ctx[:, 2000] - d._global_ctx(k, v3, 0)[:, 2000]).abs().mean()
+        assert 0.05 < moved.item() < 1.0, moved
