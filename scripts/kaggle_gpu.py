@@ -6,6 +6,12 @@ prepares byte-level enwik8 (60 MB train / 5 MB val), and runs the arm list at
 B=32 T=256 for K_BUDGET seconds per arm. All arms share the session, so the
 comparison is within-session and the transformer anchor is always included.
 
+Val slice: the 5 MB immediately AFTER the 60 MB train window
+(md5 6d6c2819c2). Batches up to `combo1` used a different 5 MB window
+(afc1109404) whose provenance is unknown; it is ~0.04 bpc HARDER than this one
+(tf-swa 2.0219 there vs 2.0612 here), which is why only in-session comparisons
+are used and every batch re-runs the transformer anchor.
+
 Why 60/5 MB: the full 100 MB corpus makes one epoch unreachable at this budget
 and the val split would be scored near the end of the file; 60 MB lets the
 180 s arms see ~1 epoch and keeps `bpc_final` comparable across batches.
@@ -19,15 +25,15 @@ import sys
 import urllib.request
 import zipfile
 
-TAG = os.environ.get("K_TAG", "run1")
+TAG = os.environ.get("K_TAG", "ln2")
 BUDGET = os.environ.get("K_BUDGET", "180")
 ARM_B = os.environ.get("K_B", "32")
 ARM_T = os.environ.get("K_T", "256")
 VALW = os.environ.get("K_VALW", "160")
 ARMS = os.environ.get(
-    "K_ARMS", "tf-swa,iecnn-d192-n3-pmlp-x4-p1,iecnn-d192-n3-pmlp-x5-p1,"
-              "iecnn-d192-n4-pmlp-x4-p1,iecnn-n3-x4-p1-ln,"
-              "iecnn-n3-x4-p1-s16")
+    "K_ARMS", "tf-swa,iecnn-n3-x4-p1-ln,iecnn-n3-x5-p1-ln,"
+              "iecnn-n2-x4-p1-ln,iecnn-n3-x4-p1-ln-h2,"
+              "iecnn-n3-x4-p1-ln-decay")
 
 W = "/kaggle/working"
 REPO = "https://github.com/Tolu23456/IECNN.git"

@@ -668,6 +668,26 @@ ARMS = {
         "lug", True, n_passes=1, n_dots=3, d_s=96, d=192, per_dot_logits=False,
         global_read=True, spans=(8,), head_post=384, head_post_layers=4,
         global_decay=True), {"lr": 2e-3, "swa": 0.99}),
+    # --- the LN pair won (-0.038 bpc at equal wall clock), so re-ask the
+    # structural questions WITH it: does depth go further now, is the smaller
+    # population enough now, and do the two new read mechanisms pay on top?
+    "iecnn-n3-x5-p1-ln": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=192, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=384, head_post_layers=5,
+        read_ln=True, head_ln=True), {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-n2-x4-p1-ln": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=2, d_s=96, d=192, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=384, head_post_layers=4,
+        read_ln=True, head_ln=True), {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-n3-x4-p1-ln-h2": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=192, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=384, head_post_layers=4,
+        read_ln=True, head_ln=True, read_heads=2), {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-n3-x4-p1-ln-decay": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=192, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=384, head_post_layers=4,
+        read_ln=True, head_ln=True, global_decay=True),
+        {"lr": 2e-3, "swa": 0.99}),
     "iecnn-d256-ds256-n6": ("iecnn", lambda: iecnn(
         "lug", True, n_passes=2, n_dots=6, d_s=256, d=256, per_dot_logits=False,
         global_read=True, spans=(8,)), {"lr": 2e-3, "swa": 0.99}),
