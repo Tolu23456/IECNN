@@ -149,3 +149,107 @@ def test_seclusion_topk_keeps_hard_forward():
         a = full(wind_k, wind_v, valid, h_pool, err, 0, None, state, emb)
         c = topk(wind_k, wind_v, valid, h_pool, err, 0, None, state, emb)
     assert torch.equal(a.state, c.state)
+
+
+def test_pool_first_identity():
+    """The prune's premise: with a SHARED output projection, projecting each
+    dot and then pooling is identical to pooling the states and projecting
+    once. pool_first relies on exactly this identity."""
+    from models.dot import DotPopulation
+    dots = DotPopulation(n_dots=5, d=16, d_q=8, d_v=10, d_s=12, vocab_size=32,
+                         n_passes=1, share_pass_params=True, share_out=True)
+    s = torch.randn(2, 7, 5, 12)                       # [B,T,N,d_s]
+    w = torch.softmax(torch.randn(2, 7, 5), dim=-1)    # [B,T,N]
+    W = dots.p_out[0]                                  # [d_s, d]
+    per_dot = torch.einsum("bfnd,dm->bfnm", s, W)      # project then pool
+    h1 = torch.einsum("bfn,bfnd->bfd", w, per_dot)
+    s_pool = torch.einsum("bfn,bfnd->bfd", w, s)       # pool then project
+    h2 = s_pool.reshape(-1, 12).matmul(W).reshape(2, 7, 16)
+    assert torch.allclose(h1, h2, atol=1e-6)
+
+
+def test_pool_first_runs_and_shrinks_output_projection():
+    base = build_iecnn(_cfg(cell="lug", head_last_only=True,
+                            per_dot_logits=False), 64)
+    pooled = build_iecnn(_cfg(cell="lug", head_last_only=True,
+                              per_dot_logits=False, pool_first=True), 64)
+    assert pooled.regions[0].dots.p_out.shape == (1, 18, 24)
+    assert base.regions[0].dots.p_out.shape == (1, 4, 18, 24)
+    x = torch.randint(0, 64, (2, 12))
+    lp = _fwd(pooled, x)
+    assert torch.isfinite(lp).all()
+    n_base = sum(p.numel() for p in base.parameters())
+    n_pool = sum(p.numel() for p in pooled.parameters())
+    assert n_pool < n_base, (n_base, n_pool)
+
+
+def test_dist_bias_zero_init_is_exact():
+    """dot_dist_bias adds a per-(dot,slot) scalar initialised to ZERO, so
+    turning it on cannot change the function at init."""
+    base, biased = _pair(dot_dist_bias=True)
+    x = torch.randint(0, 64, (2, 12))
+    a, b = _fwd(base, x), _fwd(biased, x)
+    assert torch.equal(a, b), (a - b).abs().max().item()
+    assert biased.regions[0].dots.d_bias.shape == (1, 4, 8)
+
+
+def test_dist_bias_steers_each_dot_to_its_own_distance():
+    """The point of the bias: give dot n a big bonus on slot n and the dots
+    must split across DISTINCT distances instead of all picking the last
+    slot (the measured 52-70% all-same collapse)."""
+    import math as _m
+    from models.memory import region1_rows
+    m = build_iecnn(_cfg(dot_dist_bias=True, window_mode="hybrid",
+                         window_reach=64), 64)
+    m.eval()
+    d = m.regions[0].dots
+    with torch.no_grad():
+        d.d_bias.zero_()
+        d.d_bias[0, torch.arange(d.N), torch.arange(d.N)] = 20.0
+    # T must exceed window_reach, otherwise the far slots are masked out for
+    # most positions and a "wrong" pick only means "that slot was invalid".
+    x = torch.randint(0, 64, (2, 80))
+    rows = region1_rows(m.embed(x))
+    wind_k, _wv, valid = m.regions[0]._window_memory(rows, x.device)
+    assert bool(valid[-1].all()), "last position must see every slot"
+    q = d.q[0]
+    scores = torch.einsum("bfwj,nj->bfnw", wind_k, q) / _m.sqrt(d.d_q)
+    scores = scores + d.d_bias[0].view(1, d.N, wind_k.shape[2])
+    scores = scores.masked_fill(~valid[None, :, None, :], float("-inf"))
+    idx = scores.argmax(-1)                      # [B, T, N]
+    at_full = idx[:, -1, :]                      # every slot valid here
+    assert at_full.tolist() == [list(range(d.N))] * 2, at_full.tolist()
+    # the 4 dots therefore sit on 4 DIFFERENT distances (no collapse)
+    assert len(set(at_full[0].tolist())) == d.N
+    # and without the bias the same dots do NOT split that way
+    plain = (torch.einsum("bfwj,nj->bfnw", wind_k, q) / _m.sqrt(d.d_q)
+             ).masked_fill(~valid[None, :, None, :], float("-inf"))
+    assert plain[:, -1, :].argmax(-1).unique().numel() < d.N
+
+
+def test_bands_give_each_pass_its_own_window():
+    """window_mode "bands": pass 1 = dense local 0..w-1, pass 2 = far band
+    tiling (w .. window_reach]. Each pass must get its OWN cache too, or
+    pass 2 would silently reuse pass 1's ctx (the fake-depth bug)."""
+    from models.memory import region1_rows
+    m = build_iecnn(_cfg(spans=[8], window_mode="bands", window_reach=64,
+                         n_passes=2, head_last_only=True,
+                         per_dot_logits=False), 64)
+    m.eval()
+    r = m.regions[0]
+    x = torch.randint(0, 64, (2, 20))
+    rows = region1_rows(m.embed(x))
+    near = r._window_offsets(rows.device, 0)
+    far = r._window_offsets(rows.device, 1)
+    assert int(near[-1]) == 0 and int(near[0]) == -7, near.tolist()
+    d_near = (-near).tolist()
+    d_far = (-far).tolist()
+    # pass 1 = the dense local band, pass 2 = the far band; they must not
+    # overlap (pass 2 exists to add information pass 1 cannot see)
+    assert d_near[0] <= 8 and d_far[0] >= 8, (d_near[0], d_far[0])
+    assert min(d_far) >= 8 and max(d_far) <= 64, d_far
+    assert d_far == sorted(d_far, reverse=True), d_far   # slots run far -> near
+    # both passes must actually run and produce finite probabilities
+    lp = _fwd(m, x)
+    assert torch.isfinite(lp).all()
+    assert lp.shape == (2, 20, 64)

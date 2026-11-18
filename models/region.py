@@ -101,6 +101,13 @@ class Region(nn.Module):
         self.slot_dim = int(m.get("slot_dim", 32))
         self.slot_decay = float(m.get("slot_decay", 0.5))
 
+        # pool_first: ONE shared output projection + pool the d_s states
+        # BEFORE projecting. Because the projection is linear and shared,
+        #     sum_n w_n (s_n W) == (sum_n w_n s_n) W,
+        # so this is numerically the same head for 1/N of the e_state MACs
+        # and without ever materializing [B,T,N,d]. Must be set BEFORE the
+        # DotPopulation is built (it decides p_out's shape).
+        self.pool_first = bool(m.get("pool_first", False))
         self.dots = DotPopulation(
             self.n_dots, d, d_q, d_v, d_s, vocab_size,
             message_dim=(16 if self.use_messages else 0),
@@ -110,7 +117,10 @@ class Region(nn.Module):
             fast_math=bool(m.get("fast_dot_math", True)),
             slot_slots=self.slot_slots, slot_dim=self.slot_dim,
             slot_decay=self.slot_decay,
-            cell=str(m.get("cell", "gru")))
+            cell=str(m.get("cell", "gru")),
+            share_out=self.pool_first,
+            span=self.span,
+            dist_bias=bool(m.get("dot_dist_bias", False)))
         # Lean passes: in hidden mode the pooled shared head and the per-dot
         # e_state projection are only consumed on the LAST pass. With
         # head_last_only the earlier passes skip both (they still update the
@@ -177,12 +187,33 @@ class Region(nn.Module):
                 dropout=float(m.get("message_dropout", 0.2)))
 
     # ------------------------------------------------------------------
-    def _window_offsets(self, device) -> torch.Tensor:
-        """Slot -> position offset. Slot span-1 is always the current token."""
+    def _window_offsets(self, device, pass_idx: int = 0) -> torch.Tensor:
+        """Slot -> position offset. Slot span-1 is always the current token.
+
+        "bands" (per-pass division of labour): pass 1 gets the DENSE local
+        band 0..w-1 (what byte came before); passes 2..P get geometric
+        bands that tile (w .. window_reach] in log space, one band per
+        pass. Every pass therefore reads a DIFFERENT part of the sequence,
+        which is what makes the extra passes real depth instead of a
+        re-read of the same cached ctx. Same slot count per pass."""
         if self.window_mode == "contiguous":
             return torch.arange(self.span, device=device) - self.span + 1
         w = self.span
         reach = max(self.window_reach, w)
+        if self.window_mode == "bands":
+            if pass_idx <= 0:
+                dist = torch.arange(w, device=device, dtype=torch.float32)
+                return (-dist.round().long()).flip(0)
+            # P-1 log-spaced bands tiling (w, reach]
+            nb = max(self.n_passes - 1, 1)
+            lo = float(max(w, 1)) ** ((nb - (pass_idx - 1)) / nb) * \
+                 float(reach) ** ((pass_idx - 1) / nb)
+            hi = float(max(w, 1)) ** ((nb - pass_idx) / nb) * \
+                 float(reach) ** (pass_idx / nb)
+            hi = max(hi, lo + 1.0)
+            g = torch.exp(torch.linspace(math.log(lo), math.log(hi), w))
+            dist = g.round().clamp(min=w).long()
+            return (-dist).flip(0)
         if self.window_mode == "hybrid":
             # dense local band + geometric far band: the near slots keep full
             # resolution (the bigram/local signal dominates next-token
@@ -201,11 +232,11 @@ class Region(nn.Module):
             dist[0] = 0
         return (-dist).flip(0)        # ascending offsets, slot -1 = current
 
-    def _window_memory(self, rows: torch.Tensor, device):
+    def _window_memory(self, rows: torch.Tensor, device, pass_idx: int = 0):
         """Rows [B,T,d] -> (wind_k [B,T,w,d_q], wind_v [B,T,w,d_v], valid [T,w])."""
         k_all = self.w_k(rows)                       # [B, T, d_q]
         v_all = self.w_v(rows)                       # [B, T, d_v]
-        offs = self._window_offsets(device)
+        offs = self._window_offsets(device, pass_idx)
         wind_k_raw, valid = gather_windows(k_all, self.span, offs)
         wind_v, _ = gather_windows(v_all, self.span, offs)
         # slot i holds position t + offs[i]; relative distance = -offs[i]
@@ -365,12 +396,31 @@ class Region(nn.Module):
         cost, and a single GEMM + log-softmax instead of the old chain)."""
         device = rows.device
         b, t = rows.shape[0], rows.shape[1]
-        wind_k, wind_v, valid = self._window_memory(rows, device)
         n = self.n_dots
         f = b * t
 
+        # Read windows. Normally every pass reads the SAME window, and the
+        # attention cache is shared so the read is computed once (that is
+        # exactly what made P>=2 "fake depth": passes 2..P re-used ctx).
+        # window_mode "bands" gives each pass its own band (pass 1 local,
+        # later passes far), so each pass must also have its OWN cache —
+        # a cached ctx from a different band would be a different input.
+        if self.window_mode == "bands":
+            winds = [self._window_memory(rows, device, p)
+                     for p in range(self.n_passes)]
+            # each pass reads its own band, so a ctx cached by one pass is
+            # never reusable by another: no cache at all.
+            caches = [None] * self.n_passes
+        else:
+            one = self._window_memory(rows, device)
+            winds = [one] * self.n_passes
+            # ONE shared dict: pass 1 fills ctx, passes 2..P hit the cache.
+            # (Separate per-pass dicts would silently recompute the read P
+            # times — same numbers, needless work.)
+            shared = {} if self.cache_attention else None
+            caches = [shared] * self.n_passes
+
         state = self.dots.initial_state((b, t))
-        attn_cache = {} if self.cache_attention else None
         trust = None
         w_prev = None
         state_prev = None
@@ -390,6 +440,8 @@ class Region(nn.Module):
             dot_mask[k] = 0.0
 
         for p in range(1, self.n_passes + 1):
+            wind_k, wind_v, valid = winds[p - 1]
+            attn_cache = caches[p - 1]
             tau_p = tau0 * (self.kappa ** (p - 1))
             if p == 1:
                 h_pool = torch.zeros(b, t, n, self.d_s, device=device,
@@ -400,12 +452,15 @@ class Region(nn.Module):
             last = (p == self.n_passes)
             lean = self.head_last_only and not last
             want_pi = last and self.per_dot_logits
+            # pool_first needs no per-dot e_state unless the per-dot logits
+            # are being materialized (they read the d-space states).
+            want_e = (not lean) and (not self.pool_first or want_pi)
             out = self.dots(wind_k, wind_v, valid, h_pool, err,
                             round_idx=p - 1,
                             msg_in=msg_read if p > 1 else None, state=state,
                             emb_table=emb_table, attn_cache=attn_cache,
                             want_log_pi=want_pi, slot_table=slots,
-                            want_e_state=(not lean))
+                            want_e_state=want_e)
             state_prev = out.state
             if slots is not None:
                 # e13: detached scan — the table this pass wrote is read by
@@ -428,7 +483,14 @@ class Region(nn.Module):
             if lean:
                 log_b = None
             else:
-                h_mix = torch.einsum("bfn,bfnd->bfd", w, out.e_state)   # [B, T, d]
+                if self.pool_first:
+                    s_pool = torch.einsum("bfn,bfnd->bfd", w, out.state)
+                    h_mix = s_pool.reshape(f, self.d_s).matmul(
+                        self.dots._sel(p - 1, self.dots.p_out))     # [f, d]
+                    h_mix = h_mix.reshape(b, t, self.d)
+                else:
+                    h_mix = torch.einsum("bfn,bfnd->bfd", w,
+                                         out.e_state)               # [B, T, d]
                 logits = h_mix.reshape(f, self.d).matmul(emb_table.t())  # [f, V]
                 log_b = F.log_softmax(logits, dim=-1).reshape(b, t, -1)
 
@@ -452,7 +514,13 @@ class Region(nn.Module):
 
         if hard_mode and self.use_weights:
             w_hard = consensus.hard_top_m(w_final, self.hard_top_m)
-            h_mix = torch.einsum("bfn,bfnd->bfd", w_hard, e_state_last)
+            if self.pool_first:
+                s_hard = torch.einsum("bfn,bfnd->bfd", w_hard, state_prev)
+                h_mix = s_hard.reshape(f, self.d_s).matmul(
+                    self.dots._sel(self.n_passes - 1, self.dots.p_out)
+                ).reshape(b, t, self.d)
+            else:
+                h_mix = torch.einsum("bfn,bfnd->bfd", w_hard, e_state_last)
             logits = h_mix.reshape(f, self.d).matmul(emb_table.t())
             log_final = F.log_softmax(logits, dim=-1).reshape(b, t, -1)
             w_out = w_hard
@@ -489,11 +557,25 @@ class Region(nn.Module):
                                         floor, training)
         device = rows.device
         b, t = rows.shape[0], rows.shape[1]
-        wind_k, wind_v, valid = self._window_memory(rows, device)
+        # same per-pass band machinery as _forward_hidden (bands mode gives
+        # each pass its own window, so each needs its own attention cache)
+        if self.window_mode == "bands":
+            winds = [self._window_memory(rows, device, p)
+                     for p in range(self.n_passes)]
+            # each pass reads its own band, so a ctx cached by one pass is
+            # never reusable by another: no cache at all.
+            caches = [None] * self.n_passes
+        else:
+            one = self._window_memory(rows, device)
+            winds = [one] * self.n_passes
+            # ONE shared dict: pass 1 fills ctx, passes 2..P hit the cache.
+            # (Separate per-pass dicts would silently recompute the read P
+            # times — same numbers, needless work.)
+            shared = {} if self.cache_attention else None
+            caches = [shared] * self.n_passes
         n = self.n_dots
 
         state = self.dots.initial_state((b, t))
-        attn_cache = {} if self.cache_attention else None
         trust = None
         w_prev = None
         state_prev = None
@@ -530,6 +612,8 @@ class Region(nn.Module):
             dot_mask[k] = 0.0
 
         for p in range(1, self.n_passes + 1):
+            wind_k, wind_v, valid = winds[p - 1]
+            attn_cache = caches[p - 1]
             tau_p = tau0 * (self.kappa ** (p - 1))
             if p == 1:
                 err = torch.zeros(b, t, n, 3, device=device, dtype=rows.dtype)

@@ -38,19 +38,23 @@ MARK_S = 30.0
 def iecnn(cell="gru", lean=False, n_passes=3, n_dots=8, d_s=128, d=128,
           spans=(16,), read_mode="soft", head_mode="hidden",
           per_dot_logits=True, window_mode="contiguous", window_reach=None,
-          window_local=None, seclusion_topk=0):
+          window_local=None, seclusion_topk=0, pool_first=False,
+          slot_slots=0, dist_bias=False, dynamic_query=False):
     m = {
         "kind": "iecnn", "d": d, "d_q": 16, "d_v": 32, "d_s": d_s,
         "n_dots": n_dots, "n_regions": 1, "n_passes": n_passes,
         "spans": list(spans), "use_weights": True, "use_messages": False,
         "pooling": "log_linear", "head_mode": head_mode,
         "read_mode": read_mode, "share_pass_params": True,
-        "dynamic_query": False, "use_cross_region": False,
+        "dynamic_query": dynamic_query, "use_cross_region": False,
         "fast_dot_math": True, "cache_attention": True,
         "cell": cell, "head_last_only": lean,
         "per_dot_logits": per_dot_logits,
         "window_mode": window_mode,
         "seclusion_topk": seclusion_topk,
+        "pool_first": pool_first,
+        "slot_slots": slot_slots,
+        "dot_dist_bias": dist_bias,
     }
     if window_reach is not None:
         m["window_reach"] = window_reach
@@ -145,6 +149,121 @@ ARMS = {
     "iecnn-lite-p2n6-h64": ("iecnn", lambda: iecnn(
         "lug", True, n_passes=2, n_dots=6, d_s=64, per_dot_logits=False,
         window_mode="hybrid", window_reach=64)),
+    # --- capacity via d (cheap MACs: only the pooled head + e_state widen) --
+    "iecnn-lite-p2n4-d192": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=4, d_s=64, d=192,
+        per_dot_logits=False)),
+    "iecnn-lite-p2n4-d256": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=4, d_s=64, d=256,
+        per_dot_logits=False)),
+    "iecnn-lite-p2n4-d256-h64": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=4, d_s=64, d=256,
+        per_dot_logits=False, window_mode="hybrid", window_reach=64)),
+    "iecnn-lite-p2n6-d192-h64": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=6, d_s=64, d=192,
+        per_dot_logits=False, window_mode="hybrid", window_reach=64)),
+    "tf-d96-l6": ("transformer", lambda: tf(96, 4, 6)),
+    # --- pool_first: shared output projection, pool the states first ------
+    "iecnn-p2n4-d256-pool": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=4, d_s=64, d=256,
+        per_dot_logits=False, pool_first=True)),
+    "iecnn-p2n8-d256-pool": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=8, d_s=64, d=256,
+        per_dot_logits=False, pool_first=True)),
+    "iecnn-p2n8-d384-pool": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=8, d_s=64, d=384,
+        per_dot_logits=False, pool_first=True)),
+    "iecnn-p2n8-d512-pool": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=8, d_s=64, d=512,
+        per_dot_logits=False, pool_first=True)),
+    # --- temporal carry (slot table) on the winning small shape ----------
+    "iecnn-p2n4-lr2e3": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=4, d_s=64, per_dot_logits=False),
+        {"lr": 2e-3}),
+    "iecnn-p2n4-lr3e3": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=4, d_s=64, per_dot_logits=False),
+        {"lr": 3e-3}),
+    "iecnn-p2n4-lr3e4": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=4, d_s=64, per_dot_logits=False),
+        {"lr": 3e-4}),
+    "iecnn-p2n4-slot4": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=4, d_s=64, per_dot_logits=False,
+        slot_slots=4)),
+    "iecnn-p2n4-h64-slot4": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=4, d_s=64, per_dot_logits=False,
+        slot_slots=4, window_mode="hybrid", window_reach=64)),
+    # --- real per-pass depth + distance-specialised dots ----------------
+    # dynamic_query: the read is cached and shared across passes when false,
+    # so passes 2..P re-read the SAME ctx. True makes the query state-
+    # dependent -> every pass asks the memory a different question.
+    # cost: recomputing N*w*d_q scores + N*w*d_v mix per pass (~2% MACs).
+    "iecnn-p2n4-dyn": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=4, d_s=64, per_dot_logits=False,
+        dynamic_query=True)),
+    # dist_bias: one learned scalar per (dot, slot) -> dots specialise by
+    # distance instead of collapsing onto the same token (52-70% all-same).
+    # cost: N*w additions per position. Effectively zero.
+    "iecnn-p2n4-bias": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=4, d_s=64, per_dot_logits=False,
+        dist_bias=True)),
+    "iecnn-p2n4-dyn-bias": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=4, d_s=64, per_dot_logits=False,
+        dynamic_query=True, dist_bias=True)),
+    "iecnn-p2n4-bias-h64": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=4, d_s=64, per_dot_logits=False,
+        dist_bias=True, window_mode="hybrid", window_reach=64)),
+    # --- schedule: time-based cosine over the fixed budget (free) --------
+    "iecnn-p2n4-cos": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=4, d_s=64, per_dot_logits=False),
+        {"sched": "cos"}),
+    "tf-d96-l3-cos": ("transformer", lambda: tf(96, 4, 3), {"sched": "cos"}),
+    # --- bands: each pass reads a DIFFERENT part of the sequence ---------
+    # pass 1 dense local 0..15, pass 2 geometric 16..64 (P=2);
+    # P=3 splits the far range into two log bands.
+    "iecnn-p2n4-bands": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=4, d_s=64, per_dot_logits=False,
+        window_mode="bands", window_reach=64)),
+    "iecnn-p3n4-bands": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=3, n_dots=4, d_s=64, per_dot_logits=False,
+        window_mode="bands", window_reach=64)),
+    "iecnn-p2n4-bands-dyn": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=4, d_s=64, per_dot_logits=False,
+        window_mode="bands", window_reach=64, dynamic_query=True)),
+    # --- lr 2e-3 (the winner) x the new mechanisms ----------------------
+    "iecnn-lr2-bands": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=4, d_s=64, per_dot_logits=False,
+        window_mode="bands", window_reach=64), {"lr": 2e-3}),
+    "iecnn-lr2-dyn": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=4, d_s=64, per_dot_logits=False,
+        dynamic_query=True), {"lr": 2e-3}),
+    "iecnn-lr2-bias": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=4, d_s=64, per_dot_logits=False,
+        dist_bias=True), {"lr": 2e-3}),
+    "iecnn-lr2-dyn-bias": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=4, d_s=64, per_dot_logits=False,
+        dynamic_query=True, dist_bias=True), {"lr": 2e-3}),
+    "iecnn-lr2-bias-h64": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=4, d_s=64, per_dot_logits=False,
+        dist_bias=True, window_mode="hybrid", window_reach=64),
+        {"lr": 2e-3}),
+    "iecnn-lr2-cos": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=4, d_s=64, per_dot_logits=False),
+        {"lr": 2e-3, "sched": "cos"}),
+    "iecnn-lr2-q64": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=4, d_s=64, per_dot_logits=False,
+        window_mode="quad", window_reach=64), {"lr": 2e-3}),
+    # --- fairness controls: give the transformer the SAME lr/schedule ----
+    "tf-lr2": ("transformer", lambda: tf(96, 4, 3), {"lr": 2e-3}),
+    "tf-lr2-cos": ("transformer", lambda: tf(96, 4, 3),
+                   {"lr": 2e-3, "sched": "cos"}),
+    "tf-d96-l3-ctl": ("transformer", lambda: tf(96, 4, 3)),
+    "iecnn-p2n8-bands": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=8, d_s=64, per_dot_logits=False,
+        window_mode="bands", window_reach=64)),
+    "iecnn-p2n8-d384-pool-h64": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=8, d_s=64, d=384,
+        per_dot_logits=False, pool_first=True, window_mode="hybrid",
+        window_reach=64)),
 }
 
 
@@ -215,23 +334,34 @@ def pointer_audit(model) -> dict:
 
 
 SEED = int(os.environ.get("ARM_SEED", "0"))
+BASE_LR = float(os.environ.get("ARM_LR", "1e-3"))
 
 
-def run(name: str, kind: str, model) -> dict:
-    torch.manual_seed(SEED)
+def run(name: str, kind: str, model, lr: float = None,
+        seed: int = None, sched: str = None) -> dict:
+    lr0 = BASE_LR if lr is None else float(lr)
+    sd = SEED if seed is None else int(seed)
+    torch.manual_seed(sd)
     opt = torch.optim.AdamW(model.parameters(), lr=1e-3, betas=(0.9, 0.95),
                             weight_decay=0.01)
     n_par = sum(p.numel() for p in model.parameters())
-    gen = batches(SEED)
+    gen = batches(sd)
+    sched = sched or ""
     t0 = time.time()
     step = 0
     marks = []
     next_mark = MARK_S
     while time.time() - t0 < BUDGET:
         x, y = next(gen)
-        lr = 1e-3 * min(1.0, (step + 1) / 100.0)
+        warm = min(1.0, (step + 1) / 100.0)
+        if sched == "cos":
+            # time-based cosine over the FIXED wall-clock budget: the arm
+            # cannot know its step count in advance, but it knows the clock.
+            frac = min(1.0, (time.time() - t0) / BUDGET)
+            warm = warm * 0.5 * (1.0 + math.cos(math.pi * frac))
+        cur_lr = lr0 * warm
         for grp in opt.param_groups:
-            grp["lr"] = lr
+            grp["lr"] = cur_lr
         out = model(x)
         loss = F.cross_entropy(out["final_log_probs"].reshape(-1, V),
                                y.reshape(-1))
@@ -246,7 +376,8 @@ def run(name: str, kind: str, model) -> dict:
             next_mark += MARK_S
     el = time.time() - t0
     final = round(val_bpc(model), 4)
-    row = {"arm": name, "kind": kind, "seed": SEED, "params": n_par, "steps": step,
+    row = {"arm": name, "kind": kind, "seed": sd, "lr": lr0, "sched": sched,
+           "params": n_par, "steps": step,
            "tokens": step * B * T, "s_per_step": round(el / max(step, 1), 4),
            "s_per_1k_tokens": round(el / max(step * B * T / 1000, 1e-9), 3),
            "curve": marks, "bpc_final": final}
@@ -273,15 +404,42 @@ def bpc_at(marks, tokens: int):
 def main():
     names = ONLY or list(ARMS)
     rows = []
+    if os.environ.get("ARM_DRY") == "1":
+        # Smoke-test EVERY arm (config builds + one fwd/bwd on a real batch)
+        # before any long run is launched. A NameError in one arm used to
+        # burn a whole batch: the log showed nothing but a traceback.
+        ok = 0
+        for name in names:
+            entry = ARMS[name]
+            kind, mk = entry[0], entry[1]
+            torch.manual_seed(0)
+            try:
+                model = (build_transformer_baseline(mk(), V) if kind == "transformer"
+                         else build_iecnn(mk(), V))
+                x, y = next(batches(0))
+                out = model(x)
+                loss = F.cross_entropy(out["final_log_probs"].reshape(-1, V),
+                                       y.reshape(-1))
+                loss.backward()
+                print(f"DRY OK   {name:<28}"
+                      f"{sum(p.numel() for p in model.parameters()):>9} params"
+                      f"  loss {loss.item():.3f}", flush=True)
+                ok += 1
+            except Exception as e:  # noqa: BLE001 - report and keep going
+                print(f"DRY FAIL {name:<28}{type(e).__name__}: {e}", flush=True)
+        print(f"DRY {ok}/{len(names)} arms ok", flush=True)
+        return
     for name in names:
-        kind, mk = ARMS[name]
-        torch.manual_seed(SEED)
+        entry = ARMS[name]
+        kind, mk = entry[0], entry[1]
+        opts = entry[2] if len(entry) > 2 else {}
+        torch.manual_seed(opts.get("seed", SEED))
         cfg = mk()
         model = (build_transformer_baseline(cfg, V) if kind == "transformer"
                  else build_iecnn(cfg, V))
-        print(f"--- {name} ({sum(p.numel() for p in model.parameters())} params)",
-              flush=True)
-        rows.append(run(name, kind, model))
+        print(f"--- {name} ({sum(p.numel() for p in model.parameters())} params"
+              f"{', lr ' + str(opts['lr']) if 'lr' in opts else ''})", flush=True)
+        rows.append(run(name, kind, model, **opts))
 
     common_tok = min(r["tokens"] for r in rows)
     print(f"\n=== SUMMARY (equal wall-clock {BUDGET:.0f}s/arm, "

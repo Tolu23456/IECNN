@@ -93,9 +93,11 @@ class DotPopulation(nn.Module):
 
     def __init__(self, n_dots, d, d_q, d_v, d_s, vocab_size, message_dim=0,
                  n_passes=3, dynamic_query=False, share_pass_params=True,
+                 span=16,
                  seed: int = 0, fast_math: bool = True,
                  slot_slots: int = 0, slot_dim: int = 32,
-                 slot_decay: float = 0.5, cell: str = "gru"):
+                 slot_decay: float = 0.5, cell: str = "gru",
+                 share_out: bool = False, dist_bias: bool = False):
         super().__init__()
         self.N = n_dots
         self.d = d
@@ -152,6 +154,12 @@ class DotPopulation(nn.Module):
         # The committee still integrates over passes; only the integrator
         # changed. Selected by model.cell.
         self.cell = str(cell)
+        # share_out: ONE output projection for all dots. Then
+        #   sum_n w_n (s_n W)  ==  (sum_n w_n s_n) W,
+        # so the region can pool the d_s states FIRST and run a single
+        # d_s->d GEMM on the pooled vector: the per-dot e_state tensor and its
+        # N-way GEMM disappear (region.pool_first turns this on).
+        self.share_out = bool(share_out)
 
         p_layers = 1 if share_pass_params else n_passes   # stacked per-pass depth
         g = torch.Generator().manual_seed(seed)
@@ -160,6 +168,17 @@ class DotPopulation(nn.Module):
         self.u_q = nn.Parameter(torch.stack(
             [torch.stack([_xavier(d_s, d_q, g) for _ in range(n_dots)]) for _ in range(p_layers)])) \
             if dynamic_query else None
+        # dist_bias: ONE learned scalar per (dot, window slot) added to that
+        # dot's read scores. Cost = N*w additions per position (~64 MACs,
+        # i.e. free), and it lets dots SPECIALISE BY DISTANCE instead of all
+        # collapsing onto the same token: the pointer audit measured 52-70%
+        # of positions where all dots pick the same slot (mean pick distance
+        # 0.11-0.28 back), i.e. an 8-dot committee acting as one bigram
+        # detector. A per-dot distance prior is the cheapest possible fix:
+        # one dot can price the previous token, another distance 8, another
+        # distance 64, and the mixture weights arbitrate per position.
+        self.d_bias = (nn.Parameter(torch.zeros(p_layers, n_dots, span))
+                       if dist_bias else None)
         self.s0 = nn.Parameter(0.02 * torch.randn(p_layers, n_dots, d_s, generator=g))
         if self.cell == "lug":
             self.w_ih = None
@@ -178,8 +197,12 @@ class DotPopulation(nn.Module):
             self.w_hh = nn.Parameter(torch.stack(
                 [torch.stack([_orth(d_s, 3 * d_s, g) for _ in range(n_dots)]) for _ in range(p_layers)]))
             self.w_ih_lug = self.b_lug = self.u_lug = None
-        self.p_out = nn.Parameter(torch.stack(
-            [torch.stack([_xavier(d_s, d, g) for _ in range(n_dots)]) for _ in range(p_layers)]))
+        if self.share_out:
+            self.p_out = nn.Parameter(torch.stack(
+                [_xavier(d_s, d, g) for _ in range(p_layers)]))   # [p, d_s, d]
+        else:
+            self.p_out = nn.Parameter(torch.stack(
+                [torch.stack([_xavier(d_s, d, g) for _ in range(n_dots)]) for _ in range(p_layers)]))
         self.c_w = nn.Parameter(0.1 * torch.randn(p_layers, n_dots, d_s, generator=g))
         self.c_b = nn.Parameter(torch.zeros(p_layers, n_dots))
         self.g_w = nn.Parameter(0.1 * torch.randn(p_layers, n_dots, d_s, generator=g))
@@ -356,6 +379,8 @@ class DotPopulation(nn.Module):
         else:
             scores = torch.einsum("bfwj,nj->bfnw", wind_k, self._sel(round_idx, self.q))
         scores = scores / math.sqrt(self.d_q)
+        if self.d_bias is not None:
+            scores = scores + self._sel(round_idx, self.d_bias).view(1, 1, n, w)
         if valid_mask is not None:
             scores = scores.masked_fill(~valid_mask[None, :, None, :], float("-inf"))
         if self.read_mode == "secluded":
@@ -410,7 +435,12 @@ class DotPopulation(nn.Module):
             # state is needed on this pass — skip p_out entirely.
             return DotOutputs(log_pi=None, gamma=gamma, trust_term=trust,
                               state=s_new, e_state=None)
-        e_state = torch.einsum("bfnd,ndm->bfnm", s_new, self._sel(round_idx, self.p_out))
+        if self.share_out:
+            e_state = torch.einsum("bfnd,dm->bfnm", s_new,
+                                   self._sel(round_idx, self.p_out))
+        else:
+            e_state = torch.einsum("bfnd,ndm->bfnm", s_new,
+                                   self._sel(round_idx, self.p_out))
 
         if not want_log_pi:
             # shared-head mode: no per-dot vocab head — the region pools
@@ -472,6 +502,8 @@ class DotPopulation(nn.Module):
                                          dims=([2], [1]))
                 scores = scores.permute(0, 2, 1)                        # [f, N, w]
             scores = scores / math.sqrt(self.d_q)
+            if self.d_bias is not None:
+                scores = scores + self._sel(round_idx, self.d_bias).view(1, n, w)
             if valid_mask is not None:
                 vm = valid_mask.unsqueeze(0).expand(b, t, w).reshape(f, 1, w)
                 scores = scores.masked_fill(~vm, float("-inf"))         # [f, N, w]
@@ -541,8 +573,9 @@ class DotPopulation(nn.Module):
                               trust_term=trust.reshape(b, t, n),
                               state=s_new.reshape(b, t, n, self.d_s),
                               e_state=None)
-        e_state = torch.bmm(s_new.transpose(0, 1),                     # [N, f, d_s]
-                            self._sel(round_idx, self.p_out))          # [N, d_s, d]
+        # [N, f, d_s] @ ([N, d_s, d] or [d_s, d]) -> [N, f, d]
+        e_state = torch.matmul(s_new.transpose(0, 1),
+                               self._sel(round_idx, self.p_out))
         if not want_log_pi:
             # shared-head mode: no per-dot vocab head — the region pools
             # e_state in hidden space and runs ONE shared head (Tolu).
