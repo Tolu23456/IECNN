@@ -23,11 +23,13 @@ from models.baselines import build_transformer_baseline
 from models.iecnn import build_iecnn
 from models.memory import region1_rows
 
-torch.set_num_threads(2)
-
 BUDGET = float(sys.argv[1]) if len(sys.argv) > 1 else 150.0
 ONLY = sys.argv[2].split(",") if len(sys.argv) > 2 else None
-B, T = 8, 64
+# Throughput knobs (both arms always get the same value: this is a property
+# of the machine/harness, never of one architecture).
+B = int(os.environ.get("ARM_B", 8))
+torch.set_num_threads(int(os.environ.get("ARM_THREADS", 2)))
+T = 64
 V = 256                      # byte-level toy vocab
 MARK_S = 30.0
 
