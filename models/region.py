@@ -109,7 +109,19 @@ class Region(nn.Module):
             seed=1000 + region_index,
             fast_math=bool(m.get("fast_dot_math", True)),
             slot_slots=self.slot_slots, slot_dim=self.slot_dim,
-            slot_decay=self.slot_decay)
+            slot_decay=self.slot_decay,
+            cell=str(m.get("cell", "gru")))
+        # Lean passes: in hidden mode the pooled shared head and the per-dot
+        # e_state projection are only consumed on the LAST pass. With
+        # head_last_only the earlier passes skip both (they still update the
+        # dots' states and the weighting). Default false = unchanged.
+        self.head_last_only = bool(m.get("head_last_only", False))
+        # Per-dot vocab logits are consumed ONLY by the optional auxiliary
+        # losses (oracle / boosted / decorrelation / confidence), and those
+        # losses read exactly one number per dot: the log-prob of the true
+        # token. With per_dot_logits: false the [B,T,N,V] tensor is never
+        # materialized (no GEMM, no log-softmax, no big transpose).
+        self.per_dot_logits = bool(m.get("per_dot_logits", True))
         self.dots.head_layout = str(m.get("head_layout", "shared_gemm"))
         # Rung E12: Tolu's seclusion mechanism — model.read_mode: "secluded"
         # makes every dot commit to exactly ONE token in its window (hard
@@ -117,6 +129,7 @@ class Region(nn.Module):
         self.read_mode = str(m.get("read_mode", "soft"))
         self.dots.read_mode = self.read_mode
         self.dots.tau_seclusion = float(m.get("tau_seclusion", 1.0))
+        self.dots.ste_topk = int(m.get("seclusion_topk", 0))
         # speed opt 7 (Tolu's "don't compute the same op twice"): with
         # share_pass_params + static queries the attention block is
         # bit-identical across passes; one fresh dict per region-forward
@@ -126,7 +139,20 @@ class Region(nn.Module):
         self.cache_attention = bool(m.get("cache_attention", True))
         self.w_k = nn.Linear(d, d_q, bias=False)
         self.w_v = nn.Linear(d, d_v, bias=False)
-        self.rel_emb = nn.Embedding(self.span, d_q)
+        # Time axis of the read window. "contiguous" (default) = the last
+        # `span` tokens, one slot each. "quad" = the same number of slots
+        # spread quadratically from distance 0 out to `window_reach`, so the
+        # read reaches window_reach tokens back for the SAME compute (same
+        # key/value gathers, same scores, same mix). Rationale: with a
+        # contiguous window and span=16 the measured read collapsed to
+        # distance 0.17 (86% of picks = the previous token) — the "memory"
+        # was a bigram. A multi-scale axis keeps the cheap near slots and
+        # adds far slots nobody has to pay extra for.
+        self.window_mode = str(m.get("window_mode", "contiguous"))
+        self.window_reach = int(m.get("window_reach", self.span))
+        emb_n = (self.span if self.window_mode == "contiguous"
+                 else max(self.window_reach, self.span) + 1)
+        self.rel_emb = nn.Embedding(emb_n, d_q)
         nn.init.normal_(self.rel_emb.weight, std=1.0 / math.sqrt(d_q))
 
         # learned scale/trust scalars per region (spec 04 section 3)
@@ -150,16 +176,27 @@ class Region(nn.Module):
                 dropout=float(m.get("message_dropout", 0.2)))
 
     # ------------------------------------------------------------------
+    def _window_offsets(self, device) -> torch.Tensor:
+        """Slot -> position offset. Slot span-1 is always the current token."""
+        if self.window_mode != "quad":
+            return torch.arange(self.span, device=device) - self.span + 1
+        w = self.span
+        reach = max(self.window_reach, w)
+        i = torch.arange(w, device=device, dtype=torch.float32)
+        dist = ((i / max(w - 1, 1)) ** 2 * reach).round().long()
+        dist[0] = 0
+        return (-dist).flip(0)        # ascending offsets, slot -1 = current
+
     def _window_memory(self, rows: torch.Tensor, device):
         """Rows [B,T,d] -> (wind_k [B,T,w,d_q], wind_v [B,T,w,d_v], valid [T,w])."""
         k_all = self.w_k(rows)                       # [B, T, d_q]
         v_all = self.w_v(rows)                       # [B, T, d_v]
-        wind_k_raw, valid = gather_windows(k_all, self.span)
-        wind_v, _ = gather_windows(v_all, self.span)
-        # slot i of the window holds position t-(w-1-i): distance = w-1-i
-        slot_idx = torch.arange(self.span, device=device)
-        dist_idx = self.span - 1 - slot_idx
-        rel = self.rel_emb(dist_idx)                 # [w, d_q], distance 0 at t itself
+        offs = self._window_offsets(device)
+        wind_k_raw, valid = gather_windows(k_all, self.span, offs)
+        wind_v, _ = gather_windows(v_all, self.span, offs)
+        # slot i holds position t + offs[i]; relative distance = -offs[i]
+        dist_idx = (-offs).clamp_min(0)
+        rel = self.rel_emb(dist_idx)                 # [w, d_q], distance 0 at t
         wind_k = wind_k_raw + rel[None, None]
         return wind_k, wind_v, valid.to(device)
 
@@ -347,11 +384,14 @@ class Region(nn.Module):
                 pooled = torch.einsum("bfn,bfnd->bfd", w_prev, state_prev)
                 h_pool = pooled[:, :, None, :].expand(b, t, n, self.d_s)
             last = (p == self.n_passes)
+            lean = self.head_last_only and not last
+            want_pi = last and self.per_dot_logits
             out = self.dots(wind_k, wind_v, valid, h_pool, err,
                             round_idx=p - 1,
                             msg_in=msg_read if p > 1 else None, state=state,
                             emb_table=emb_table, attn_cache=attn_cache,
-                            want_log_pi=last, slot_table=slots)
+                            want_log_pi=want_pi, slot_table=slots,
+                            want_e_state=(not lean))
             state_prev = out.state
             if slots is not None:
                 # e13: detached scan — the table this pass wrote is read by
@@ -368,10 +408,15 @@ class Region(nn.Module):
                 trust = tr_c
             w = w_c
 
-            # ONE shared head on the pooled hidden state
-            h_mix = torch.einsum("bfn,bfnd->bfd", w, out.e_state)   # [B, T, d]
-            logits = h_mix.reshape(f, self.d).matmul(emb_table.t())  # [f, V]
-            log_b = F.log_softmax(logits, dim=-1).reshape(b, t, -1)
+            # ONE shared head on the pooled hidden state (last pass only when
+            # head_last_only is set: earlier passes exist to refine the dots'
+            # states, not to emit a distribution)
+            if lean:
+                log_b = None
+            else:
+                h_mix = torch.einsum("bfn,bfnd->bfd", w, out.e_state)   # [B, T, d]
+                logits = h_mix.reshape(f, self.d).matmul(emb_table.t())  # [f, V]
+                log_b = F.log_softmax(logits, dim=-1).reshape(b, t, -1)
 
             # hidden-space error features for the next pass (3 dims, cheap):
             # own weight, gate entropy, top weight
@@ -402,10 +447,11 @@ class Region(nn.Module):
             w_out = w_final
 
         # per-dot logits, ONE GEMM, last pass only (oracle/metrics/losses)
-        e_f = e_state_last.reshape(f * n, self.d)
-        log_pi = F.log_softmax(e_f.matmul(emb_table.t()),
-                               dim=-1).reshape(b, t, n, -1)
-        per_pass[-1]["log_pi"] = log_pi
+        if self.per_dot_logits:
+            e_f = e_state_last.reshape(f * n, self.d)
+            log_pi = F.log_softmax(e_f.matmul(emb_table.t()),
+                                   dim=-1).reshape(b, t, n, -1)
+            per_pass[-1]["log_pi"] = log_pi
 
         return {"log_b": log_final,
                 "region_summary": summary,

@@ -95,7 +95,7 @@ class DotPopulation(nn.Module):
                  n_passes=3, dynamic_query=False, share_pass_params=True,
                  seed: int = 0, fast_math: bool = True,
                  slot_slots: int = 0, slot_dim: int = 32,
-                 slot_decay: float = 0.5):
+                 slot_decay: float = 0.5, cell: str = "gru"):
         super().__init__()
         self.N = n_dots
         self.d = d
@@ -122,6 +122,13 @@ class DotPopulation(nn.Module):
         # Region from model.read_mode; tau_seclusion anneals the soft term.
         self.read_mode = "soft"
         self.tau_seclusion = 1.0
+        # Seclusion v2: the straight-through backward only needs the tokens
+        # that NEARLY won. seclusion_topk=0 (default) keeps the original
+        # full-window softmax; k>0 restricts it to the top-k scores, which
+        # cuts the gradient path (and its [f,N,w,d_v] tensors) by w/k and
+        # aims the learning signal exactly at the near-miss keys ("shout
+        # louder" is a message for the runner-up, not for token 20 back).
+        self.ste_topk = 0
         # E13 (Tolu's slot-table memory): S private slots per dot, dim d_w,
         # carried across positions inside one forward (zeroed at sequence
         # start). Parameter-lean: the write value is a per-dot d_s->d_w
@@ -135,6 +142,17 @@ class DotPopulation(nn.Module):
         self.slot_read_dim = self.d_w if self.S > 0 else 0
         self.in_dim = gru_input_dim(d_v, d_s, message_dim, self.slot_read_dim)
 
+        # Recurrence cell. "gru" (default) = the original 3-gate GRU; "lug"
+        # = the Lean Update Gate (SRU-style): the only recurrent matrix is
+        # DIAGONAL (u * s), so the cell costs one input GEMM of width 2*d_s
+        # and NO hidden GEMM — ~2.5x fewer MACs than the GRU:
+        #     z = sigmoid(x W_z + u * s + b_z)      (forget/keep gate)
+        #     h = tanh(x W_h + b_h)                 (candidate)
+        #     s' = (1 - z) h + z s
+        # The committee still integrates over passes; only the integrator
+        # changed. Selected by model.cell.
+        self.cell = str(cell)
+
         p_layers = 1 if share_pass_params else n_passes   # stacked per-pass depth
         g = torch.Generator().manual_seed(seed)
 
@@ -143,11 +161,23 @@ class DotPopulation(nn.Module):
             [torch.stack([_xavier(d_s, d_q, g) for _ in range(n_dots)]) for _ in range(p_layers)])) \
             if dynamic_query else None
         self.s0 = nn.Parameter(0.02 * torch.randn(p_layers, n_dots, d_s, generator=g))
-        self.w_ih = nn.Parameter(torch.stack(
-            [torch.stack([_xavier(self.in_dim, 3 * d_s, g) for _ in range(n_dots)]) for _ in range(p_layers)]))
-        self.b_ih = nn.Parameter(torch.zeros(p_layers, n_dots, 3 * d_s))
-        self.w_hh = nn.Parameter(torch.stack(
-            [torch.stack([_orth(d_s, 3 * d_s, g) for _ in range(n_dots)]) for _ in range(p_layers)]))
+        if self.cell == "lug":
+            self.w_ih = None
+            self.b_ih = None
+            self.w_hh = None
+            self.w_ih_lug = nn.Parameter(torch.stack(
+                [torch.stack([_xavier(self.in_dim, 2 * d_s, g)
+                              for _ in range(n_dots)]) for _ in range(p_layers)]))
+            self.b_lug = nn.Parameter(torch.zeros(p_layers, n_dots, 2 * d_s))
+            # diagonal recurrence gain, init 0.5 so the gate starts ~0.5
+            self.u_lug = nn.Parameter(torch.full((p_layers, n_dots, d_s), 0.5))
+        else:
+            self.w_ih = nn.Parameter(torch.stack(
+                [torch.stack([_xavier(self.in_dim, 3 * d_s, g) for _ in range(n_dots)]) for _ in range(p_layers)]))
+            self.b_ih = nn.Parameter(torch.zeros(p_layers, n_dots, 3 * d_s))
+            self.w_hh = nn.Parameter(torch.stack(
+                [torch.stack([_orth(d_s, 3 * d_s, g) for _ in range(n_dots)]) for _ in range(p_layers)]))
+            self.w_ih_lug = self.b_lug = self.u_lug = None
         self.p_out = nn.Parameter(torch.stack(
             [torch.stack([_xavier(d_s, d, g) for _ in range(n_dots)]) for _ in range(p_layers)]))
         self.c_w = nn.Parameter(0.1 * torch.randn(p_layers, n_dots, d_s, generator=g))
@@ -240,10 +270,22 @@ class DotPopulation(nn.Module):
         idx = scores.argmax(-1)                                    # [f, N]
         ctx_hard = wv.gather(
             1, idx.unsqueeze(-1).expand(-1, -1, wv.shape[-1]))      # [f, N, d_v]
-        attn_soft = torch.nan_to_num(
-            F.softmax(scores / self.tau_seclusion, dim=-1), nan=0.0)
-        ctx_soft = torch.matmul(attn_soft.unsqueeze(-2),
-                                wv.unsqueeze(1)).squeeze(-2)       # [f, N, d_v]
+        k = self.ste_topk if self.ste_topk > 0 else scores.shape[-1]
+        k = min(k, scores.shape[-1])
+        if k < scores.shape[-1]:
+            topv, topi = scores.topk(k, dim=-1)                     # [f, N, k]
+            attn_soft = torch.nan_to_num(
+                F.softmax(topv / self.tau_seclusion, dim=-1), nan=0.0)
+            wv_k = (wv.unsqueeze(1)
+                    .expand(-1, scores.shape[1], -1, -1)
+                    .gather(2, topi.unsqueeze(-1)
+                            .expand(-1, -1, -1, wv.shape[-1])))     # [f, N, k, d_v]
+            ctx_soft = (attn_soft.unsqueeze(-1) * wv_k).sum(-2)    # [f, N, d_v]
+        else:
+            attn_soft = torch.nan_to_num(
+                F.softmax(scores / self.tau_seclusion, dim=-1), nan=0.0)
+            ctx_soft = torch.matmul(attn_soft.unsqueeze(-2),
+                                    wv.unsqueeze(1)).squeeze(-2)    # [f, N, d_v]
         return ctx_hard + (ctx_soft - ctx_soft.detach())
 
     def initial_state(self, batch_shape) -> torch.Tensor:
@@ -260,7 +302,8 @@ class DotPopulation(nn.Module):
                 round_idx: int, msg_in, state, emb_table,
                 attn_cache: dict | None = None,
                 want_log_pi: bool = True,
-                slot_table: torch.Tensor | None = None) -> DotOutputs:
+                slot_table: torch.Tensor | None = None,
+                want_e_state: bool = True) -> DotOutputs:
         """One pass for all dots at all positions simultaneously.
 
         wind_k    [B, T, w, d_q]   windowed, rel-distance-added keys
@@ -288,10 +331,11 @@ class DotPopulation(nn.Module):
             return self._forward_fast(wind_k, wind_v, valid_mask, h_pool,
                                       err_feat, round_idx, msg_in, state,
                                       emb_table, attn_cache, want_log_pi,
-                                      slot_table)
+                                      slot_table, want_e_state)
         return self._forward_reference(wind_k, wind_v, valid_mask, h_pool,
                                        err_feat, round_idx, msg_in, state,
-                                       emb_table, want_log_pi, slot_table)
+                                       emb_table, want_log_pi, slot_table,
+                                       want_e_state)
 
     # the einsum-per-op version, kept for the equivalence test and as a
     # reference implementation of spec 01 (slower: einsum re-plans paths the
@@ -299,7 +343,8 @@ class DotPopulation(nn.Module):
     def _forward_reference(self, wind_k, wind_v, valid_mask, h_pool, err_feat,
                            round_idx: int, msg_in, state, emb_table,
                            want_log_pi: bool = True,
-                           slot_table: torch.Tensor | None = None) -> DotOutputs:
+                           slot_table: torch.Tensor | None = None,
+                           want_e_state: bool = True) -> DotOutputs:
         b, t, w = wind_k.shape[0], wind_k.shape[1], wind_k.shape[2]
         device = wind_k.device
 
@@ -336,22 +381,37 @@ class DotPopulation(nn.Module):
             parts.append(r.unsqueeze(1).expand(b, t, self.N, self.d_w))
         x = torch.cat(parts, dim=-1)                                    # [B, T, N, d_in]
 
-        in_gates = torch.einsum("bfni,niq->bfnq", x, self._sel(round_idx, self.w_ih))
-        hid_gates = torch.einsum("bfnd,ndq->bfnq", state, self._sel(round_idx, self.w_hh))
-        in_gates = in_gates + self._sel(round_idx, self.b_ih)
-        iz, ir, inet = in_gates.chunk(3, dim=-1)
-        hz, hr, hnet = hid_gates.chunk(3, dim=-1)
-        z = torch.sigmoid(iz + hz)
-        r = torch.sigmoid(ir + hr)
-        n_t = torch.tanh(inet + r * hnet)                               # r-gated candidate
-        s_new = (1.0 - z) * n_t + z * state
+        if self.cell == "lug":
+            g2 = torch.einsum("bfni,niq->bfnq", x,
+                              self._sel(round_idx, self.w_ih_lug))
+            g2 = g2 + self._sel(round_idx, self.b_lug)
+            iz, ih = g2.chunk(2, dim=-1)
+            z = torch.sigmoid(
+                iz + self._sel(round_idx, self.u_lug) * state)
+            s_new = (1.0 - z) * torch.tanh(ih) + z * state
+        else:
+            in_gates = torch.einsum("bfni,niq->bfnq", x, self._sel(round_idx, self.w_ih))
+            hid_gates = torch.einsum("bfnd,ndq->bfnq", state, self._sel(round_idx, self.w_hh))
+            in_gates = in_gates + self._sel(round_idx, self.b_ih)
+            iz, ir, inet = in_gates.chunk(3, dim=-1)
+            hz, hr, hnet = hid_gates.chunk(3, dim=-1)
+            z = torch.sigmoid(iz + hz)
+            r = torch.sigmoid(ir + hr)
+            n_t = torch.tanh(inet + r * hnet)                           # r-gated candidate
+            s_new = (1.0 - z) * n_t + z * state
 
         # ---- heads --------------------------------------------------------
-        e_state = torch.einsum("bfnd,ndm->bfnm", s_new, self._sel(round_idx, self.p_out))
         gamma = torch.einsum("bfnd,nd->bfn", s_new, self._sel(round_idx, self.c_w)) \
             + self._sel(round_idx, self.c_b)
         trust = torch.einsum("bfnd,nd->bfn", s_new, self._sel(round_idx, self.g_w)) \
             + self._sel(round_idx, self.g_b)
+        if not want_log_pi and not want_e_state:
+            # lean pass: neither the per-dot vocab head nor the pooled hidden
+            # state is needed on this pass — skip p_out entirely.
+            return DotOutputs(log_pi=None, gamma=gamma, trust_term=trust,
+                              state=s_new, e_state=None)
+        e_state = torch.einsum("bfnd,ndm->bfnm", s_new, self._sel(round_idx, self.p_out))
+
         if not want_log_pi:
             # shared-head mode: no per-dot vocab head — the region pools
             # e_state in hidden space and runs ONE shared head (Tolu).
@@ -371,7 +431,8 @@ class DotPopulation(nn.Module):
                       round_idx: int, msg_in, state, emb_table,
                       attn_cache: dict | None = None,
                       want_log_pi: bool = True,
-                      slot_table: torch.Tensor | None = None) -> DotOutputs:
+                      slot_table: torch.Tensor | None = None,
+                      want_e_state: bool = True) -> DotOutputs:
         b, t, w = wind_k.shape[0], wind_k.shape[1], wind_k.shape[2]
         f = b * t
         n = self.N
@@ -434,20 +495,31 @@ class DotPopulation(nn.Module):
                          .reshape(f, n, self.d_w))
         x = torch.cat(parts, dim=-1)                                    # [f, N, d_in]
 
-        w_ih_b = self._sel(round_idx, self.w_ih)                        # [N, in, 3h]
-        in_gates = torch.bmm(x.transpose(0, 1), w_ih_b)                 # [N, f, 3h]
         s_f = state.reshape(f, n, self.d_s)
-        hid_gates = torch.bmm(s_f.transpose(0, 1),                      # [N, f, d_s]
-                              self._sel(round_idx, self.w_hh))          # [N, d_s, 3h]
-        in_gates = (in_gates.transpose(0, 1)                            # [f, N, 3h]
-                    + self._sel(round_idx, self.b_ih).unsqueeze(0))
-        h3 = hid_gates.transpose(0, 1)                                  # [f, N, 3h] (view)
-        iz, ir, inet = in_gates.chunk(3, dim=-1)
-        hz, hr, hnet = h3.chunk(3, dim=-1)
-        z = torch.sigmoid(iz + hz)
-        r = torch.sigmoid(ir + hr)
-        n_t = torch.tanh(inet + r * hnet)
-        s_new = (1.0 - z) * n_t + z * s_f                               # [f, N, d_s]
+        if self.cell == "lug":
+            # Lean Update Gate: ONE input GEMM of width 2*h, diagonal
+            # recurrence (u * s), no hidden GEMM.
+            g2 = torch.bmm(x.transpose(0, 1),
+                           self._sel(round_idx, self.w_ih_lug))     # [N, f, 2h]
+            g2 = (g2.transpose(0, 1)
+                  + self._sel(round_idx, self.b_lug).unsqueeze(0))
+            iz, ih = g2.chunk(2, dim=-1)
+            z = torch.sigmoid(iz + self._sel(round_idx, self.u_lug).unsqueeze(0) * s_f)
+            s_new = (1.0 - z) * torch.tanh(ih) + z * s_f                # [f, N, d_s]
+        else:
+            w_ih_b = self._sel(round_idx, self.w_ih)                    # [N, in, 3h]
+            in_gates = torch.bmm(x.transpose(0, 1), w_ih_b)             # [N, f, 3h]
+            hid_gates = torch.bmm(s_f.transpose(0, 1),                  # [N, f, d_s]
+                                  self._sel(round_idx, self.w_hh))      # [N, d_s, 3h]
+            in_gates = (in_gates.transpose(0, 1)                        # [f, N, 3h]
+                        + self._sel(round_idx, self.b_ih).unsqueeze(0))
+            h3 = hid_gates.transpose(0, 1)                              # [f, N, 3h] (view)
+            iz, ir, inet = in_gates.chunk(3, dim=-1)
+            hz, hr, hnet = h3.chunk(3, dim=-1)
+            z = torch.sigmoid(iz + hz)
+            r = torch.sigmoid(ir + hr)
+            n_t = torch.tanh(inet + r * hnet)
+            s_new = (1.0 - z) * n_t + z * s_f                           # [f, N, d_s]
 
         # ---- heads --------------------------------------------------------
         # speed opt 6 (Tolu's "don't move data around" hint): with
@@ -458,12 +530,19 @@ class DotPopulation(nn.Module):
         # backward. The small [., ., d_s]-scale transpose stays; the big
         # tensor is only ever written once, by the GEMM, in final layout.
         # Same math; only GEMM reassociation differs (last bits).
-        e_state = torch.bmm(s_new.transpose(0, 1),                     # [N, f, d_s]
-                            self._sel(round_idx, self.p_out))          # [N, d_s, d]
         gamma = torch.einsum("fnd,nd->fn", s_new, self._sel(round_idx, self.c_w)) \
             + self._sel(round_idx, self.c_b).unsqueeze(0)
         trust = torch.einsum("fnd,nd->fn", s_new, self._sel(round_idx, self.g_w)) \
             + self._sel(round_idx, self.g_b).unsqueeze(0)
+        if not want_log_pi and not want_e_state:
+            # lean pass: the region only needs gamma/trust (weighting) and
+            # the state — skip the p_out projection entirely.
+            return DotOutputs(log_pi=None, gamma=gamma.reshape(b, t, n),
+                              trust_term=trust.reshape(b, t, n),
+                              state=s_new.reshape(b, t, n, self.d_s),
+                              e_state=None)
+        e_state = torch.bmm(s_new.transpose(0, 1),                     # [N, f, d_s]
+                            self._sel(round_idx, self.p_out))          # [N, d_s, d]
         if not want_log_pi:
             # shared-head mode: no per-dot vocab head — the region pools
             # e_state in hidden space and runs ONE shared head (Tolu).
