@@ -783,6 +783,23 @@ ARMS = {
         global_read=True, spans=(8,), head_post=384, head_post_layers=5,
         read_ln=True, head_ln=True, global_decay=True, dist_bias=True),
         {"lr": 2e-3, "swa": 0.99}),
+    # --- fewer-but-wider blocks: the only remaining way to be MUCH faster ---
+    # Blocks are 74% of the step and cost 2*d*w per layer, so the frontier has
+    # a constant-compute line: x5/w384 = 491k MAC/token per position, x4/w448 =
+    # 459k, x3/w512 = 393k. If the ratio sweep says w>3d pays, then trading two
+    # blocks for a wider MLP is a straight 20% off the step at equal nominal
+    # capacity, which is the only shape of change that can make this model
+    # MASSIVELY faster rather than 16% faster.
+    "iecnn-n3-x4-p1-ln-decay-d128-w512": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=512, head_post_layers=4,
+        read_ln=True, head_ln=True, global_decay=True),
+        {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-n3-x3-p1-ln-decay-d128-w512": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=512, head_post_layers=3,
+        read_ln=True, head_ln=True, global_decay=True),
+        {"lr": 2e-3, "swa": 0.99}),
     # --- the cheap end of the frontier: is x3 enough? ----------------------
     # x4 (559k, 0.0212 s/step) is 16% faster than tf; x5 adds 0.004 bpc for
     # 14% more step time. x3 has never been run at d128, and it is the arm
