@@ -287,6 +287,21 @@ ARMS = {
         "lug", True, n_passes=1, n_dots=4, d_s=64, per_dot_logits=False,
         global_read=True, spans=(32,), window_mode="hybrid",
         window_reach=64), {"lr": 2e-3}),
+    # --- cheapest committee: N and d_s are the two cost knobs left ------
+    # Every 10% off the step is worth ~10% more tokens at equal wall clock,
+    # which is exactly the size of the bpc gap we are trying to open.
+    "iecnn-lr2-g8-n3": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=3, d_s=64, per_dot_logits=False,
+        global_read=True, spans=(8,)), {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-lr2-g8-ds48": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=4, d_s=48, per_dot_logits=False,
+        global_read=True, spans=(8,)), {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-lr2-g8-n3-ds48": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=3, d_s=48, per_dot_logits=False,
+        global_read=True, spans=(8,)), {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-lr2-g8-n4-p1": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=4, d_s=64, per_dot_logits=False,
+        global_read=True, spans=(8,)), {"lr": 2e-3, "swa": 0.99}),
     # --- ONE shared cell, N specialised reads ---------------------------
     # The cell is the expensive part and it is 4 tiny GEMMs (one per dot).
     # Sharing it across dots makes it ONE wide GEMM (~4x the rows, same
@@ -421,10 +436,17 @@ print(f"tokens train={train.numel()} val={val.numel()} | B={B} T={T} V={V} "
       f"| budget {BUDGET:.0f}s/arm", flush=True)
 
 
+_NT = None
+
+
 def batches(seed: int = 0):
     g = torch.Generator().manual_seed(seed)
+    span = train.numel() - T - 1
     while True:
-        i = torch.randint(0, train.numel() - T - 1, (B,), generator=g)
+        # torch.randint over a 4M range measured at 1.19 ms/step — 3.4% of a
+        # whole 150 s toy step, paid identically by both arms and buying
+        # nothing. torch.rand + scale is the same uniform draw, ~50x cheaper.
+        i = (torch.rand(B, generator=g) * span).long()
         x = torch.stack([train[j:j + T] for j in i])
         y = torch.stack([train[j + 1:j + 1 + T] for j in i])
         yield x, y
