@@ -459,6 +459,21 @@ ARMS = {
     "iecnn-d192-ds128-n4": ("iecnn", lambda: iecnn(
         "lug", True, n_passes=2, n_dots=4, d_s=128, d=192, per_dot_logits=False,
         global_read=True, spans=(8,)), {"lr": 2e-3, "swa": 0.99}),
+    # the same arm with each zero-parameter mechanism grafted on, so the GPU
+    # comparison is mechanism-for-mechanism at the capacity point that won.
+    "iecnn-d192-res": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=4, d_s=128, d=192, per_dot_logits=False,
+        global_read=True, spans=(8,), head_skip=True),
+        {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-d192-gx": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=4, d_s=128, d=192, per_dot_logits=False,
+        global_read=True, spans=(8,), global_exact=True,
+        query_from_input=True), {"lr": 2e-3, "swa": 0.99}),
+    # bracket the capacity sweet spot: d192 ran out of tokens at 48M, d96 was
+    # under-capacity at 72k params, so ~200k params may be the fixed point.
+    "iecnn-d128-ds96-n4": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=2, n_dots=4, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(8,)), {"lr": 2e-3, "swa": 0.99}),
     "iecnn-d256-ds256-n6": ("iecnn", lambda: iecnn(
         "lug", True, n_passes=2, n_dots=6, d_s=256, d=256, per_dot_logits=False,
         global_read=True, spans=(8,)), {"lr": 2e-3, "swa": 0.99}),
