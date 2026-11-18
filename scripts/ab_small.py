@@ -809,6 +809,50 @@ ARMS = {
         global_read=True, spans=(8,), head_post=512, head_post_layers=3,
         read_ln=True, head_ln=True, global_decay=True),
         {"lr": 2e-3, "swa": 0.99}),
+    # --- where does WIDTH turn over? (wide-shallow is now the frontier) -----
+    # x3/w512 beat x5/w384 on both currencies; w/d there is 4.0 and the width
+    # axis has never turned over. w640 (5.0) and w768 (6.0) both stay at or
+    # under x5/w384's MAC count (491k: w640 = 491k, w768 = 590k), so if the
+    # monotone trend continues the frontier keeps moving without paying.
+    "iecnn-n3-x3-p1-ln-decay-d128-w640": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=640, head_post_layers=3,
+        read_ln=True, head_ln=True, global_decay=True),
+        {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-n3-x3-p1-ln-decay-d128-w768": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=768, head_post_layers=3,
+        read_ln=True, head_ln=True, global_decay=True),
+        {"lr": 2e-3, "swa": 0.99}),
+    # do the two surviving wins COMPOSE? The read is 0.4% of the step, so span
+    # 12 on top of the wide-shallow block should be nearly free if both are real.
+    "iecnn-n3-x3-p1-ln-decay-d128-w512-s12": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(12,), head_post=512, head_post_layers=3,
+        read_ln=True, head_ln=True, global_decay=True),
+        {"lr": 2e-3, "swa": 0.99}),
+    # --- compile the frontier, three ways --------------------------------
+    # Compile bought the transformer 25% and the dot model 0%. These arms ask
+    # whether that is fixable engineering: default compile, CUDA graphs
+    # (reduce-overhead; shapes are static), and compile with the prefix-scan
+    # eager boundary removed. Same arms as tf so the harness is like-for-like.
+    "iecnn-n3-x3-p1-ln-decay-d128-w512-c": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=512, head_post_layers=3,
+        read_ln=True, head_ln=True, global_decay=True),
+        {"lr": 2e-3, "swa": 0.99, "compile": True}),
+    "iecnn-n3-x3-p1-ln-decay-d128-w512-cro": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=512, head_post_layers=3,
+        read_ln=True, head_ln=True, global_decay=True),
+        {"lr": 2e-3, "swa": 0.99, "compile": "reduce-overhead"}),
+    "iecnn-n3-x3-p1-ln-decay-d128-w512-cns": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=512, head_post_layers=3,
+        read_ln=True, head_ln=True, global_decay=True),
+        {"lr": 2e-3, "swa": 0.99, "compile": "noscan"}),
+    "tf-swa-cro": ("transformer", lambda: tf(96, 4, 3),
+                   {"swa": 0.995, "compile": "reduce-overhead"}),
     # --- the cheap end of the frontier: is x3 enough? ----------------------
     # x4 (559k, 0.0212 s/step) is 16% faster than tf; x5 adds 0.004 bpc for
     # 14% more step time. x3 has never been run at d128, and it is the arm
@@ -1593,8 +1637,21 @@ def main():
         # (across two sessions it would be confounded by tf drift). Compile
         # pays only if its warmup, which comes out of the same 180 s budget, is
         # repaid by the faster steady-state step.
-        if opts.get("compile", os.environ.get("ARM_COMPILE") == "1"):
-            model = torch.compile(model)
+        cflag = opts.get("compile", os.environ.get("ARM_COMPILE") == "1")
+        if cflag:
+            # `compile` is either True, a torch.compile mode name
+            # ("reduce-overhead" = CUDA graphs; static B/T here, so it should
+            # apply), or "noscan" = compile WITHOUT the eager boundary around
+            # the prefix scan, which is the one graph break the region was
+            # forced to keep after Inductor's SplitScan lowering crashed.
+            mode = None
+            if isinstance(cflag, str):
+                if cflag == "noscan":
+                    cfg["model"]["break_scan"] = False
+                else:
+                    mode = cflag
+            model = (torch.compile(model, mode=mode) if mode
+                     else torch.compile(model))
         # `compile` is consumed HERE: passing it on to run() is a TypeError, and
         # that killed a whole session after the first arm had trained (the GPU
         # slot is the scarce resource, so knobs are stripped, not forwarded).
