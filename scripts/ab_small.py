@@ -766,6 +766,31 @@ ARMS = {
         global_read=True, spans=(8,), head_post=256, head_post_layers=5,
         read_ln=True, head_ln=True, global_decay=True),
         {"lr": 2e-3, "swa": 0.99}),
+    # --- the expansion ratio ABOVE 3, at fixed d ----------------------------
+    # Every w/d data point so far is on the low side: 1.33 (d192-w256, bad),
+    # 2.0 (d192-w384 / d128-w256, bad), 2.4 (d160-w384, bad), 3.0 (d128-w384,
+    # best). The ratio has only ever been tested where it was too SMALL, so
+    # "3.0 is optimal" is unsupported — 3.0 may be the edge of a curve that
+    # keeps rising, or the peak. These arms hold d=128 fixed and move w only,
+    # so the ratio axis is isolated: w320 (2.5), w448 (3.5), w512 (4.0). If
+    # 3.5 or 4.0 wins, the block wants a wider MLP and the frontier moves
+    # there; if 2.5 holds its own, the ratio is a plateau and parameters are
+    # better spent on depth.
+    "iecnn-n3-x5-p1-ln-decay-d128-w320": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=320, head_post_layers=5,
+        read_ln=True, head_ln=True, global_decay=True),
+        {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-n3-x5-p1-ln-decay-d128-w448": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=448, head_post_layers=5,
+        read_ln=True, head_ln=True, global_decay=True),
+        {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-n3-x5-p1-ln-decay-d128-w512": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=512, head_post_layers=5,
+        read_ln=True, head_ln=True, global_decay=True),
+        {"lr": 2e-3, "swa": 0.99}),
     # --- eager vs torch.compile, in one session -----------------------------
     # The throughput batch showed tokens are the only currency that buys bpc,
     # and it killed batch size as a lever. Compile is the other way to buy
