@@ -766,6 +766,32 @@ ARMS = {
         global_read=True, spans=(8,), head_post=256, head_post_layers=5,
         read_ln=True, head_ln=True, global_decay=True),
         {"lr": 2e-3, "swa": 0.99}),
+    # --- the far dot may be capped by the WINDOW, not by the data -----------
+    # Measured horizons on the winning arm are 0.00 / 2.96 / 5.87 tokens back
+    # out of an 8-slot contiguous window: the far dot sits one slot from the
+    # edge. Widening the window is the cheapest possible fix — the read is
+    # ~0.4% of the step, so 16 slots cost ~1.5k MAC/token against 800k, and
+    # it needs no new code, no new parameters and no new gradient path. If the
+    # horizons spread (0/5/11) and bpc drops, the structure was
+    # under-provisioned; if nothing moves, 8 slots already cover the scale the
+    # data has. `d_bias` (a free per-dot per-slot score table) is deliberately
+    # NOT retried here: it was pruned once, and the audit shows the horizons
+    # are already learnt without it.
+    "iecnn-n3-x5-p1-ln-decay-d128-s12": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(12,), head_post=384, head_post_layers=5,
+        read_ln=True, head_ln=True, global_decay=True),
+        {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-n3-x5-p1-ln-decay-d128-s16": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(16,), head_post=384, head_post_layers=5,
+        read_ln=True, head_ln=True, global_decay=True),
+        {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-n4-x5-p1-ln-decay-d128-s16": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=4, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(16,), head_post=384, head_post_layers=5,
+        read_ln=True, head_ln=True, global_decay=True),
+        {"lr": 2e-3, "swa": 0.99}),
     # --- more horizons, now that we know the dots CHOOSE a horizon ----------
     # The audit found the three dots sitting at 0 / ~3 / ~6 tokens back out of
     # an 8-slot window, reading JS 0.20-0.27 and agreeing on 6-10% of
