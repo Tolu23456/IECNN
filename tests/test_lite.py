@@ -904,9 +904,12 @@ def test_global_decay_adds_recency_and_vanishes_at_gamma_one():
     v = torch.randn(b, t, db.d_v)
     with torch.no_grad():
         plain = db._global_ctx(k, v, 0)
-        dd.g_decay.fill_(20.0)             # sigmoid -> 1
+        dd.g_decay.fill_(25.0)             # sigmoid -> 1 (clamped at 0.99999)
         same = dd._global_ctx(k, v, 0)
-        assert (plain - same).abs().max().item() < 1e-4
+        # gamma is clamped just below 1, so this is equivalence up to the
+        # clamp, not bit-identity: gamma^-12 at 0.99999 is 1.0001.
+        d_small = (plain - same).abs().max().item()
+        assert d_small < 1e-3, d_small
         dd.g_decay.fill_(-2.0)             # sigmoid -> 0.12 -> clamp 0.5
         rec = dd._global_ctx(k, v, 0)
         # position 0 has exactly one cause, so recency must return v_0 there

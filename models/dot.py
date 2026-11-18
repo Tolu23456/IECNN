@@ -589,7 +589,7 @@ class DotPopulation(nn.Module):
             # gamma^-s on both numerator and denominator; the gamma^-t factor
             # is common to every term and cancels in the ratio.
             gam = torch.sigmoid(self._sel(round_idx, self.g_decay))
-            gam = gam.clamp(0.5, 0.9999).view(1, 1, n)
+            gam = gam.clamp(0.5, 0.99999).view(1, 1, n)
             if t > 1024:
                 raise ValueError(
                     "global_decay's unnormalised scan is float32-safe only to "
