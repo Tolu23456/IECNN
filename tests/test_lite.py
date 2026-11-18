@@ -885,3 +885,44 @@ def test_read_heads_adds_patterns_for_free_and_h1_is_identical():
     loss.backward()
     assert h2.regions[0].dots.q_extra.grad is not None
     assert torch.isfinite(h2.regions[0].dots.q_extra.grad).all()
+
+
+def test_global_decay_adds_recency_and_vanishes_at_gamma_one():
+    """The prefix read must be exactly unchanged when the per-dot decay is ~1,
+    and must actually weight recent values more when it is small. N extra
+    scalars is the whole parameter cost."""
+    kw = dict(global_read=True, per_dot_logits=False, head_last_only=True,
+              n_passes=2)
+    base = build_iecnn(_cfg(**kw), 64)
+    dec = build_iecnn(_cfg(**kw, global_decay=True), 64)
+    nb = sum(p.numel() for p in base.parameters())
+    nd = sum(p.numel() for p in dec.parameters())
+    assert nd - nb == _cfg(**kw)["model"]["n_dots"]
+    b, t = 2, 12
+    db, dd = base.regions[0].dots, dec.regions[0].dots
+    k = torch.zeros(b, t, db.d_q)          # uniform scores: only distance acts
+    v = torch.randn(b, t, db.d_v)
+    with torch.no_grad():
+        plain = db._global_ctx(k, v, 0)
+        dd.g_decay.fill_(20.0)             # sigmoid -> 1
+        same = dd._global_ctx(k, v, 0)
+        assert (plain - same).abs().max().item() < 1e-4
+        dd.g_decay.fill_(-2.0)             # sigmoid -> 0.12 -> clamp 0.5
+        rec = dd._global_ctx(k, v, 0)
+        # position 0 has exactly one cause, so recency must return v_0 there
+        assert (rec[:, 0] - v[:, 0]).abs().max().item() < 1e-5
+        # and the last position must be much closer to v_t than the bag is
+        d_rec = (rec[:, -1] - v[:, -1]).abs().mean()
+        d_bag = (plain[:, -1] - v[:, -1]).abs().mean()
+        assert d_rec < d_bag
+        # causality
+        v2 = v.clone()
+        v2[:, 7:] += 3.0
+        r2 = dd._global_ctx(k, v2, 0)
+        assert (rec[:, :7] - r2[:, :7]).abs().max().item() < 1e-6
+    dec.train()
+    x = torch.randint(0, 64, (2, 12))
+    y = torch.randint(0, 64, (2, 12))
+    loss = -dec(x)["final_log_probs"].reshape(-1, 64).gather(1, y.reshape(-1, 1)).mean()
+    loss.backward()
+    assert torch.isfinite(dd.g_decay.grad).all()

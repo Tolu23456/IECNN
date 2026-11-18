@@ -121,7 +121,8 @@ class DotPopulation(nn.Module):
                  in_ln: bool = False, share_cell: bool = False,
                  carry_state: bool = False, carry_chunk: int = 8,
                  gla: bool = False, global_exact: bool = False,
-                 break_scan: bool = False, read_heads: int = 1):
+                 break_scan: bool = False, read_heads: int = 1,
+                 global_decay: bool = False):
         super().__init__()
         self.N = n_dots
         self.d = d
@@ -197,6 +198,21 @@ class DotPopulation(nn.Module):
         # total context width, total value MACs and total ctx size are all
         # unchanged; the only new parameters are (H-1)*d_q per dot, and head 0
         # reuses `self.q`, so H=1 is bit-identical and adds nothing.
+        # global_decay: the prefix read currently sums a bag of EVERY past
+        # key with no distance term (e_s = exp(q.k_s) does not know how far
+        # back s is), so "the token 10 back" and "the token 200 back" are
+        # indistinguishable to it. One learned per-dot geometric decay per
+        # step gives the bag recency:
+        #     ctx_t = sum_{s<=t} e_s gamma^(t-s) v_s / sum_{s<=t} e_s gamma^(t-s)
+        # which is still two cumsums: multiply by gamma^-s before the scan,
+        # the common factor gamma^-t cancels in the ratio. N extra scalars.
+        self.global_decay = bool(global_decay)
+        if self.global_decay:
+            # sigmoid^-1(0.99) so the read starts almost uniform and can only
+            # sharpen if that pays
+            self.g_decay = nn.Parameter(torch.full((p_layers, n_dots), 4.6))
+        else:
+            self.g_decay = None
         self.read_heads = max(1, int(read_heads))
         if self.read_heads > 1:
             self.q_extra = nn.Parameter(torch.stack([
@@ -569,6 +585,18 @@ class DotPopulation(nn.Module):
         # way, but the time-axis max keeps the cumsum terms O(1) so float32
         # does not lose digits in the prefix sum.
         e = torch.exp(sc - sc.amax(dim=1, keepdim=True))
+        if self.g_decay is not None:
+            # gamma^-s on both numerator and denominator; the gamma^-t factor
+            # is common to every term and cancels in the ratio.
+            gam = torch.sigmoid(self._sel(round_idx, self.g_decay))
+            gam = gam.clamp(0.5, 0.9999).view(1, 1, n)
+            if t > 1024:
+                raise ValueError(
+                    "global_decay's unnormalised scan is float32-safe only to "
+                    "T=1024 (gamma^-T); chunk it before using longer contexts")
+            inv = gam ** (-torch.arange(t, device=e.device, dtype=e.dtype
+                                        ).view(1, t, 1))
+            e = e * inv
         cum_e = torch.cumsum(e, dim=1)                               # [B, T, N]
         ev = e.unsqueeze(-1) * full_v.unsqueeze(2)                   # [B, T, N, d_v]
         cum_ev = torch.cumsum(ev, dim=1)                              # [B, T, N, d_v]
