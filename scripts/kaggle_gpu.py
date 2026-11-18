@@ -25,16 +25,17 @@ import sys
 import urllib.request
 import zipfile
 
-TAG = os.environ.get("K_TAG", "comb2")
+TAG = os.environ.get("K_TAG", "share1")
 BUDGET = os.environ.get("K_BUDGET", "180")
 ARM_B = os.environ.get("K_B", "32")
 ARM_T = os.environ.get("K_T", "256")
 VALW = os.environ.get("K_VALW", "160")
 ARMS = os.environ.get(
-    "K_ARMS", "tf-swa,iecnn-n3-x4-p1-ln-decay,iecnn-n3-x5-p1-ln-decay,"
-              "iecnn-n3-x4-p1-ln-decay-w256,"
-              "iecnn-n3-x4-p1-ln-decay-d128,"
-              "iecnn-n3-x4-p1-ln-decay-h2")
+    "K_ARMS", "tf-swa,iecnn-n3-x4-p1-ln-decay,"
+              "iecnn-n3-x4-p1-ln-decay-shareall,"
+              "iecnn-n3-x4-p1-ln-decay-shareup,"
+              "iecnn-n3-x4-p1-ln-decay-k3,"
+              "iecnn-n3-x4-p1-ln-decay-k5")
 
 W = "/kaggle/working"
 REPO = "https://github.com/Tolu23456/IECNN.git"
