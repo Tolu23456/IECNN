@@ -1193,3 +1193,22 @@ def test_reread_is_inert_at_init_causal_and_trains():
               reg.rr_o.weight):
         assert p.grad is not None and torch.isfinite(p.grad).all()
     assert reg.rr_o.weight.grad.abs().sum() > 0
+
+
+def test_gather_windows_plain_flag_matches_the_tensor_check():
+    """The compile-safe `plain` argument must be a pure optimisation: for the
+    default sliding window it has to return bit-identical windows to the eager
+    tensor comparison, and for a non-default window it must NOT take the fast
+    path. (The tensor comparison itself is what made torch.compile fail with a
+    data-dependent guard, so it can never come back into a trained forward.)"""
+    from models.memory import gather_windows
+    x = torch.randn(2, 9, 4)
+    for span in (3, 8):
+        offs = torch.arange(span) - span + 1
+        a, va = gather_windows(x, span, offs, None)   # eager tensor check
+        b, vb = gather_windows(x, span, offs, True)   # compile-safe path
+        assert torch.equal(a, b) and torch.equal(va, vb)
+        odd = offs.clone()
+        odd[0] = -5 if span > 4 else -2
+        c, _ = gather_windows(x, span, odd, False)
+        assert not torch.equal(a, c)
