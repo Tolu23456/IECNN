@@ -209,30 +209,39 @@ indices must be integers or slices, not NoneType`, buffer `[32,256,3]`), so
 read itself costs 0.026 bpc, so it is not a substitute. This is a *second*
 defect, not the guard: CPU `fullgraph` compiles the scan fine; CUDA does not.
 
-The fix is already in the tree: `ARM_BREAK_SCAN=1` -> `break_scan`, a
-`@torch.compiler.disable` boundary around the scan only. `scn1` (tf, tf-c, x3,
-x3-c with the boundary) measures whether the graph break keeps the compile win
-on GPU. If it eats it, the fallback is a log-depth Hillis-Steele scan (pad+add,
-all pointwise) instead of `cumsum`.
+**`scn1` shows the boundary works but keeps only ~40% of the win.** 360 s, same
+session: tf 1.9639 -> tf-c 1.8960 (step −22.4%, +29% steps); x3 2.0065 ->
+x3-c 2.0003 (step −10.7%, +12% steps). So the dot model now compiles and gains,
+but the graph break costs it about half of what compile gives the transformer.
+
+The reframing that matters: **x3-c is now 7.6% faster per step than tf-c and
+sees 7% more tokens, yet is 0.104 bpc behind.** The speed claim survives against
+a compiled transformer, but only by ~8% — the gap is now entirely quality per
+token, not throughput. (And tf-c is 0.028 better at *equal tokens*, replicated
+across two sessions, which compile should not do; flagged, unexplained.)
+
+Next step-time lever if needed: replace `cumsum` with a log-depth Hillis-Steele
+scan (pad+add, all pointwise) so the boundary can be removed and the missing
+~10% recovered. But quality per token is the bigger lane now.
 
 ## Running / queued
 
 - `dis1` (done) — tf 1.9833 / x3 2.0050 / **`qi0` 2.0429** / `kl1-nx` 2.0312.
   The shared content query is the cost (+0.0379); the lag recovers 0.0117.
-- `scn1` (running, 360 s) — tf / tf-c / x3 / **x3-c with `ARM_BREAK_SCAN=1`**:
-  does the eager boundary around the prefix scan recover the compile win for
-  the dot model? This is the biggest remaining throughput lever.
-- then: `cmp3` at 900 s once the compile number is real, a second seed for
-  `rr2` at 900 s (the mechanism is now a claim candidate), and a flavour rerun
-  on the saved 900 s weights. The per-dot lag is bounded at ~0.012 and is not
-  worth a session unless the compile lane is exhausted.
+- `fr9` (running, 900 s) — **tf-c / x3-c / rr2-c**: the compiled frontier and
+  the two paid levers (reread + compile) in one arm.
+- `s2r9` (running, 900 s, seed 1) — tf / x3 / rr2: the second seed that turns
+  reread from "a win" into a claim.
+- then: the Hillis-Steele scan if the ~10% step is worth chasing, a flavour
+  rerun on the saved 900 s weights, and the per-dot lag only if bounded work
+  turns up (it is capped at ~0.012).
 
 ## The thing to be careful about
 
 Provisional, not settled: **"we beat the transformer"** (true only below ~250 s
 of wall clock), the **reread** mechanism (a 360 s *and* 900 s win at one seed;
 needs a second seed before it is a claim), and the compile win for the dot
-model (`x3-c` still fails on CUDA; `scn1` is testing the `break_scan` fix).
+model (compiles with `break_scan`, but keeps only ~40% of tf's win).
 Everything else in the ledger has either two seeds or a margin that clears the
 within-session noise. The `k_lag` question is settled, in the opposite direction
 to the first reading.
