@@ -292,6 +292,12 @@ reread (−0.0051 bpc, −22% step), so the frontier is `rr2-c` at 1.9282.
   a two-seed claim (+0.0339 here, +0.0329 in long5).
 - `hs1` (done, 360 s) — the Hillis scan is a null: −1.4% step, +0.003 bpc. The
   eager boundary was never the cost; the scan lane is closed.
+- `lad2` (done, 360 s, 90/5) — **the `reread_spans` ladder is a NULL**: rr3
+  (8/8/8) 1.9345, rr3-lad (2/8/32) 1.9402, rr3-u32 (32/32/32) 1.9543, tf 1.9377.
+  A longer horizon buys +0.0038 at equal tokens and costs 0.0057 at equal wall
+  clock; uniform 32 costs 0.0198. So reread's gain is another mixing op at the
+  same scale, not a missing horizon. Scale hypothesis closed; count (rr2 vs
+  rr3 on the same corpus) is the open question.
 - **implemented, NOT launched (needs authorization)** — `reread_spans`: one
   exact horizon per reread site. The stack currently reads span 8 at every
   site, which is the dot window's own scale, so the model has window-8 and the
