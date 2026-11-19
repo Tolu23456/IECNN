@@ -1212,3 +1212,53 @@ def test_gather_windows_plain_flag_matches_the_tensor_check():
         odd[0] = -5 if span > 4 else -2
         c, _ = gather_windows(x, span, odd, False)
         assert not torch.equal(a, c)
+
+
+def test_k_lag_shifts_only_the_key_stream_and_stays_causal():
+    """k_lag=1 is the induction circuit: key[s] = x[s-1], value[s] = x[s].
+
+    Two things have to hold for that sentence to be true rather than a
+    comment: only the KEY stream moves (values must stay at their own
+    position, otherwise the read returns the matched token instead of its
+    successor), and the shift must be causal (perturbing the last token may
+    not change an earlier position's output).
+    """
+    kw = dict(global_read=True, per_dot_logits=False, head_last_only=True,
+              n_passes=1, n_dots=3, d_q=12, d_v=20, head_post=32,
+              head_post_layers=2, query_from_input=True, global_exact=True)
+    m0 = build_iecnn(_cfg(k_lag=0, **kw), 64).eval()
+    m1 = build_iecnn(_cfg(k_lag=1, **kw), 64).eval()
+    m1.load_state_dict(m0.state_dict())
+    reg = m1.regions[0]
+
+    rows = torch.randn(2, 12, reg.d)
+    with torch.no_grad():
+        k1, v1 = reg._full_kv(rows)
+        k0, v0 = m0.regions[0]._full_kv(rows)
+        want_k = reg.w_k(torch.cat([torch.zeros(2, 1, reg.d), rows[:, :-1]],
+                                   dim=1))
+        assert torch.allclose(k1, want_k, atol=1e-6)
+        # the value stream is NOT shifted: v1[t] must be the row at t
+        assert torch.allclose(v1, reg.w_v(rows), atol=1e-6)
+        assert torch.allclose(v0, v1, atol=1e-6)
+        # and the key stream really did move
+        assert not torch.allclose(k1[1:], k0[1:])   # position 0 is zeroed
+
+    # causality: k_lag only ever looks BACK, so a change at the last position
+    # cannot reach an earlier position's log-probs.
+    reg.w_qi.normal_(std=0.5)                      # switch the query on
+    x = torch.randint(0, 64, (2, 12))
+    x2 = x.clone()
+    x2[:, -1] = (x2[:, -1] + 1) % 64
+    with torch.no_grad():
+        a = m1(x)["final_log_probs"]
+        b = m1(x2)["final_log_probs"]
+        assert torch.allclose(a[:, :-1], b[:, :-1], atol=1e-5)
+        assert not torch.allclose(a[:, -1], b[:, -1], atol=1e-5)
+
+    # the query projection (the part that turns k_lag into induction) trains
+    m1.train()
+    out = m1(x)["final_log_probs"]
+    out.exp().gather(-1, torch.zeros(2, 12, 1, dtype=torch.long)).sum().backward()
+    assert reg.w_qi.grad is not None and torch.isfinite(reg.w_qi.grad).all()
+    assert reg.w_qi.grad.abs().sum() > 0

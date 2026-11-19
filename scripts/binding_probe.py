@@ -48,7 +48,7 @@ import torch.nn.functional as F                                 # noqa: E402
 from models.iecnn import build_iecnn                            # noqa: E402
 from train.train import build_model                             # noqa: E402
 
-STEPS = int(sys.argv[1]) if len(sys.argv) > 1 else 800
+STEPS = int(sys.argv[1]) if len(sys.argv) > 1 else 2000
 K = 8                     # key/value pairs per example
 NKEY = NVAL = 32
 V = NKEY + NVAL           # 0..31 keys, 32..63 values
@@ -72,7 +72,7 @@ def make_batch(n, g):
     return x, y
 
 
-def cfg_iecnn(dynamic=False, passes=1, carry=False):
+def cfg_iecnn(dynamic=False, passes=1, carry=False, q_shift=0, k_lag=0):
     return {
         "model": {
             "kind": "iecnn", "d": 128, "d_q": 16, "d_v": 32, "d_s": 96,
@@ -87,8 +87,11 @@ def cfg_iecnn(dynamic=False, passes=1, carry=False):
             "pool_first": False, "slot_slots": 0, "dot_dist_bias": False,
             "global_read": True, "read_schedule": "mix", "head_untied": False,
             "cell_ln": False, "share_cell": False,
-            "query_from_input": False, "id_lags": False, "ngram_bias": 0,
+            "query_from_input": (q_shift > 0 or k_lag > 0),
+            "q_shift": q_shift, "k_lag": k_lag,
+            "id_lags": False, "ngram_bias": 0,
             "head_rank": 0, "state_carry": carry, "carry_chunk": 8,
+            "global_exact": (q_shift > 0 or k_lag > 0),
             "global_linear": False, "head_post": 512,
             "head_post_layers": 3, "interleave": False, "read_ln": True,
             "head_ln": True, "read_heads": 1, "global_decay": True,
@@ -109,8 +112,10 @@ def cfg_tf():
 ARMS = {
     "tf":          dict(tf=True),
     "iecnn":       dict(),                                  # the frontier: static q, 1 pass
-    "iecnn-p2":    dict(passes=2),                          # depth only
-    "iecnn-dyn-p2": dict(passes=2, dynamic=True),            # q sees pass-1 state
+    "iecnn qi1":   dict(q_shift=1),                         # query = PREVIOUS row (wrong shift)
+    "iecnn kl1":   dict(k_lag=1),                           # key = PREVIOUS row (induction)
+    "iecnn kl1p2": dict(k_lag=1, passes=2),                 # induction + depth
+    "iecnn dynp2": dict(passes=2, dynamic=True),            # q sees pass-1 state
 }
 
 
@@ -120,7 +125,9 @@ def build(name):
         return build_model(cfg_tf(), V)
     return build_iecnn(cfg_iecnn(dynamic=kw.get("dynamic", False),
                                  passes=kw.get("passes", 1),
-                                 carry=kw.get("carry", False)), V)
+                                 carry=kw.get("carry", False),
+                                 q_shift=kw.get("q_shift", 0),
+                                 k_lag=kw.get("k_lag", 0)), V)
 
 
 @torch.no_grad()
@@ -130,7 +137,9 @@ def evaluate(model, g, n=512):
     x, y = make_batch(n, g)
     lp = model(x)["final_log_probs"]                        # [n, T, V]
     bind = F.nll_loss(lp[:, -1], y[:, -1], reduction="mean").item()
-    # control: every even position 1,3,..,2K-1 predicts a value from its key
+    # leak check: positions whose target is a RANDOM value, so the correct
+    # score is exactly chance. If this ever drops below chance the probe has
+    # a leak, and the binding number cannot be trusted.
     idx = torch.arange(1, 2 * K, 2)
     loc = F.nll_loss(lp[:, idx].reshape(-1, V), y[:, idx].reshape(-1),
                      reduction="mean").item()
@@ -162,11 +171,11 @@ def run(name, steps=STEPS, lr=2e-3):
         if i % 250 == 0:
             b, l = evaluate(model, g)
             curve.append((i, round(b, 3), round(l, 3)))
-            print(f"  {name:<10} step {i:>5}  bind {b:6.3f}  control {l:6.3f}",
+            print(f"  {name:<11} step {i:>5}  bind {b:6.3f}  leak {l:6.3f}",
                   flush=True)
     el = time.perf_counter() - t0
     b, l = evaluate(model, g)
-    print(f"RESULT {name:<10} params {n_par:>8} bind {b:6.3f} control {l:6.3f} "
+    print(f"RESULT {name:<11} params {n_par:>8} bind {b:6.3f} leak {l:6.3f} "
           f"chance {torch.log2(torch.tensor(float(NVAL))).item():.3f} "
           f"s/step {el/(steps+1):.4f}  curve {curve}", flush=True)
     return b
@@ -176,8 +185,9 @@ if __name__ == "__main__":
     print(f"=== BINDING PROBE steps={STEPS} K={K} T={T} V={V} B={B} "
           f"device={DEV} threads={torch.get_num_threads()}", flush=True)
     out = {}
-    for name, lr in (("tf", 1e-3), ("iecnn", 2e-3), ("iecnn-p2", 2e-3),
-                     ("iecnn-dyn-p2", 2e-3)):
+    for name, lr in (("iecnn", 2e-3), ("iecnn qi1", 2e-3),
+                     ("iecnn kl1", 2e-3), ("iecnn kl1p2", 2e-3),
+                     ("iecnn dynp2", 2e-3), ("tf", 1e-3)):
         out[name] = run(name, lr=lr)
     print("PROBE DONE " + " ".join(f"{k}={v:.3f}" for k, v in out.items()),
           flush=True)

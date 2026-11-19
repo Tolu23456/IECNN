@@ -61,7 +61,7 @@ def iecnn(cell="gru", lean=False, n_passes=3, n_dots=8, d_s=128, d=128,
           d_q=16, d_v=32, head_post=0, head_post_layers=1,
           interleave=False, read_ln=False, head_ln=False, read_heads=1,
           global_decay=False, post_share="none", global_decay_k=1,
-          gate_agree=False, reread=0, reread_span=8):
+          gate_agree=False, reread=0, reread_span=8, q_shift=0, k_lag=0):
     m = {
         "kind": "iecnn", "d": d, "d_q": d_q, "d_v": d_v, "d_s": d_s,
         "n_dots": n_dots, "n_regions": 1, "n_passes": n_passes,
@@ -104,6 +104,8 @@ def iecnn(cell="gru", lean=False, n_passes=3, n_dots=8, d_s=128, d=128,
         "post_share": post_share,
         "reread": reread,
         "reread_span": reread_span,
+        "q_shift": q_shift,
+        "k_lag": k_lag,
     }
     if window_reach is not None:
         m["window_reach"] = window_reach
@@ -1413,6 +1415,37 @@ ARMS = {
         "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
         global_read=True, spans=(8,), head_post=512, head_post_layers=3,
         read_ln=True, head_ln=True, global_decay=True, reread=2),
+        {"lr": 2e-3, "swa": 0.99}),
+    # --- induction read: LAG THE KEYS, not the query ----------------------
+    # The audit's fixed horizons are what a CONSTANT query can do. The
+    # induction circuit is "match an earlier occurrence of the token just
+    # seen, then copy what FOLLOWED it", which means key[s] must encode
+    # x[s-1] while value[s] stays x[s] (k_lag=1). Lagging the QUERY instead
+    # (q_shift=1) matches x[s] and returns x[s] itself, i.e. nothing.
+    # Both read paths get the lag for free (one shift, no parameter). The
+    # O(T) prefix-sum read cannot use a position-dependent query, so the
+    # global read needs global_exact; the window read needs no exactness.
+    "iecnn-n3-x3-p1-ln-decay-d128-w512-gx-qi0": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=512, head_post_layers=3,
+        read_ln=True, head_ln=True, global_decay=True, global_exact=True,
+        query_from_input=True, q_shift=0),
+        {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-n3-x3-p1-ln-decay-d128-w512-kl1": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=512, head_post_layers=3,
+        read_ln=True, head_ln=True, global_decay=True, global_exact=True,
+        query_from_input=True, k_lag=1),
+        {"lr": 2e-3, "swa": 0.99}),
+    # the cheap version: lagged keys + position-dependent WINDOW query, but
+    # the global read stays the O(T) prefix sum (whose weights cannot see t,
+    # so it becomes "average successor of tokens like X" — still type-level,
+    # but a bigram rather than a bag).
+    "iecnn-n3-x3-p1-ln-decay-d128-w512-kl1-nx": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=512, head_post_layers=3,
+        read_ln=True, head_ln=True, global_decay=True,
+        query_from_input=True, k_lag=1),
         {"lr": 2e-3, "swa": 0.99}),
     "iecnn-n3-x3-p1-ln-decay-d128-w512-rr2-s16": ("iecnn", lambda: iecnn(
         "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,

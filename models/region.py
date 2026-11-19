@@ -131,6 +131,35 @@ class Region(nn.Module):
         self.q_from_input = bool(m.get("query_from_input", False))
         self.w_qi = (nn.Parameter(torch.zeros(self.d, self.d_q))
                      if self.q_from_input else None)
+        # q_shift: which row the per-position query is built from.
+        #  0 = the current row (query_from_input as it always was: "address the
+        #      prefix with what I am"), which is still TYPE-level — it cannot
+        #      bind an instance, because the thing being matched is the token
+        #      itself.
+        #  1 = the PREVIOUS row. That is the induction circuit in one
+        #      projection: address the prefix with the token just seen, so the
+        #      read retrieves what FOLLOWED earlier occurrences of it. It is
+        #      the cheapest known way to give the region an instance-binding
+        #      read (one d x d_q GEMM, ~2k MAC/token per dot), and it is why
+        #      `global_exact` is required alongside it: the O(T) prefix-sum
+        #      read cannot use a position-dependent query at all.
+        self.q_shift = int(m.get("q_shift", 0) or 0)
+        # k_lag: the KEY stream is the row stream DELAYED by `k_lag`
+        # positions, while the value stream is not. With k_lag=1 the key at s
+        # encodes x_{s-1} and the value at s is x_s, so a query built from the
+        # current row implements the induction rule directly:
+        #
+        #     "find an earlier occurrence of the token I just saw, and copy
+        #      what followed it"          keys x_{s-1}, value x_s
+        #
+        # This is the exact circuit the audit says the frontier cannot form:
+        # with unlagged keys the query matches x_s and the read returns x_s
+        # itself, so the best a constant query can do is a fixed horizon
+        # (type-level n-gram). Costs nothing — one shift, no parameter — and
+        # is inert only in the sense that it needs a position-dependent query
+        # to matter (query_from_input + global_exact for the global read; the
+        # WINDOW read uses q_add already and needs no exactness).
+        self.k_lag = int(m.get("k_lag", 0) or 0)
         # --- exact-token-identity pathways (2026-11-18) -------------------
         # The read is a POOLED window: it tells a dot what the neighbourhood
         # *means*, not which tokens are in it. Byte-level text is strongly
@@ -434,6 +463,19 @@ class Region(nn.Module):
             dist[0] = 0
         return (-dist).flip(0)        # ascending offsets, slot -1 = current
 
+    def _query_add(self, r: torch.Tensor):
+        """Per-position query term, optionally addressing with a LAGGED row.
+
+        Zero-initialised `w_qi`, so every q_shift starts bit-identical to the
+        static-query model and has to earn its way in.
+        """
+        if self.w_qi is None:
+            return None
+        if self.q_shift > 0:
+            k = self.q_shift
+            r = torch.cat([torch.zeros_like(r[:, :k]), r[:, :-k]], dim=1)
+        return r.matmul(self.w_qi)
+
     def _reread(self, h: torch.Tensor) -> torch.Tensor:
         """One causal single-head read of the last `reread_span` positions.
 
@@ -493,8 +535,19 @@ class Region(nn.Module):
         return h.matmul(emb_table.t())
 
     def _full_kv(self, rows: torch.Tensor):
-        """Keys/values for the GLOBAL read: one row per position, no window."""
-        return self.w_k(rows), self.w_v(rows)
+        """Keys/values for the GLOBAL read: one row per position, no window.
+
+        `k_lag` delays ONLY the key stream (see the comment in __init__), so
+        key[s] and value[s] describe different positions — the causality is
+        still exact (key[s] is x_{s-lag}, which is in the causal past).
+        """
+        if self.k_lag > 0:
+            k = min(self.k_lag, rows.shape[1])
+            rows_k = torch.cat([torch.zeros_like(rows[:, :k]), rows[:, :-k]],
+                               dim=1)
+        else:
+            rows_k = rows
+        return self.w_k(rows_k), self.w_v(rows)
 
     def _window_memory(self, rows: torch.Tensor, device, pass_idx: int = 0,
                        k_all: torch.Tensor | None = None,
@@ -692,7 +745,7 @@ class Region(nn.Module):
                 # global read (they read the same keys/values).
                 ka, va = self._full_kv(r)
                 fk, fv = ka, va
-            qa = r.matmul(self.w_qi) if self.w_qi is not None else None
+            qa = self._query_add(r)
             ca = self._id_code(r) if self.w_id is not None else None
             return ka, va, fk, fv, qa, ca
 
@@ -972,7 +1025,7 @@ class Region(nn.Module):
         if self.global_read:
             k_all, v_all = self._full_kv(rows)
             full_k, full_v = k_all, v_all
-        q_add = rows.matmul(self.w_qi) if self.w_qi is not None else None
+        q_add = self._query_add(rows)
         # pass-invariant exact-identity code (one GEMM per forward)
         ctx_add = self._id_code(rows) if self.w_id is not None else None
 
