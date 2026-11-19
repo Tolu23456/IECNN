@@ -1209,7 +1209,7 @@ def test_gather_windows_plain_flag_matches_the_tensor_check():
         b, vb = gather_windows(x, span, offs, True)   # compile-safe path
         assert torch.equal(a, b) and torch.equal(va, vb)
         odd = offs.clone()
-        odd[0] = -5 if span > 4 else -2
+        odd[0] = offs[0] - 1        # one slot further back: a real difference
         c, _ = gather_windows(x, span, odd, False)
         assert not torch.equal(a, c)
 
@@ -1246,7 +1246,8 @@ def test_k_lag_shifts_only_the_key_stream_and_stays_causal():
 
     # causality: k_lag only ever looks BACK, so a change at the last position
     # cannot reach an earlier position's log-probs.
-    reg.w_qi.normal_(std=0.5)                      # switch the query on
+    with torch.no_grad():
+        reg.w_qi.normal_(std=0.5)                  # switch the query on
     x = torch.randint(0, 64, (2, 12))
     x2 = x.clone()
     x2[:, -1] = (x2[:, -1] + 1) % 64
