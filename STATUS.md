@@ -82,31 +82,31 @@ tuning comparison into a mechanism proof.
 The dot population was never the problem: the same three dots with the same
 head solve the task the moment the key stream is delayed.
 
-**But on enwik8 the bundle does not pay at 360 s — and the bundle is not the
-lag.** Same session: x3/w512 2.0067, `kl1-nx` 2.0263 (same step cost), `kl1`
-2.0492 (+15% step). Those arms change *three* things against the frontier:
-(1) `k_lag=1`, (2) `query_from_input=True`, (3) `global_exact=True` for `kl1`.
-(2) was already measured at **+0.063 bpc** in batch 24, and it is not a
-per-dot mechanism: the arm adds **one** 2048-param `W_qi` whose `q_add` is
-broadcast over all three dots, so the content term is common-mode and can only
-make the committee *less* distinct. The audit's collapse
-(`distinct_per_pos` 2.99 → 2.05/1.91, `all_same` 0.004 → 0.106/0.229, per-dot
-distances [5.02, 2.07, 0.00] → [0.55, 0.00, 1.15]) is also measured with the
-static query only: `pointer_audit` drops `q_add`, so it cannot say what the
-trained read did. And `key = W_k x[s−1] + rel(d_s)` shifts the content but not
-the distance tag. So the honest closure is **"shared content query + uniform
-lag"**, not `k_lag`. The missing control is `-qi0` (frontier +
-`query_from_input`, no lag, no exact): if it lands at ~2.026 the lag is
-innocent; if it lands at ~2.006 the lag carries the cost.
+**Resolved at 360 s: the lag is innocent and the content query is the cost.**
+Same session (`dis1`, common 104.01M tokens): x3/w512 **2.0050**; the missing
+control `qi0` (frontier + `query_from_input`, **no lag**) **2.0429**; `kl1-nx`
+(the same query **plus** the lag) **2.0312**. So the shared content query alone
+costs **+0.0379** (and +0.0491 at equal tokens), and adding the lag *recovers*
+**0.0117** of it (0.0168 at equal tokens). bind2's 0.0196 was the query with
+the induction gain only partly offsetting it — not a price paid for the lag.
 
-The fixed horizons *are* the population's information (drop-one costs
-+4.9 bpc), so a region-wide lag is still the wrong shape: it moves the
-distance-0 dot off its only possible anchor. Per-dot is the fair test.
+The audit also kills the "the committee collapsed" explanation: `qi0` keeps
+distinct_per_pos 2.72, `kl1-nx` drops it to 2.00 with `all_same` 0.126, yet
+`kl1-nx` is the *better* arm. Dot distinctness does not track bpc here, the
+same dissociation seen with `query_from_input` (batch 24: redundancy fell while
+bpc rose) and N=4.
+
+What remains open is narrow and bounded by measurement: the lag's whole value
+here is the **0.0117** it recovers, and the region-wide shape applies the
+query to all three dots (the +0.0379 cost). A per-dot version (one content
+query + one lag on the far dot only, near dots bit-identical) can at best keep
+that 0.0117 while avoiding most of the cost — worth one arm only if its step
+overhead is ~1-2%, not a lane.
 
 So the probe's lesson is narrower than it looked: the model **cannot** bind,
-but enwik8 at this scale does not pay for binding more than it pays for
-horizons. The open question is a per-dot lag (keep the horizons, add one
-induction read), not the region-wide one.
+but at this scale an induction read is worth ~0.012 bpc, and the only
+implementation tried so far pays +0.038 for it by broadcasting one content
+query to every dot. Binding is not where the ceiling is.
 
 ## What the models actually say (same leg, same prompt)
 
@@ -187,7 +187,10 @@ contiguous span-8 window; geometric/quad bands; batch size as a throughput lever
 `pool_first`; **span 16 and span 12 (does not replicate at either budget)**;
 GRU at both budgets; `share_cell`; untied head; cell LayerNorm; d_s 64;
 `query_from_input`/`gla`; `ngram_bias`; `head_rank48`; `id_lags`; `head_skip`;
-`gate_agree`; **`dist_bias`** (0.0045 < noise); `global_exact` (`gx`).
+`gate_agree`; **`dist_bias`** (0.0045 < noise); `global_exact` (`gx`);
+**`query_from_input` (re-confirmed: `qi0` +0.0379 vs x3)**; the
+**content-query + uniform-lag bundle** (`kl1-nx` 2.0312 vs 2.0050; inside it the
+lag *recovers* 0.0117 rather than costing).
 
 ## Compile — engineering, with a second blocker
 
@@ -214,23 +217,22 @@ all pointwise) instead of `cumsum`.
 
 ## Running / queued
 
-- `dis1` (running, 360 s) — tf / x3 / **`qi0`** / `kl1-nx` in ONE session: the
-  control that separates the lag from the shared content query inside bind2.
-  `qi0` ~ 2.026 -> the lag is innocent; ~ 2.006 -> the lag carries the cost.
+- `dis1` (done) — tf 1.9833 / x3 2.0050 / **`qi0` 2.0429** / `kl1-nx` 2.0312.
+  The shared content query is the cost (+0.0379); the lag recovers 0.0117.
 - `scn1` (running, 360 s) — tf / tf-c / x3 / **x3-c with `ARM_BREAK_SCAN=1`**:
   does the eager boundary around the prefix scan recover the compile win for
   the dot model? This is the biggest remaining throughput lever.
-- then: `cmp3` at 900 s once the compile number is real, a flavour rerun on the
-  saved 900 s weights, and the per-dot variant (one content query + one value
-  lag on the far dot only) only if `qi0` clears the query.
+- then: `cmp3` at 900 s once the compile number is real, a second seed for
+  `rr2` at 900 s (the mechanism is now a claim candidate), and a flavour rerun
+  on the saved 900 s weights. The per-dot lag is bounded at ~0.012 and is not
+  worth a session unless the compile lane is exhausted.
 
 ## The thing to be careful about
 
 Provisional, not settled: **"we beat the transformer"** (true only below ~250 s
-of wall clock), the **reread** mechanism (a clear 360 s win at one seed; needs
-long5's 900 s and a second seed before it is a claim), the compile win for the
-dot model (fullgraph works on CPU; the GPU number is what counts), and the
-**`k_lag` induction read** (bind2's loss is a *bundle* — uniform lag + a shared
-content query — so it needs the `-qi0` control before the lag itself can be
-blamed). Everything else in the ledger has either two seeds or a margin that
-clears the within-session noise.
+of wall clock), the **reread** mechanism (a 360 s *and* 900 s win at one seed;
+needs a second seed before it is a claim), and the compile win for the dot
+model (`x3-c` still fails on CUDA; `scn1` is testing the `break_scan` fix).
+Everything else in the ledger has either two seeds or a margin that clears the
+within-session noise. The `k_lag` question is settled, in the opposite direction
+to the first reading.
