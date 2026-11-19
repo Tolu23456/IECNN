@@ -150,6 +150,14 @@ the gap is ~0.045. That is the "pay for your compute" test and reread passes
 it (most of the ledger does not). It is still 0.093 behind tf, and tf is 19%
 faster per step.
 
+At 900 s **compiled** (fr9, seed 0, common 355.75M tokens):
+
+| arm | params | s/step | steps | tokens | bpc | bpc@eqtok | train |
+|---|---|---|---|---|---|---|---|
+| tf-swa-c | 408k | 0.0202 | 44,569 | 365.11M | **1.8293** | 1.8790 | 1.7885 |
+| **d128 ×3, rr2-c** | 571k | 0.0207 | 43,427 | 355.75M | **1.9282** | 1.9764 | 1.8579 |
+| d128 ×3, x3-c | 559k | 0.0192 | 46,825 | 383.59M | 1.9688 | 2.0200 | 1.8990 |
+
 **Two seeds at 900 s (s2r9, seed 1, common 285.76M): tf 1.8733 · x3 1.9681 ·
 rr2 1.9342.** rr2 − x3 = **+0.0339** here and +0.0329 in long5, with the dot
 arms moving only 0.001–0.002 between seeds while tf moves **0.0333**. So reread
@@ -233,18 +241,32 @@ a compiled transformer, but only by ~8% — the gap is now entirely quality per
 token, not throughput. (And tf-c is 0.028 better at *equal tokens*, replicated
 across two sessions, which compile should not do; flagged, unexplained.)
 
-Next step-time lever if needed: replace `cumsum` with a log-depth Hillis-Steele
-scan (pad+add, all pointwise) so the boundary can be removed and the missing
-~10% recovered. But quality per token is the bigger lane now.
+**`hs1` kills that inference.** The Hillis-Steele scan removes the boundary
+entirely, and it buys **1.4% of step, 0 bpc**: x3 0.0207 -> x3-c 0.0176
+(−15.0%) -> x3-hs-c 0.0173 (−16.4%), against tf's −28.7%. So the graph break was
+**never** the missing half; the dot model simply compiles less well (window
+gathers and scatter-adds dominate). The lane is closed: keep `cumsum` +
+`break_scan` (simpler, and `scan_mode` stays as a tested flag).
+
+**`fr9` (900 s, compiled) sets the real head-to-head.** tf-c 1.8293 vs
+rr2-c **1.9282** — a **0.0989** gap, and rr2-c is now **2.5% SLOWER per step**
+than tf-c (0.0207 vs 0.0202) because reread's mixing is not free. The 360 s
+"dot is faster per step than compiled tf" result was measured on x3 *without*
+reread; adding the one mechanism that pays consumes it. Compile still helps
+reread (−0.0051 bpc, −22% step), so the frontier is `rr2-c` at 1.9282.
 
 ## Running / queued
 
 - `dis1` (done) — tf 1.9833 / x3 2.0050 / **`qi0` 2.0429** / `kl1-nx` 2.0312.
   The shared content query is the cost (+0.0379); the lag recovers 0.0117.
-- `fr9` (running, 900 s) — **tf-c / x3-c / rr2-c**: the compiled frontier and
-  the two paid levers (reread + compile) in one arm.
-- `s2r9` (running, 900 s, seed 1) — tf / x3 / rr2: the second seed that turns
-  reread from "a win" into a claim.
+- `fr9` (done, 900 s) — **tf-c 1.8293 / x3-c 1.9688 / rr2-c 1.9282**: the
+  compiled frontier. rr2-c is the best dot arm so far; the gap to tf-c is
+  0.0989 at 2.5% *slower* steps, so the campaign no longer has a throughput
+  claim once reread is in.
+- `s2r9` (done, 900 s, seed 1) — tf 1.8733 / x3 1.9681 / rr2 1.9342: reread is
+  a two-seed claim (+0.0339 here, +0.0329 in long5).
+- `hs1` (done, 360 s) — the Hillis scan is a null: −1.4% step, +0.003 bpc. The
+  eager boundary was never the cost; the scan lane is closed.
 - **implemented, NOT launched (needs authorization)** — `reread_spans`: one
   exact horizon per reread site. The stack currently reads span 8 at every
   site, which is the dot window's own scale, so the model has window-8 and the
