@@ -150,6 +150,19 @@ the gap is ~0.045. That is the "pay for your compute" test and reread passes
 it (most of the ledger does not). It is still 0.093 behind tf, and tf is 19%
 faster per step.
 
+**Two seeds at 900 s (s2r9, seed 1, common 285.76M): tf 1.8733 · x3 1.9681 ·
+rr2 1.9342.** rr2 − x3 = **+0.0339** here and +0.0329 in long5, with the dot
+arms moving only 0.001–0.002 between seeds while tf moves **0.0333**. So reread
+is now a two-seed claim (+0.033 ± 0.001), and the uncertainty in "the gap to
+tf" (0.061–0.093) lives in the transformer arm, not in the dot arms. The
+mechanism is kept.
+
+One structural observation replicates too: in every session exactly one dot
+collapses onto the window end (dist_back ~0.0, frac_end ~0.97), but *which*
+dot dies is seed-dependent (dot 3 in long5, dot 2 in s2r9, in both the x3 and
+rr2 arms). The population therefore runs at **~2 effective specialists out of
+3**, which is a symmetry/initialisation fact, not a diversity score.
+
 At 900 s the same two arms are tf 1.8406 vs x3 1.9683, and x5/w512 is 1.9317.
 The dot model is **19% faster per step and 23% ahead at 60M tokens**, and behind
 by 0.04–0.14 at every budget past ~250 s. Both shapes are still moving.
