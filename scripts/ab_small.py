@@ -42,7 +42,18 @@ VALW = int(os.environ.get("ARM_VALW", 160))
 # over the whole file instead of scoring only its first 40 KB.
 VALSTRIDE = int(os.environ.get("ARM_VALSTRIDE", 1))
 V = 256                      # byte-level toy vocab
-MARK_S = 30.0
+# Mark interval (seconds). 30 s is right for a 180-900 s screen, but a 3-hour
+# arm would spend 360 val evals doing it; long runs raise this.
+MARK_S = float(os.environ.get("ARM_MARK_S", 30.0))
+# Generation is diagnostic, not training: off by default so screening sessions
+# stay byte-identical to the ledger's arms, on for long runs where "what does
+# it say" is the point.
+GEN_ON = os.environ.get("ARM_GEN", "") not in ("", "0")
+GEN_N = int(os.environ.get("ARM_GEN_N", "240"))
+GEN_PROMPT = int(os.environ.get("ARM_GEN_PROMPT", "120"))
+GEN_TEMP = float(os.environ.get("ARM_GEN_TEMP", "0.7"))
+GEN_TOPK = int(os.environ.get("ARM_GEN_TOPK", "40"))
+GEN_SEED = int(os.environ.get("ARM_GEN_SEED", "1234"))
 
 
 # --------------------------------------------------------------------------
@@ -1621,6 +1632,29 @@ def train_bpc(model, n_batches: int = 48) -> float:
     return tot / n / math.log(2)
 
 
+def gen_samples(model) -> dict:
+    """What the trained arm actually says, from an unseen val prompt.
+
+    bpc cannot show whether 0.03 bpc is *visible*: two arms 0.03 apart can
+    differ by "the the the" vs a wiki sentence. Greedy and sampled decodes of
+    the same prompt, printed beside the true continuation, make that legible.
+    Never allowed to fail an arm (a 3-hour run must not die in its last
+    second), so the caller wraps this in try/except.
+    """
+    from models.generate import generate_bytes
+    prompt = val[:GEN_PROMPT].unsqueeze(0).to(DEV)
+    truth = bytes(val[GEN_PROMPT:GEN_PROMPT + GEN_N].tolist())
+    out = {"prompt": bytes(val[:GEN_PROMPT].tolist()).decode("utf-8", "replace"),
+           "truth": truth.decode("utf-8", "replace")}
+    for mode in ("greedy", "sample"):
+        b = generate_bytes(model, prompt, GEN_N, mode=mode, temp=GEN_TEMP,
+                           topk=GEN_TOPK, ctx=T, seed=GEN_SEED)
+        out[mode] = b.decode("utf-8", "replace")
+        print(f"=== GEN {mode} ({GEN_N} bytes, prompt {GEN_PROMPT} of VAL)\n"
+              f"{out[mode]}", flush=True)
+    return out
+
+
 @torch.no_grad()
 def pointer_audit(model) -> dict:
     """How the N dots pick tokens: distinct picks + distance distribution."""
@@ -1754,6 +1788,12 @@ def run(name: str, kind: str, model, lr: float = None,
            "curve": marks, "bpc_final": final, "bpc_train": tr_bpc}
     if kind == "iecnn":
         row["pointers"] = pointer_audit(em)
+    if GEN_ON:
+        try:
+            row["gen"] = gen_samples(em)
+        except Exception as e:  # noqa: BLE001 - never lose a trained arm
+            row["gen"] = {"error": f"{type(e).__name__}: {e}"}
+            print(f"GEN FAIL {name}: {type(e).__name__}: {e}", flush=True)
     print("RESULT " + json.dumps(row), flush=True)
     return row
 
@@ -1785,16 +1825,29 @@ def main():
             kind, mk = entry[0], entry[1]
             torch.manual_seed(0)
             try:
+                # .to(DEV) matters: without it the dry pass builds a CPU model,
+                # feeds it a CUDA batch and "fails" on the GPU machine, which
+                # is the opposite of what a pre-flight check is for.
                 model = (build_transformer_baseline(mk(), V) if kind == "transformer"
-                         else build_iecnn(mk(), V))
+                         else build_iecnn(mk(), V)).to(DEV)
                 x, y = next(batches(0))
                 out = model(x)
                 loss = F.cross_entropy(out["final_log_probs"].reshape(-1, V),
                                        y.reshape(-1))
                 loss.backward()
+                # the paths a long run dies in, exercised once: val scoring,
+                # pointer audit and generation. Each is cheap at this size.
+                vb = val_bpc(model)
+                extra = ""
+                if GEN_ON:
+                    g = gen_samples(model)
+                    extra = f"  gen {len(g['greedy'])}B"
+                    if kind == "iecnn":
+                        pointer_audit(model)
                 print(f"DRY OK   {name:<28}"
                       f"{sum(p.numel() for p in model.parameters()):>9} params"
-                      f"  loss {loss.item():.3f}", flush=True)
+                      f"  loss {loss.item():.3f}  val {vb:.3f}{extra}",
+                      flush=True)
                 ok += 1
             except Exception as e:  # noqa: BLE001 - report and keep going
                 print(f"DRY FAIL {name:<28}{type(e).__name__}: {e}", flush=True)

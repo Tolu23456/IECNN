@@ -125,6 +125,31 @@ but sampled decoding shows the difference the bpc gap is made of:
 That is the same story the probe tells numerically: the dot model has the
 statistics of the text but not the variable binding that lets a plan persist.
 
+## Long-corpus protocol (2026-11-19)
+
+From here on, runs use the **canonical enwik8 split**: train = bytes [0, 90M),
+val = bytes [90M, 95M), last 5 MB never touched. That is +50% training data over
+the 60/5 MB window the first 173 rows used, and it moves the val slice, so
+absolute bpc is **not comparable** with those rows: every session re-runs its
+own anchor and claims stay in-session.
+
+At 3 h on this corpus, a 900 s-era step time (0.0207 s) gives ~521k steps and
+**4.27B tokens, i.e. ~47 passes** over the 90 MB train split. So "more epochs"
+is satisfied by the budget, not by a loop change: the harness streams random
+windows and `epochs` was never a knob.
+
+Every long run also reports **generation**: 240 bytes decoded greedily and with
+top-k 40 / T 0.7 from the first 120 bytes of the val split (seen by neither
+arm), printed beside the true continuation. One decode path
+(`models/generate.py`) is shared by the harness and the probes, so a sample
+from a run and a sample from a probe cannot diverge.
+
+Failure-proofing: every kernel runs `ARM_DRY=1` first -- build each arm, one
+fwd/bwd, one val pass, the pointer audit, a generation -- and refuses to start
+the timed run unless all arms pass. The dry pass now places the model on `DEV`
+(it used to build a CPU model, feed it a CUDA batch and "fail" on exactly the
+machine the check exists for).
+
 ## Frontier
 
 At the 360 s screening budget (in-session tf 1.9639–1.9729):

@@ -1195,6 +1195,42 @@ def test_reread_is_inert_at_init_causal_and_trains():
     assert reg.rr_o.weight.grad.abs().sum() > 0
 
 
+def test_generate_bytes_is_deterministic_and_greedy_is_argmax():
+    """The long runs report what the model says, so the decoder has to agree
+    with the logits the harness scores, reproduce for a fixed seed, and leave
+    the model untouched (eval mode, no gradients, prompt not modified).
+
+    It is also the only decode path shared by the harness and the probes, so
+    this test is what stops a probe from sampling differently than a run.
+    """
+    from models.generate import generate_bytes
+    m = build_iecnn(_cfg(global_read=True, per_dot_logits=False,
+                         n_passes=1, n_dots=3, head_post=32,
+                         head_post_layers=2), 64).eval()
+    prompt = torch.randint(0, 64, (1, 6))
+    lp = m(prompt)["final_log_probs"][:, -1]
+    g = generate_bytes(m, prompt, 10, mode="greedy", ctx=12)
+    assert len(g) == 10 and all(0 <= b < 64 for b in g)
+    assert g[0] == int(lp.argmax(-1))          # greedy == the scored argmax
+
+    p0 = prompt.clone()
+    a = generate_bytes(m, prompt, 16, mode="sample", seed=11, ctx=12)
+    b = generate_bytes(m, prompt, 16, mode="sample", seed=11, ctx=12)
+    assert a == b and torch.equal(prompt, p0)
+    assert all(q.grad is None for q in m.parameters())
+    assert m.training is False
+
+    # a prompt longer than the context still decodes (truncated, not an error)
+    assert len(generate_bytes(m, torch.randint(0, 64, (1, 20)), 4, ctx=8)) == 4
+    # and the shape contract is enforced rather than guessed
+    try:
+        generate_bytes(m, torch.zeros(4, dtype=torch.long), 1)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("expected ValueError for a 1-D prompt")
+
+
 def test_reread_span_ladder_defaults_identical_and_is_causal():
     """reread_spans gives each reread site its own exact horizon (2/8/32).
 
