@@ -51,10 +51,17 @@ threshold there is ~0.01, not 0.024).
 ## The read cannot bind — and the fix is one shift
 
 A synthetic associative-recall probe (`scripts/binding_probe.py`, chance
-5.0 bpc) says the frontier is worse at **instance binding** than the
-transformer: tf 3.508, frontier 4.176, p2 4.326, p2+`dynamic_query` 4.292
-(800 CPU steps; both still descending, so the size is not final). Depth does
-not help and neither does a state-conditioned query.
+5.0 bpc) says the frontier cannot **instance-bind** at all, and that one shift
+fixes it. Final binding bpc after 2000 CPU steps, same data/seed/budget:
+
+| arm | binding bpc | what it proves |
+|---|---|---|
+| **frontier** (static q, 1 pass) | 3.933 | barely above chance 5.000 |
+| `qi1` (query = previous row) | 4.045 | the *wrong* shift is worse than nothing |
+| `p2` + `dynamic_query` | 4.192 | depth / state-query do not help |
+| **`kl1` (key = previous row)** | **0.000** | the right shift solves it exactly |
+| `kl1p2` | 0.000 | and depth adds nothing on top |
+| tf d96/4h/3l | 3.159 | the transformer does not solve it in this budget |
 
 The circuit that is missing is induction, and the code makes it impossible by
 construction: the score is `q_n · k_t` with `q_n` a constant, so the read can
@@ -62,11 +69,33 @@ only ask "does the token at this fixed offset match my pattern" — a fixed
 horizon (the measured 0/2/5-back dots). Induction needs **key[s] = x[s−1]**
 with **value[s] = x[s]**, so that a query built from the current token
 retrieves what *followed* an earlier occurrence of it. That is `k_lag=1`: one
-shift of the key stream, zero parameters. Unit-tested (values unmoved,
-causality intact), plumbed through both read paths.
+shift of the key stream, zero parameters. `kl1` hits 0.011 bpc by step 250 and
+0.000 by step 500; the leak check (targets that are random by construction)
+stays at 5.01 for every arm, so nothing is contaminated.
 
 Lagging the *query* instead (`q_shift=1`) matches `x[s]` and returns `x[s]`
-itself — provably nothing — and is kept only as the wrong-shift control.
+itself — 4.045 bpc, i.e. the wrong-shift control that turns the probe from a
+tuning comparison into a mechanism proof.
+
+The dot population was never the problem: the same three dots with the same
+head solve the task the moment the key stream is delayed.
+
+## What the models actually say (same leg, same prompt)
+
+`sample1` trained tf and the frontier arm on the same 360 s leg (tf 1.9532,
+dot 2.0075) and decoded the same unseen 120-byte val prompt. Greedy decoding
+collapses for both (a loop is the highest-probability continuation at ~2 bpc),
+but sampled decoding shows the difference the bpc gap is made of:
+
+- **tf** produces *document structure*: section headers (`== External links ==`),
+  templates (`{{main|...}}`), link markup, dates — i.e. a register and a plan
+  that run for hundreds of bytes.
+- **the dot model** produces locally fluent wiki-ish phrases with the *surface
+  tokens* of that structure (`[[Massachusetts]]`, `[[Charles English|Central
+  Society]]`) but no plan: links appear as n-gram furniture, not as sections.
+
+That is the same story the probe tells numerically: the dot model has the
+statistics of the text but not the variable binding that lets a plan persist.
 
 ## Frontier
 
@@ -138,17 +167,13 @@ model gets the same 25%. If it does, `p2` becomes affordable too.
 
 ## Running / queued
 
-- `sample1` (running, 360 s GPU) — trains tf and the frontier arm and decodes
-  the same unseen 120-byte val prompt (greedy + T=0.7/top-k 40), beside the
-  true continuation, so the bpc gap can be read as text.
-- `sample-cpu` (running) — the same script on 8 MB of held-out-book Gutenberg,
-  for an early look while both T4 slots are busy.
-- `binding v2` (running) — 2000-step associative recall with `qi1` (wrong
-  shift), `kl1` (key lag: the induction circuit) and `kl1p2`.
-- `long3` (running, 900 s) — lr 1e-3 vs 2e-3: is the plateau an optimiser artefact?
-- `long5` (queued, 900 s) — tf / x3 / rr1 / rr2: does reread's 360 s win survive?
-- `bind2` (queued, 360 s) — tf / x3 / kl1-nx / kl1 on enwik8.
+- `long5` (running, 900 s) — tf / x3 / rr1 / rr2: does reread's 360 s win survive?
+- `bind2` (running, 360 s) — tf / x3 / kl1-nx / kl1 on enwik8: does the
+  induction read move the corpus, and does the free (window-only) version
+  capture it?
 - `cmp2` (queued, 360 s) — the compile A/B (tf, tf-c, x3, x3-c, x3-gx-c, x3-cro).
+- then: `rrc1` (rr2 + kl1) if both lanes pay, and `cmp3` at 900 s once the
+  compile number is real.
 
 ## The thing to be careful about
 
