@@ -36,11 +36,13 @@ threshold there is ~0.01, not 0.024).
    decision moved to config time, `torch.compile(fullgraph=True)` now compiles
    the whole region (CPU-verified; GPU A/B running). If the 25% the transformer
    gets is available here too, the step gap becomes the whole story.
-2. **Cheap extra mixing (`reread`).** The head is pool→MLP×3: a transformer block
-   with the mixing sublayer deleted. `interleave` restored it at full cell price
-   and lost (+0.10 bpc, +68% step); `reread` does it with one causal span-8,
-   single-head read of the block's own output between blocks — ~6% of a block,
-   zero-init so step 0 is bit-identical to the frontier arm.
+2. **Cheap extra mixing (`reread`) — MEASURED, +0.032 bpc.** The head is
+   pool→MLP×3: a transformer block with the mixing sublayer deleted.
+   `interleave` restored it at full cell price and lost (+0.10 bpc, +68% step);
+   `reread` does it with one causal span-8, single-head read of the block's own
+   output between blocks — zero-init so step 0 is bit-identical to the frontier
+   arm. At 360 s: rr1 1.9904 (+6% step), rr2 1.9735 (+16%), against 2.0051 for
+   the matched frontier. long5 is the 900 s confirmation.
 3. **Capacity per step at long budgets.** x5/w512 beat x3/w512 by 0.037 at 900 s
    (the opposite of 180 s), so the long-budget shape favours depth; the untested
    version of that is **more dots** (N=4–5), which the ledger only ever rejected
@@ -151,7 +153,9 @@ model gets the same 25%. If it does, `p2` becomes affordable too.
 ## The thing to be careful about
 
 Provisional, not settled: **"we beat the transformer"** (true only below ~250 s
-of wall clock), the **reread** mechanism (built and unit-tested, no bpc yet), and
-the compile win for the dot model (fullgraph works on CPU; the GPU number is what
+of wall clock), the **reread** mechanism (a clear 360 s win at one seed; needs
+long5's 900 s and a second seed before it is a claim), the **`k_lag` induction
+read** (implemented and unit-tested; probe v2 and bind2 decide it), and the
+compile win for the dot model (fullgraph works on CPU; the GPU number is what
 counts). Everything else in the ledger has either two seeds or a margin that
 clears the within-session noise.
