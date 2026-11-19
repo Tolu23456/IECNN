@@ -1566,7 +1566,7 @@ BASE_LR = float(os.environ.get("ARM_LR", "1e-3"))
 
 def run(name: str, kind: str, model, lr: float = None,
         seed: int = None, sched: str = None, swa: float = 0.0,
-        eval_model=None, batch: int = None) -> dict:
+        eval_model=None, batch: int = None, warm: int = None) -> dict:
     lr0 = BASE_LR if lr is None else float(lr)
     sd = SEED if seed is None else int(seed)
     torch.manual_seed(sd)
@@ -1590,8 +1590,13 @@ def run(name: str, kind: str, model, lr: float = None,
     # torch.compile: the first calls trace/autotune and are 1-2 orders of
     # magnitude slower than a steady-state step. They must be paid BEFORE the
     # wall-clock budget starts, otherwise the arm is timed on its compiler.
-    warm_steps = int(os.environ.get("ARM_WARM", "10")) \
-        if os.environ.get("ARM_COMPILE") == "1" else 0
+    # The compile trace must be paid OUTSIDE the timed budget, or the arm is
+    # timed on its compiler. This used to depend on the ARM_COMPILE env var,
+    # which the Kaggle runner sets to 0, so every compiled arm in every batch
+    # paid its trace inside the budget — worst for the region, which is the
+    # arm with the most graph to trace. Per-arm `compile` now forces warmup.
+    warm_steps = (int(os.environ.get("ARM_WARM", "10")) if warm is None else int(warm)) \
+        if (warm is not None or os.environ.get("ARM_COMPILE") == "1") else 0
     for _ in range(warm_steps):
         x, y = next(gen)
         out = model(x)
@@ -1735,6 +1740,8 @@ def main():
         # that killed a whole session after the first arm had trained (the GPU
         # slot is the scarce resource, so knobs are stripped, not forwarded).
         run_opts = {k: v for k, v in opts.items() if k != "compile"}
+        if opts.get("compile"):
+            run_opts.setdefault("warm", 10)
         try:
             rows.append(run(name, kind, model, eval_model=inner, **run_opts))
         except Exception as e:  # noqa: BLE001
