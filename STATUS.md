@@ -46,15 +46,43 @@ threshold there is ~0.01, not 0.024).
    version of that is **more dots** (N=4–5), which the ledger only ever rejected
    at 180 s.
 
+## The read cannot bind — and the fix is one shift
+
+A synthetic associative-recall probe (`scripts/binding_probe.py`, chance
+5.0 bpc) says the frontier is worse at **instance binding** than the
+transformer: tf 3.508, frontier 4.176, p2 4.326, p2+`dynamic_query` 4.292
+(800 CPU steps; both still descending, so the size is not final). Depth does
+not help and neither does a state-conditioned query.
+
+The circuit that is missing is induction, and the code makes it impossible by
+construction: the score is `q_n · k_t` with `q_n` a constant, so the read can
+only ask "does the token at this fixed offset match my pattern" — a fixed
+horizon (the measured 0/2/5-back dots). Induction needs **key[s] = x[s−1]**
+with **value[s] = x[s]**, so that a query built from the current token
+retrieves what *followed* an earlier occurrence of it. That is `k_lag=1`: one
+shift of the key stream, zero parameters. Unit-tested (values unmoved,
+causality intact), plumbed through both read paths.
+
+Lagging the *query* instead (`q_shift=1`) matches `x[s]` and returns `x[s]`
+itself — provably nothing — and is kept only as the wrong-shift control.
+
 ## Frontier
 
 At the 360 s screening budget (in-session tf 1.9639–1.9729):
 
 | arm | params | s/step | bpc | bpc@eqtok |
 |---|---|---|---|---|
-| tf-swa | 408k | 0.0255–0.0265 | 1.9639–1.9729 | 2.044–2.052 |
-| **d128 ×3, w512** | 559k | **0.0206–0.0215** | 2.0061–2.0067 | 2.079–2.082 |
+| tf-swa | 408k | 0.0240–0.0265 | 1.9539–1.9729 | 2.021–2.052 |
+| **d128 ×3, w512** | 559k | **0.0206–0.0215** | 2.0051–2.0067 | 2.072–2.082 |
+| **d128 ×3, rr1** | 571k | 0.0219 | **1.9904** | 2.0528 |
+| **d128 ×3, rr2** | 571k | 0.0240 | **1.9735** | 2.0321 |
 | d128 ×3, p2 | 559k | 0.0282 | 2.0062 | 2.0609 |
+
+`reread` (a causal span-8, single-head read of the head block's own output
+between blocks, zero-init) is the **first mechanism to beat the matched
+frontier at 360 s**: rr1 −0.0147 at +6% step, rr2 −0.0316 at +16%. rr2 costs
+exactly what tf costs per step and is still 0.020 behind it, so the honest
+claim is "0.032 bpc for 16% more step time", not "faster than tf".
 
 At 900 s the same two arms are tf 1.8406 vs x3 1.9683, and x5/w512 is 1.9317.
 The dot model is **19% faster per step and 23% ahead at 60M tokens**, and behind
@@ -108,11 +136,17 @@ model gets the same 25%. If it does, `p2` becomes affordable too.
 
 ## Running / queued
 
+- `sample1` (running, 360 s GPU) — trains tf and the frontier arm and decodes
+  the same unseen 120-byte val prompt (greedy + T=0.7/top-k 40), beside the
+  true continuation, so the bpc gap can be read as text.
+- `sample-cpu` (running) — the same script on 8 MB of held-out-book Gutenberg,
+  for an early look while both T4 slots are busy.
+- `binding v2` (running) — 2000-step associative recall with `qi1` (wrong
+  shift), `kl1` (key lag: the induction circuit) and `kl1p2`.
 - `long3` (running, 900 s) — lr 1e-3 vs 2e-3: is the plateau an optimiser artefact?
-- `mid2b` (running, 360 s) — `reread` rr1/rr2 vs the frontier arm.
-- `cmp2` (queued, 360 s) — the compile A/B above.
-- then: `cmp3` (900 s: tf-c, x3-c, p2-c), and N=4–5 at 900 s if the ceiling route
-  3 is to be tested properly.
+- `long5` (queued, 900 s) — tf / x3 / rr1 / rr2: does reread's 360 s win survive?
+- `bind2` (queued, 360 s) — tf / x3 / kl1-nx / kl1 on enwik8.
+- `cmp2` (queued, 360 s) — the compile A/B (tf, tf-c, x3, x3-c, x3-gx-c, x3-cro).
 
 ## The thing to be careful about
 
