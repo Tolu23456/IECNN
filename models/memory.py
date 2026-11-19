@@ -54,7 +54,8 @@ def relative_key_embedding(max_span: int, d_q: int, table: nn.Embedding | None =
     return table
 
 
-def gather_windows(rows: torch.Tensor, span: int, window_offsets: torch.Tensor | None = None):
+def gather_windows(rows: torch.Tensor, span: int, window_offsets: torch.Tensor | None = None,
+                   plain: bool | None = None):
     """Sliding window gather [B, T, d] -> key/value rows per position.
 
     Returns (windowed_rows [B, T, span, d], valid_mask [*, span]) where
@@ -62,6 +63,14 @@ def gather_windows(rows: torch.Tensor, span: int, window_offsets: torch.Tensor |
     (i.e. i = span-1 is position t itself, i = 0 is the furthest past).
     Rows before the sequence start are duplicated from row 0 but flagged
     invalid in valid_mask (masked, not zero-filled — spec 02 section 1).
+
+    `plain`: is `window_offsets` the default sliding window? Callers that
+    know the answer from the CONFIG must pass it as a Python bool. The
+    eager fallback compares tensors, which is a DATA-DEPENDENT branch:
+    torch.compile cannot guard on it (`Could not guard on data-dependent
+    expression Eq(u0, 1)`) and the whole forward stops being one graph,
+    which is why the dot model got 0% from compile while the transformer
+    got 25%. This is not a graph-break warning, it is a hard failure.
     """
     b, t, d = rows.shape
     device = rows.device
@@ -75,7 +84,10 @@ def gather_windows(rows: torch.Tensor, span: int, window_offsets: torch.Tensor |
     # use a stride view. This replaces a [B,T,span,d] fancy-index gather plus
     # its backward scatter with a view — measured as aten::_index_put_impl_
     # + aten::index in the step profile.
-    if window_offsets.numel() == tgt.numel() and bool((window_offsets == tgt).all()):
+    if plain is None:
+        plain = (window_offsets.numel() == tgt.numel()
+                 and bool((window_offsets == tgt).all()))
+    if plain:
         padded = F.pad(rows.transpose(1, 2), (span - 1, 0), mode="replicate")
         padded = padded.transpose(1, 2)                            # [B, T+span-1, d]
         windowed = padded.unfold(1, span, 1).transpose(-1, -2)      # [B, T, span, d]

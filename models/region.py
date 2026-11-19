@@ -510,8 +510,12 @@ class Region(nn.Module):
         if v_all is None:
             v_all = self.w_v(rows)                   # [B, T, d_v]
         offs = self._window_offsets(device, pass_idx)
-        wind_k_raw, valid = gather_windows(k_all, self.span, offs)
-        wind_v, _ = gather_windows(v_all, self.span, offs)
+        # Python-level answer to "is this the plain sliding window?" so the
+        # gather does not branch on tensor data (see gather_windows).
+        plain = (self.window_mode == "contiguous"
+                 or (self.window_mode == "bands" and pass_idx <= 0))
+        wind_k_raw, valid = gather_windows(k_all, self.span, offs, plain)
+        wind_v, _ = gather_windows(v_all, self.span, offs, plain)
         # slot i holds position t + offs[i]; relative distance = -offs[i]
         dist_idx = (-offs).clamp_min(0)
         rel = self.rel_emb(dist_idx)                 # [w, d_q], distance 0 at t
