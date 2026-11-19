@@ -1416,6 +1416,16 @@ ARMS = {
         global_read=True, spans=(8,), head_post=512, head_post_layers=3,
         read_ln=True, head_ln=True, global_decay=True, reread=2),
         {"lr": 2e-3, "swa": 0.99}),
+    # reread + compile: the two levers that have paid, in one arm. scn1 showed
+    # the dot model does compile with break_scan (step 0.0184 vs 0.0206, +12%
+    # steps) even though the graph break around the prefix scan eats part of
+    # the transformer's 29%. At 900 s the step saving is worth more than at
+    # 360 s, so this is the frontier candidate.
+    "iecnn-n3-x3-p1-ln-decay-d128-w512-rr2-c": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=512, head_post_layers=3,
+        read_ln=True, head_ln=True, global_decay=True, reread=2),
+        {"lr": 2e-3, "swa": 0.99, "compile": True}),
     # --- induction read: LAG THE KEYS, not the query ----------------------
     # The audit's fixed horizons are what a CONSTANT query can do. The
     # induction circuit is "match an earlier occurrence of the token just
