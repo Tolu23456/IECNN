@@ -321,6 +321,36 @@ class Region(nn.Module):
         self.post_w1 = (nn.Linear(d, self.head_post)
                         if self.post_share == "up" else None)
         self.post_repeat = n_post if self.post_share == "all" else 1
+        # block-level re-read (reread = how many inter-block gaps get one).
+        #
+        # The head stack is a transformer block with the attention sublayer
+        # deleted: pool -> MLP -> MLP -> MLP. A transformer gives EVERY layer
+        # a fresh view of its neighbours, and the head has exactly one pooled
+        # view of the prefix, so deeper blocks re-process the same numbers.
+        # `interleave` tested restoring that at the dot read (a full cell pass
+        # per gap) and lost: +0.10 bpc, +68% step. This is the cheap version
+        # of the same hypothesis: a SINGLE-HEAD, SPAN-8 read of the block's
+        # own output, added residually between blocks.
+        #
+        # Cost (d128, span 8, d_q 16, d_v 32): 2*128*16 (q,k) + 128*32 (v)
+        # + 128*128 (out) + 2*8*(16+32) (the read itself) ~= 25k MAC/token,
+        # i.e. ~6% of the 393k block stack and ~4% of the step, against the
+        # ~100k of a full attention layer. Zero-initialised out projection:
+        # the stack is unchanged at step 0 and the read has to earn its way
+        # in, so a null result is "no gain", not "damaged training".
+        self.reread = int(m.get("reread", 0))
+        self.reread_span = int(m.get("reread_span", 8))
+        self.reread_dq = int(m.get("reread_dq", 16))
+        self.reread_dv = int(m.get("reread_dv", 32))
+        if self.reread > 0:
+            self.rr_ln = nn.LayerNorm(d)
+            self.rr_q = nn.Linear(d, self.reread_dq, bias=False)
+            self.rr_k = nn.Linear(d, self.reread_dq, bias=False)
+            self.rr_v = nn.Linear(d, self.reread_dv, bias=False)
+            self.rr_o = nn.Linear(self.reread_dv, d, bias=False)
+            nn.init.zeros_(self.rr_o.weight)
+        else:
+            self.rr_ln = self.rr_q = self.rr_k = self.rr_v = self.rr_o = None
         # Time axis of the read window. "contiguous" (default) = the last
         # `span` tokens, one slot each. "quad" = the same number of slots
         # spread quadratically from distance 0 out to `window_reach`, so the
@@ -404,6 +434,33 @@ class Region(nn.Module):
             dist[0] = 0
         return (-dist).flip(0)        # ascending offsets, slot -1 = current
 
+    def _reread(self, h: torch.Tensor) -> torch.Tensor:
+        """One causal single-head read of the last `reread_span` positions.
+
+        Written as a gather (`unfold` over a left-padded stream) rather than
+        `scaled_dot_product_attention` with a band mask: SDPA still computes
+        the full T x T score matrix before masking, which would cost a full
+        attention layer (98k MAC/token) for a read that only needs 8 slots
+        (~1.5k). No padding values leak: slots before position 0 are masked
+        with -inf.
+        """
+        b, t, _ = h.shape
+        s = self.reread_span
+        u = self.rr_ln(h)
+        q = self.rr_q(u)                                   # [B,T,dq]
+        k = self.rr_k(u)                                   # [B,T,dq]
+        v = self.rr_v(u)                                   # [B,T,dv]
+        kp = F.pad(k.transpose(1, 2), (s - 1, 0)).unfold(-1, s, 1)
+        vp = F.pad(v.transpose(1, 2), (s - 1, 0)).unfold(-1, s, 1)
+        sc = torch.einsum("btd,bdst->bts", q, kp)
+        sc = sc * (q.shape[-1] ** -0.5)
+        i = torch.arange(t, device=h.device)
+        off = torch.arange(s - 1, -1, -1, device=h.device)
+        ok = (i[:, None] - off[None, :]) >= 0                # [T,s]
+        sc = sc.masked_fill(~ok, float("-inf"))
+        a = sc.softmax(-1)
+        return self.rr_o(torch.einsum("bts,bdst->btd", a, vp))
+
     def _post(self, h: torch.Tensor) -> torch.Tensor:
         """Per-position residual blocks after pooling (identity when off).
 
@@ -414,12 +471,16 @@ class Region(nn.Module):
         """
         if self.post_share == "all":
             blk = self.post_blocks[0]
-            for _ in range(self.post_repeat):
+            for i in range(self.post_repeat):
                 h = h + blk["w2"](F.gelu(blk["w1"](blk["ln"](h))))
+                if self.reread > i and h.dim() == 3:
+                    h = h + self._reread(h)
             return h
-        for blk in self.post_blocks:
+        for i, blk in enumerate(self.post_blocks):
             w1 = blk["w1"] if self.post_w1 is None else self.post_w1
             h = h + blk["w2"](F.gelu(w1(blk["ln"](h))))
+            if self.reread > i and h.dim() == 3:
+                h = h + self._reread(h)
         return h
 
     def _head_logits(self, h: torch.Tensor, emb_table: torch.Tensor):

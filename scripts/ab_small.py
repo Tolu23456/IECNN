@@ -61,7 +61,7 @@ def iecnn(cell="gru", lean=False, n_passes=3, n_dots=8, d_s=128, d=128,
           d_q=16, d_v=32, head_post=0, head_post_layers=1,
           interleave=False, read_ln=False, head_ln=False, read_heads=1,
           global_decay=False, post_share="none", global_decay_k=1,
-          gate_agree=False):
+          gate_agree=False, reread=0, reread_span=8):
     m = {
         "kind": "iecnn", "d": d, "d_q": d_q, "d_v": d_v, "d_s": d_s,
         "n_dots": n_dots, "n_regions": 1, "n_passes": n_passes,
@@ -102,6 +102,8 @@ def iecnn(cell="gru", lean=False, n_passes=3, n_dots=8, d_s=128, d=128,
         "global_decay": global_decay,
         "global_decay_k": global_decay_k,
         "post_share": post_share,
+        "reread": reread,
+        "reread_span": reread_span,
     }
     if window_reach is not None:
         m["window_reach"] = window_reach
@@ -1394,6 +1396,30 @@ ARMS = {
         "lug", True, n_passes=2, n_dots=8, d_s=64, d=384,
         per_dot_logits=False, pool_first=True, window_mode="hybrid",
         window_reach=64)),
+    # --- block-level re-read: does the HEAD stack need to see neighbours? ---
+    # The head is pool -> MLP -> MLP -> MLP, i.e. a transformer block with the
+    # attention sublayer removed; the dots mix the prefix ONCE. `interleave`
+    # tested restoring mixing at the dot read (a full cell pass per gap) and
+    # lost +0.10 bpc at +68% step. This is the same hypothesis at 1/20th the
+    # price: one causal span-8 read of the block's own output, added back
+    # between blocks, zero-initialised so step 0 is bit-identical to the
+    # frontier arm. rr1 = one gap, rr2 = both gaps of the x3 stack.
+    "iecnn-n3-x3-p1-ln-decay-d128-w512-rr1": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=512, head_post_layers=3,
+        read_ln=True, head_ln=True, global_decay=True, reread=1),
+        {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-n3-x3-p1-ln-decay-d128-w512-rr2": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=512, head_post_layers=3,
+        read_ln=True, head_ln=True, global_decay=True, reread=2),
+        {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-n3-x3-p1-ln-decay-d128-w512-rr2-s16": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=512, head_post_layers=3,
+        read_ln=True, head_ln=True, global_decay=True, reread=2,
+        reread_span=16),
+        {"lr": 2e-3, "swa": 0.99}),
 }
 
 

@@ -1152,3 +1152,41 @@ def test_gate_agree_is_inert_at_init_and_trains():
         -1, torch.zeros(2, 12, 1, dtype=torch.long)).sum().backward()
     g = m.regions[0].c_agree.grad
     assert g is not None and torch.isfinite(g).all()
+
+
+def test_reread_is_inert_at_init_causal_and_trains():
+    """reread adds a causal span-8 read of the head block's own output between
+    blocks. Three things must hold or the mechanism is a lie: the zero-init
+    out projection makes step 0 bit-identical to the arm without it, the read
+    cannot see the future (causality is the whole reason it is a window and
+    not a full read), and the new parameters receive gradient."""
+    kw = dict(global_read=True, per_dot_logits=False, head_last_only=True,
+              n_passes=1, n_dots=3, head_post=32, head_post_layers=3)
+    base = build_iecnn(_cfg(**kw), 64).eval()
+    m = build_iecnn(_cfg(reread=2, **kw), 64).eval()
+    m.load_state_dict(base.state_dict(), strict=False)
+    x = torch.randint(0, 64, (2, 12))
+    with torch.no_grad():
+        assert torch.allclose(base(x)["final_log_probs"],
+                              m(x)["final_log_probs"], atol=1e-6)
+
+    # causality: perturb ONE late position and check that no earlier position
+    # moves (the read is causal and the rest of the model is per position).
+    reg = m.regions[0]
+    with torch.no_grad():
+        torch.nn.init.normal_(reg.rr_o.weight, std=0.5)   # switch the read on
+        h = torch.randn(2, 12, reg.d)
+        h2 = h.clone()
+        h2[:, -1] += 1.0
+        a, b = reg._reread(h), reg._reread(h2)
+        assert torch.allclose(a[:, :-1], b[:, :-1], atol=1e-6)
+        assert not torch.allclose(a[:, -1], b[:, -1], atol=1e-6)
+
+    m.train()
+    out = m(x)
+    out["final_log_probs"].exp().gather(
+        -1, torch.zeros(2, 12, 1, dtype=torch.long)).sum().backward()
+    for p in (reg.rr_q.weight, reg.rr_k.weight, reg.rr_v.weight,
+              reg.rr_o.weight):
+        assert p.grad is not None and torch.isfinite(p.grad).all()
+    assert reg.rr_o.weight.grad.abs().sum() > 0
