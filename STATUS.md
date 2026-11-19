@@ -80,6 +80,20 @@ tuning comparison into a mechanism proof.
 The dot population was never the problem: the same three dots with the same
 head solve the task the moment the key stream is delayed.
 
+**But on enwik8 it does not pay — closed at 360 s.** Same session: x3/w512
+2.0067, `kl1-nx` 2.0263 (same step cost), `kl1` 2.0492 (+15% step). And the
+audit explains the sign: with lagged keys the dots collapse onto each other
+(`distinct_per_pos` 2.99 → 2.05/1.91, `all_same` 0.004 → 0.106/0.229, per-dot
+distances [5.02, 2.07, 0.00] → [0.55, 0.00, 1.15]), because all three queries
+then address nearly the same neighbour. The fixed horizons *are* the
+population's information (drop-one costs +4.9 bpc), so the mechanism buys a
+capability by destroying the one the model was already using.
+
+So the probe's lesson is narrower than it looked: the model **cannot** bind,
+but enwik8 at this scale does not pay for binding more than it pays for
+horizons. The open question is a per-dot lag (keep the horizons, add one
+induction read), not the region-wide one.
+
 ## What the models actually say (same leg, same prompt)
 
 `sample1` trained tf and the frontier arm on the same 360 s leg (tf 1.9532,
@@ -168,12 +182,9 @@ model gets the same 25%. If it does, `p2` becomes affordable too.
 ## Running / queued
 
 - `long5` (running, 900 s) — tf / x3 / rr1 / rr2: does reread's 360 s win survive?
-- `bind2` (running, 360 s) — tf / x3 / kl1-nx / kl1 on enwik8: does the
-  induction read move the corpus, and does the free (window-only) version
-  capture it?
-- `cmp2` (queued, 360 s) — the compile A/B (tf, tf-c, x3, x3-c, x3-gx-c, x3-cro).
-- then: `rrc1` (rr2 + kl1) if both lanes pay, and `cmp3` at 900 s once the
-  compile number is real.
+- `cmp2` (running, 360 s) — the compile A/B (tf, tf-c, x3, x3-c, x3-gx-c, x3-cro).
+- then: `cmp3` at 900 s once the compile number is real, a flavour rerun on the
+  saved 900 s weights, and a per-dot-lag variant only if it is cheap.
 
 ## The thing to be careful about
 
