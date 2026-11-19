@@ -452,14 +452,14 @@ class Region(nn.Module):
         v = self.rr_v(u)                                   # [B,T,dv]
         kp = F.pad(k.transpose(1, 2), (s - 1, 0)).unfold(-1, s, 1)
         vp = F.pad(v.transpose(1, 2), (s - 1, 0)).unfold(-1, s, 1)
-        sc = torch.einsum("btd,bdst->bts", q, kp)
+        sc = torch.einsum("btd,bdts->bts", q, kp)
         sc = sc * (q.shape[-1] ** -0.5)
         i = torch.arange(t, device=h.device)
         off = torch.arange(s - 1, -1, -1, device=h.device)
         ok = (i[:, None] - off[None, :]) >= 0                # [T,s]
         sc = sc.masked_fill(~ok, float("-inf"))
         a = sc.softmax(-1)
-        return self.rr_o(torch.einsum("bts,bdst->btd", a, vp))
+        return self.rr_o(torch.einsum("bts,bdts->btd", a, vp))
 
     def _post(self, h: torch.Tensor) -> torch.Tensor:
         """Per-position residual blocks after pooling (identity when off).
