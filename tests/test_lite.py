@@ -1214,6 +1214,55 @@ def test_gather_windows_plain_flag_matches_the_tensor_check():
         assert not torch.equal(a, c)
 
 
+def test_hillis_scan_matches_cumsum_causally_and_trains():
+    """scan_mode="hillis" must be the SAME inclusive prefix sum as cumsum (up
+    to float association) and stay causal.
+
+    It exists because Inductor's CUDA SplitScan lowering crashes on the
+    cumsum in the global read, which forces compiled dot arms to carry an
+    eager boundary (`break_scan`) and costs them half the compile win. The
+    Hillis-Steele form is pad+add only, so it can be compiled inline; this
+    test is the guard that "inline" does not change the maths.
+    """
+    kw = dict(global_read=True, per_dot_logits=False, head_last_only=True,
+              n_passes=1, n_dots=3, d_q=12, d_v=20, head_post=32,
+              head_post_layers=2, global_decay=True)
+    m0 = build_iecnn(_cfg(scan_mode="cumsum", **kw), 64).eval()
+    m1 = build_iecnn(_cfg(scan_mode="hillis", **kw), 64).eval()
+    m1.load_state_dict(m0.state_dict())
+    d0, d1 = m0.regions[0].dots, m1.regions[0].dots
+
+    # 1) the scan helper itself, every small T and both rank shapes
+    for t in (1, 2, 3, 7, 8, 12):
+        x = torch.randn(2, t, 5)
+        assert torch.allclose(d0._prefix_sum(x), d1._prefix_sum(x), atol=1e-5)
+        y = torch.randn(2, t, 3, 4)
+        assert torch.allclose(d0._prefix_sum(y), d1._prefix_sum(y), atol=1e-5)
+
+    # 2) causality: a change at position 4 cannot reach positions < 4
+    x = torch.randn(1, 9, 3)
+    a = d1._prefix_sum(x)
+    x2 = x.clone()
+    x2[:, 4] += 100.0
+    b = d1._prefix_sum(x2)
+    assert torch.allclose(a[:, :4], b[:, :4], atol=1e-5)
+    assert not torch.allclose(a[:, 4:], b[:, 4:], atol=1e-5)
+
+    # 3) the whole global read agrees and the scan carries gradients
+    fk = torch.randn(2, 12, d1.d_q)
+    fv = torch.randn(2, 12, d1.d_v)
+    with torch.no_grad():
+        c0 = d0._global_ctx(fk, fv, 0)
+        c1 = d1._global_ctx(fk, fv, 0)
+    assert torch.allclose(c0, c1, atol=1e-4)
+    fk.requires_grad_(True)
+    fv.requires_grad_(True)
+    d1._global_ctx(fk, fv, 0).sum().backward()
+    assert fk.grad is not None and torch.isfinite(fk.grad).all()
+    assert fv.grad is not None and torch.isfinite(fv.grad).all()
+    assert fv.grad.abs().sum() > 0
+
+
 def test_k_lag_shifts_only_the_key_stream_and_stays_causal():
     """k_lag=1 is the induction circuit: key[s] = x[s-1], value[s] = x[s].
 

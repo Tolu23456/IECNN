@@ -122,7 +122,8 @@ class DotPopulation(nn.Module):
                  carry_state: bool = False, carry_chunk: int = 8,
                  gla: bool = False, global_exact: bool = False,
                  break_scan: bool = False, read_heads: int = 1,
-                 global_decay: bool = False, global_decay_k: int = 1):
+                 global_decay: bool = False, global_decay_k: int = 1,
+                 scan_mode: str = "cumsum"):
         super().__init__()
         self.N = n_dots
         self.d = d
@@ -339,6 +340,16 @@ class DotPopulation(nn.Module):
         # dots that take the global read, at d_q=16, so at T=64 it is a few
         # percent of a step; at T=256 it is the honest price of the test.
         self.global_exact = bool(global_exact)
+        # scan_mode: how the O(T) prefix read sums over time.
+        #   "cumsum" (default) — torch.cumsum. Inductor's CUDA SplitScan
+        #       lowering dies on it (cmp2), so every compiled arm carries an
+        #       eager boundary around the read (`break_scan`).
+        #   "hillis" — log-depth Hillis-Steele scan (pad + add, log2(T)
+        #       steps). No scan primitive, so Inductor compiles it inline and
+        #       the boundary can be removed. Same sum, different association
+        #       (pairwise-like, i.e. slightly better conditioned), so it is
+        #       always its own arm and never a silent substitution.
+        self.scan_mode = str(scan_mode)
         # break_scan: see _global_ctx_eager. CUDA-only Inductor workaround.
         self.break_scan = bool(break_scan)
         n_cell = 1 if self.share_cell else n_dots
@@ -544,6 +555,19 @@ class DotPopulation(nn.Module):
         return s0.expand(*batch_shape, self.N, self.d_s).contiguous()
 
     # ----- global causal read ----------------------------------------------
+    def _prefix_sum(self, x: torch.Tensor) -> torch.Tensor:
+        """Inclusive prefix sum along the time axis (dim=1). See scan_mode."""
+        if self.scan_mode != "hillis" or x.shape[1] <= 1:
+            return torch.cumsum(x, dim=1)
+        t = x.shape[1]
+        y = x
+        sh = 1
+        while sh < t:
+            pad = x.new_zeros((x.shape[0], sh) + tuple(x.shape[2:]))
+            y = y + torch.cat([pad, y[:, :-sh]], dim=1)
+            sh *= 2
+        return y
+
     def global_ctx(self, full_k, full_v, round_idx: int, q_add=None,
                    cache: dict | None = None) -> torch.Tensor:
         """Public entry point: honours `break_scan` (eager scan)."""
@@ -618,9 +642,9 @@ class DotPopulation(nn.Module):
             inv = torch.exp((-torch.arange(t, device=e.device, dtype=e.dtype)
                              ).view(1, t, 1) * torch.log(gam))
             e = e * inv
-        cum_e = torch.cumsum(e, dim=1)                               # [B, T, N]
+        cum_e = self._prefix_sum(e)                                  # [B, T, N]
         ev = e.unsqueeze(-1) * full_v.unsqueeze(2)                   # [B, T, N, d_v]
-        cum_ev = torch.cumsum(ev, dim=1)                              # [B, T, N, d_v]
+        cum_ev = self._prefix_sum(ev)                                # [B, T, N, d_v]
         return cum_ev / cum_e.unsqueeze(-1).clamp_min(1e-9)
 
     def _global_ctx_mix(self, e: torch.Tensor, full_v: torch.Tensor,
@@ -648,9 +672,9 @@ class DotPopulation(nn.Module):
                           dtype=e.dtype).view(1, -1, 1, 1)
         e_k = e.unsqueeze(-1) * torch.exp(
             -ar * torch.log(gam.view(1, 1, n, k)))                # [B,T,N,K]
-        cum_e = torch.cumsum(e_k, dim=1)                          # [B,T,N,K]
+        cum_e = self._prefix_sum(e_k)                             # [B,T,N,K]
         ev = e_k.unsqueeze(-1) * full_v.unsqueeze(2).unsqueeze(2)
-        num = torch.cumsum(ev, dim=1) / cum_e.unsqueeze(-1).clamp_min(1e-9)
+        num = self._prefix_sum(ev) / cum_e.unsqueeze(-1).clamp_min(1e-9)
         return (num * mix.view(1, 1, n, k, 1)).sum(-2)            # [B,T,N,d_v]
 
     def _global_ctx_linear(self, full_k, full_v, round_idx: int,
@@ -679,8 +703,8 @@ class DotPopulation(nn.Module):
             S, Z = cache["gla_S"], cache["gla_Z"]
         else:
             phik = F.elu(full_k * s) + 1.0                       # [B,T,d_q]
-            S = torch.cumsum(phik.unsqueeze(-1) * full_v.unsqueeze(2), dim=1)
-            Z = torch.cumsum(phik, dim=1)                        # [B,T,d_q]
+            S = self._prefix_sum(phik.unsqueeze(-1) * full_v.unsqueeze(2))
+            Z = self._prefix_sum(phik)                           # [B,T,d_q]
             if cache is not None:
                 cache["gla_S"], cache["gla_Z"] = S, Z
         q0 = self._sel(round_idx, self.q)                        # [N,d_q]

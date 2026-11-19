@@ -251,7 +251,8 @@ class Region(nn.Module):
             break_scan=bool(m.get("break_scan", False)),
             read_heads=int(m.get("read_heads", 1)),
             global_decay=bool(m.get("global_decay", False)),
-            global_decay_k=int(m.get("global_decay_k", 1)))
+            global_decay_k=int(m.get("global_decay_k", 1)),
+            scan_mode=str(m.get("scan_mode", "cumsum")))
         # Lean passes: in hidden mode the pooled shared head and the per-dot
         # e_state projection are only consumed on the LAST pass. With
         # head_last_only the earlier passes skip both (they still update the

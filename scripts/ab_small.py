@@ -61,7 +61,8 @@ def iecnn(cell="gru", lean=False, n_passes=3, n_dots=8, d_s=128, d=128,
           d_q=16, d_v=32, head_post=0, head_post_layers=1,
           interleave=False, read_ln=False, head_ln=False, read_heads=1,
           global_decay=False, post_share="none", global_decay_k=1,
-          gate_agree=False, reread=0, reread_span=8, q_shift=0, k_lag=0):
+          gate_agree=False, reread=0, reread_span=8, q_shift=0, k_lag=0,
+          scan_mode="cumsum"):
     m = {
         "kind": "iecnn", "d": d, "d_q": d_q, "d_v": d_v, "d_s": d_s,
         "n_dots": n_dots, "n_regions": 1, "n_passes": n_passes,
@@ -106,6 +107,7 @@ def iecnn(cell="gru", lean=False, n_passes=3, n_dots=8, d_s=128, d=128,
         "reread_span": reread_span,
         "q_shift": q_shift,
         "k_lag": k_lag,
+        "scan_mode": scan_mode,
     }
     if window_reach is not None:
         m["window_reach"] = window_reach
@@ -903,6 +905,22 @@ ARMS = {
         global_read=True, spans=(8,), head_post=512, head_post_layers=3,
         read_ln=True, head_ln=True, global_decay=True, global_exact=True),
         {"lr": 2e-3, "swa": 0.99}),
+    # --- scan formulation: the remaining compile lever --------------------
+    # break_scan keeps the dot model compilable but costs it about half of
+    # the transformer's step win (scn1: -10.7% vs -22.4%). The Hillis-Steele
+    # scan is pad+add only, so Inductor can inline it and the eager boundary
+    # can be dropped. "-hs" (eager) isolates the numerics; "-hs-c" measures
+    # the step win with the boundary gone.
+    "iecnn-n3-x3-p1-ln-decay-d128-w512-hs": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=512, head_post_layers=3,
+        read_ln=True, head_ln=True, global_decay=True, scan_mode="hillis"),
+        {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-n3-x3-p1-ln-decay-d128-w512-hs-c": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=512, head_post_layers=3,
+        read_ln=True, head_ln=True, global_decay=True, scan_mode="hillis"),
+        {"lr": 2e-3, "swa": 0.99, "compile": True}),
     "iecnn-n3-x3-p1-ln-decay-d128-w512-gx-c": ("iecnn", lambda: iecnn(
         "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
         global_read=True, spans=(8,), head_post=512, head_post_layers=3,
@@ -1764,7 +1782,10 @@ def main():
         # every IECNN arm gets the eager graph boundary around that one
         # function. Applied uniformly so a compile comparison stays fair.
         if (os.environ.get("ARM_BREAK_SCAN") == "1"
-                and cfg.get("model", {}).get("kind") == "iecnn"):
+                and cfg.get("model", {}).get("kind") == "iecnn"
+                # the Hillis scan is pointwise+cat, so Inductor can inline it;
+                # the eager boundary would only throw that away.
+                and cfg["model"].get("scan_mode", "cumsum") != "hillis"):
             cfg["model"]["break_scan"] = True
         model = (build_transformer_baseline(cfg, V) if kind == "transformer"
                  else build_iecnn(cfg, V)).to(DEV)
