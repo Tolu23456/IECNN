@@ -1776,7 +1776,18 @@ def main():
         if opts.get("compile"):
             run_opts.setdefault("warm", 10)
         try:
-            rows.append(run(name, kind, model, eval_model=inner, **run_opts))
+            r = run(name, kind, model, eval_model=inner, **run_opts)
+            rows.append(r)
+            if os.environ.get("ARM_SAVE"):
+                # keep the weights: the bpc table cannot answer "what does
+                # this model actually say", and post-hoc analyses (which val
+                # positions two arms disagree on, repeat-distance bucketing)
+                # need the trained parameters. ~2 MB per arm.
+                sp = os.path.join(os.environ["ARM_SAVE"],
+                                  name.replace("/", "_") + ".pt")
+                torch.save({"cfg": cfg, "kind": kind, "row": r,
+                            "state_dict": inner.state_dict()}, sp)
+                print(f"SAVED {sp}", flush=True)
         except Exception as e:  # noqa: BLE001
             # One broken arm must not cost the other arms their session: the
             # failure is printed loudly and the summary simply lacks the arm.
