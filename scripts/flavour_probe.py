@@ -60,6 +60,47 @@ TEMP = float(os.environ.get("SC_TEMP", "0.7"))
 TOPK = int(os.environ.get("SC_TOPK", "40"))
 HOT = int(os.environ.get("SC_HOT", "50"))
 SC_SEED = int(os.environ.get("SC_SEED", "1234"))
+N_OOD = int(os.environ.get("SC_OOD_PROMPTS", "6"))
+
+# Out-of-domain prompts: the model was trained on enwik8 (or Gutenberg); this
+# is Shakespeare, embedded so the test is identical on every runner. If the
+# model's output on an OOD prompt is still corpus-typical, it is writing its
+# training data's flavour; if it drifts toward the prompt's trigrams, it is
+# conditioning on the prompt.
+OOD_TEXT = b"""To be, or not to be, that is the question:
+Whether 'tis nobler in the mind to suffer
+The slings and arrows of outrageous fortune,
+Or to take arms against a sea of troubles
+And by opposing end them. To die, to sleep,
+No more; and by a sleep to say we end
+The heart-ache and the thousand natural shocks
+That flesh is heir to: 'tis a consummation
+Devoutly to be wish'd. To die, to sleep;
+To sleep, perchance to dream: ay, there's the rub,
+For in that sleep of death what dreams may come,
+When we have shuffled off this mortal coil,
+Must give us pause. There's the respect
+That makes calamity of so long life.
+For who would bear the whips and scorns of time,
+The oppressor's wrong, the proud man's contumely,
+The pangs of dispriz'd love, the law's delay,
+The insolence of office, and the spurns
+That patient merit of the unworthy takes,
+When he himself might his quietus make
+With a bare bodkin? Who would fardels bear,
+To grunt and sweat under a weary life,
+But that the dread of something after death,
+The undiscover'd country, from whose bourn
+No traveller returns, puzzles the will,
+And makes us rather bear those ills we have
+Than fly to others that we know not of?
+Thus conscience does make cowards of us all,
+And thus the native hue of resolution
+Is sicklied o'er with the pale cast of thought,
+And enterprises of great pith and moment
+With this regard their currents turn awry
+And lose the name of action."""
+
 
 _argv = sys.argv
 sys.argv = ["ab_small.py", str(BUDGET)]
@@ -168,8 +209,14 @@ def main():
     # prompts spread over the val split (never trained on)
     span = max(1, len(raw_val) - PROMPT_N - GEN_N - 1)
     starts = [int(span * (i + 0.5) / N_PROMPT) for i in range(N_PROMPT)]
-    prompts = [(raw_val[s:s + PROMPT_N], raw_val[s + PROMPT_N:s + PROMPT_N + GEN_N])
-               for s in starts]
+    prompts = [("val", raw_val[s:s + PROMPT_N],
+                raw_val[s + PROMPT_N:s + PROMPT_N + GEN_N]) for s in starts]
+    if N_OOD > 0:
+        ood = OOD_TEXT
+        ostarts = [int((len(ood) - PROMPT_N - GEN_N) * (i + 0.5) / N_OOD)
+                   for i in range(N_OOD)]
+        prompts += [("ood", ood[s:s + PROMPT_N],
+                     ood[s + PROMPT_N:s + PROMPT_N + GEN_N]) for s in ostarts]
 
     out = {}
     for name in ARMS:
@@ -195,16 +242,18 @@ def main():
             print(f"--- training {name} ({sum(p.numel() for p in model.parameters())} "
                   f"params, {BUDGET:.0f}s)", flush=True)
             ab.run(name, kind, model, **opts)
-        rows = []
-        for i, (pr, tr) in enumerate(prompts):
+        per_domain = {}
+        for i, (dom, pr, tr) in enumerate(prompts):
             pt = torch.tensor(list(pr), dtype=torch.long, device=DEV).unsqueeze(0)
             gen = generate(model, pt, GEN_N, SC_SEED + i)
-            rows.append(scores(gen, pr, tr, cc, corpus_tri))
-        agg = {k: (float(np.mean([r[k] for r in rows])),
-                   float(np.std([r[k] for r in rows]))) for k in rows[0]}
-        out[name] = agg
-        print(f"=== {name}\n" + "  ".join(
-            f"{k} {m:.3f}±{s:.3f}" for k, (m, s) in agg.items()), flush=True)
+            per_domain.setdefault(dom, []).append(scores(gen, pr, tr, cc, corpus_tri))
+        out[name] = {}
+        for dom, rows in per_domain.items():
+            agg = {k: (float(np.mean([r[k] for r in rows])),
+                       float(np.std([r[k] for r in rows]))) for k in rows[0]}
+            out[name][dom] = agg
+            print(f"=== {name} [{dom}]\n" + "  ".join(
+                f"{k} {m:.3f}±{sd:.3f}" for k, (m, sd) in agg.items()), flush=True)
         del model
         if DEV.type == "cuda":
             torch.cuda.empty_cache()
@@ -212,10 +261,13 @@ def main():
     names = list(out)
     if len(names) >= 2:
         a, b = names[0], names[1]
-        print(f"=== {a} vs {b} (mean over {N_PROMPT} prompts)", flush=True)
-        for k in out[a]:
-            print(f"  {k:<6} {out[a][k][0]:>8.3f}   {out[b][k][0]:>8.3f}"
-                  f"   diff {out[a][k][0] - out[b][k][0]:+.3f}", flush=True)
+        for dom in out[a]:
+            print(f"=== {a} vs {b} [{dom}]", flush=True)
+            for k in out[a][dom]:
+                print(f"  {k:<6} {out[a][dom][k][0]:>8.3f}   "
+                      f"{out[b][dom][k][0]:>8.3f}   "
+                      f"diff {out[a][dom][k][0] - out[b][dom][k][0]:+.3f}",
+                      flush=True)
     print("FLAVOUR DONE", flush=True)
 
 
