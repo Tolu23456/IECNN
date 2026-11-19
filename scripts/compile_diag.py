@@ -67,7 +67,7 @@ def main():
     kind, model = make()
     print(f"=== DIAG {ARM} ({kind}) device {A.DEV}", flush=True)
     g = torch.Generator().manual_seed(11)
-    i = (torch.rand(1, generator=g) * (A.train.numel() - A.T - 1)).long()
+    i = int(torch.rand(1, generator=g).item() * (A.train.numel() - A.T - 1))
     x = A.train[i:i + A.T].to(A.DEV)
     y = A.train[i + 1:i + 1 + A.T].to(A.DEV)
 
