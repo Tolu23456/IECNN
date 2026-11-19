@@ -39,7 +39,11 @@ def generate_bytes(model, prompt: torch.Tensor, n: int, mode: str = "sample",
         raise ValueError("n must be >= 0")
     model.eval()
     dev = prompt.device
-    g = torch.Generator(device=dev).manual_seed(int(seed))
+    # The generator lives on CPU unconditionally: torch.Generator(device="xla")
+    # does not exist, and one extra 256-float transfer per byte is nothing next
+    # to a forward pass. One code path for cuda, xla and cpu beats a branch
+    # that can silently sample differently per backend.
+    g = torch.Generator().manual_seed(int(seed))
     seq = prompt.clone()
     out = bytearray()
     for _ in range(int(n)):
@@ -51,7 +55,8 @@ def generate_bytes(model, prompt: torch.Tensor, n: int, mode: str = "sample",
             if 0 < int(topk) < logits.shape[-1]:
                 th = torch.topk(logits, int(topk), dim=-1).values[:, -1:]
                 logits = logits.masked_fill(logits < th, float("-inf"))
-            nxt = torch.multinomial(F.softmax(logits, dim=-1), 1, generator=g)
+            prob = F.softmax(logits, dim=-1)
+            nxt = torch.multinomial(prob.cpu(), 1, generator=g).to(dev)
         out.append(int(nxt.reshape(-1)[0].item()))
         seq = torch.cat([seq, nxt.reshape(1, 1)], dim=1)
     return bytes(out)

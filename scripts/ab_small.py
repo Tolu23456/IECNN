@@ -1563,8 +1563,17 @@ val = load(VAL_PATH, N_VAL)
 # Device: the same harness runs on the 2-vCPU lab VM and on a GPU runner.
 # Everything that depends on the machine (threads, device) is a harness knob,
 # never an arm knob, so both arms in a session always share it.
-DEV = torch.device(os.environ.get("ARM_DEV")
-                   or ("cuda" if torch.cuda.is_available() else "cpu"))
+_DEVNAME = os.environ.get("ARM_DEV") or (
+    "cuda" if torch.cuda.is_available() else "cpu")
+if _DEVNAME == "xla":
+    # TPU lane. `torch.device("xla")` is not a real device string: the device
+    # object only exists once torch_xla has initialised the runtime, so the
+    # import has to come first. Everything downstream (batches, eval, the
+    # optimizer) is device-agnostic, so this one branch is the whole port.
+    import torch_xla.core.xla_model as xm
+    DEV = xm.xla_device()
+else:
+    DEV = torch.device(_DEVNAME)
 DATA_FP = f"{_fingerprint(TRAIN_PATH, N_TRAIN)}/{_fingerprint(VAL_PATH, N_VAL)}"
 print(f"train={TRAIN_PATH} val={VAL_PATH} | tokens train={train.numel()} "
       f"val={val.numel()} | B={B} T={T} valw={VALW} stride={VALSTRIDE} V={V} "
@@ -1697,6 +1706,8 @@ def pointer_audit(model) -> dict:
 
 
 SEED = int(os.environ.get("ARM_SEED", "0"))
+# set False the first time a backend rejects torch._foreach_* (XLA does)
+EMA_FOREACH = True
 BASE_LR = float(os.environ.get("ARM_LR", "1e-3"))
 
 
@@ -1766,9 +1777,19 @@ def run(name: str, kind: str, model, lr: float = None,
         step += 1
         if ema is not None and (time.time() - t0) > 0.45 * BUDGET:
             with torch.no_grad():
-                torch._foreach_mul_(ema, swa)
-                torch._foreach_add_(ema, list(model.parameters()),
-                                    alpha=1.0 - swa)
+                if EMA_FOREACH:
+                    try:
+                        torch._foreach_mul_(ema, swa)
+                        torch._foreach_add_(ema, list(model.parameters()),
+                                            alpha=1.0 - swa)
+                    except (RuntimeError, NotImplementedError):
+                        # XLA does not fuse the foreach ops. The elementwise
+                        # form is the same arithmetic; paying it per step is
+                        # better than a lane that cannot run at all.
+                        globals()["EMA_FOREACH"] = False
+                else:
+                    for e, p_ in zip(ema, model.parameters()):
+                        e.mul_(swa).add_(p_.detach(), alpha=1.0 - swa)
         el = time.time() - t0
         if el >= next_mark:
             marks.append([int(step * nb * T), round(val_bpc(em), 4), step])
