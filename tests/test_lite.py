@@ -1177,7 +1177,10 @@ def test_reread_is_inert_at_init_causal_and_trains():
         torch.nn.init.normal_(reg.rr_o.weight, std=0.5)   # switch the read on
         h = torch.randn(2, 12, reg.d)
         h2 = h.clone()
-        h2[:, -1] += 1.0
+        # NOT a uniform +1: the read starts with a LayerNorm, which is
+        # invariant to a constant shift along d (it subtracts the mean), so a
+        # uniform perturbation is the one change the read cannot see.
+        h2[:, -1] += torch.randn(reg.d)
         a, b = reg._reread(h), reg._reread(h2)
         assert torch.allclose(a[:, :-1], b[:, :-1], atol=1e-6)
         assert not torch.allclose(a[:, -1], b[:, -1], atol=1e-6)
