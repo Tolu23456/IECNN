@@ -42,7 +42,9 @@ threshold there is ~0.01, not 0.024).
    `reread` does it with one causal span-8, single-head read of the block's own
    output between blocks — zero-init so step 0 is bit-identical to the frontier
    arm. At 360 s: rr1 1.9904 (+6% step), rr2 1.9735 (+16%), against 2.0051 for
-   the matched frontier. long5 is the 900 s confirmation.
+   the matched frontier. **Confirmed at 900 s (long5): rr2 1.9333 vs x3 1.9662,
+   and rr2 did it with 19% fewer tokens** — at equal compute the gap is ~0.045,
+   so this is the rare mechanism that pays for its own step cost.
 3. **Capacity per step at long budgets.** x5/w512 beat x3/w512 by 0.037 at 900 s
    (the opposite of 180 s), so the long-budget shape favours depth; the untested
    version of that is **more dots** (N=4–5), which the ledger only ever rejected
@@ -141,6 +143,13 @@ frontier at 360 s**: rr1 −0.0147 at +6% step, rr2 −0.0316 at +16%. rr2 costs
 exactly what tf costs per step and is still 0.020 behind it, so the honest
 claim is "0.032 bpc for 16% more step time", not "faster than tf".
 
+At 900 s (long5, same session, common 277.70M tokens): **tf 1.8400 ·
+x3 1.9662 · rr1 1.9470 · rr2 1.9333.** rr2 beats x3 by 0.0333 while spending
+23% more per step and therefore doing **19% fewer tokens** — at equal compute
+the gap is ~0.045. That is the "pay for your compute" test and reread passes
+it (most of the ledger does not). It is still 0.093 behind tf, and tf is 19%
+faster per step.
+
 At 900 s the same two arms are tf 1.8406 vs x3 1.9683, and x5/w512 is 1.9317.
 The dot model is **19% faster per step and 23% ahead at 60M tokens**, and behind
 by 0.04–0.14 at every budget past ~250 s. Both shapes are still moving.
@@ -180,25 +189,37 @@ GRU at both budgets; `share_cell`; untied head; cell LayerNorm; d_s 64;
 `query_from_input`/`gla`; `ngram_bias`; `head_rank48`; `id_lags`; `head_skip`;
 `gate_agree`; **`dist_bias`** (0.0045 < noise); `global_exact` (`gx`).
 
-## Compile — the asymmetry was engineering
+## Compile — engineering, with a second blocker
 
 Earlier: compile bought tf **25%** and the dot model **0%**, which looked like an
-architecture property. It was not. The region died in dynamo at
+architecture property. It was not the guard. The region died in dynamo at
 `models/memory.py:78` on a data-dependent guard (the plain-window fast-path test);
 on T4 that surfaced as an `UNPACK_SEQUENCE` size mismatch 60 lines away, which is
 why two diagnostics blamed the prefix scan. Fixed by passing the fast-path
-decision as a Python bool from the config. Now `fullgraph=True` compiles, and
-`cmp2` (tf, tf-c, x3, x3-c, x3-gx-c, x3-cro at 360 s) measures whether the dot
-model gets the same 25%. If it does, `p2` becomes affordable too.
+decision as a Python bool from the config.
+
+`cmp2` (360 s) then showed the second, independent blocker: **Inductor's CUDA
+`SplitScan` lowering dies on the `cumsum` in the global read** (`TypeError: list
+indices must be integers or slices, not NoneType`, buffer `[32,256,3]`), so
+`x3-c` and `x3-cro` failed at step 0 while `tf-c` ran 29% more steps and gained
+0.075 bpc. `gx-c` compiles because the exact read has no scan, but the exact
+read itself costs 0.026 bpc, so it is not a substitute. This is a *second*
+defect, not the guard: CPU `fullgraph` compiles the scan fine; CUDA does not.
+
+The fix is already in the tree: `ARM_BREAK_SCAN=1` -> `break_scan`, a
+`@torch.compiler.disable` boundary around the scan only. `scn1` (tf, tf-c, x3,
+x3-c with the boundary) measures whether the graph break keeps the compile win
+on GPU. If it eats it, the fallback is a log-depth Hillis-Steele scan (pad+add,
+all pointwise) instead of `cumsum`.
 
 ## Running / queued
 
-- `long5` (running, 900 s) — tf / x3 / rr1 / rr2: does reread's 360 s win survive?
-- `cmp2` (running, 360 s) — the compile A/B (tf, tf-c, x3, x3-c, x3-gx-c, x3-cro).
-- `dis1` (queued behind a free GPU slot, 360 s) — tf / x3 / **`qi0`** /
-  `kl1-nx` in ONE session: the control that separates the lag from the shared
-  content query inside bind2. `qi0` ~ 2.026 -> the lag is innocent; ~ 2.006 ->
-  the lag carries the cost.
+- `dis1` (running, 360 s) — tf / x3 / **`qi0`** / `kl1-nx` in ONE session: the
+  control that separates the lag from the shared content query inside bind2.
+  `qi0` ~ 2.026 -> the lag is innocent; ~ 2.006 -> the lag carries the cost.
+- `scn1` (running, 360 s) — tf / tf-c / x3 / **x3-c with `ARM_BREAK_SCAN=1`**:
+  does the eager boundary around the prefix scan recover the compile win for
+  the dot model? This is the biggest remaining throughput lever.
 - then: `cmp3` at 900 s once the compile number is real, a flavour rerun on the
   saved 900 s weights, and the per-dot variant (one content query + one value
   lag on the far dot only) only if `qi0` clears the query.
