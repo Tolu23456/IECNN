@@ -232,6 +232,14 @@ scan (pad+add, all pointwise) so the boundary can be removed and the missing
   the two paid levers (reread + compile) in one arm.
 - `s2r9` (running, 900 s, seed 1) — tf / x3 / rr2: the second seed that turns
   reread from "a win" into a claim.
+- **implemented, NOT launched (needs authorization)** — `reread_spans`: one
+  exact horizon per reread site. The stack currently reads span 8 at every
+  site, which is the dot window's own scale, so the model has window-8 and the
+  global decayed bag and nothing exact in between. Arms: `rr3` (8/8/8),
+  `rr3-u32` (32/32/32) and `rr3-lad` (2/8/32) — same site count, same
+  parameters (rr_* are shared), only the horizons differ, so the session
+  separates "more mixing" from "a new scale". Tests pass locally, Kaggle
+  suite pending. One 360 s session, 4 arms with the anchor.
 - then: the Hillis-Steele scan if the ~10% step is worth chasing, a flavour
   rerun on the saved 900 s weights, and the per-dot lag only if bounded work
   turns up (it is capped at ~0.012).

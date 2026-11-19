@@ -1195,6 +1195,73 @@ def test_reread_is_inert_at_init_causal_and_trains():
     assert reg.rr_o.weight.grad.abs().sum() > 0
 
 
+def test_reread_span_ladder_defaults_identical_and_is_causal():
+    """reread_spans gives each reread site its own exact horizon (2/8/32).
+
+    The default is uniform `reread_span` at every site, so the flag must leave
+    an arm bit-identical when it is not set -- this is a re-allocation of the
+    existing read, not a new mechanism. It also must not change the parameter
+    count (rr_* stay shared across sites) and it must stay causal at the
+    longest rung, since span 32 is a real window and not a masked full read.
+    """
+    kw = dict(global_read=True, per_dot_logits=False, head_last_only=True,
+              n_passes=1, n_dots=3, head_post=32, head_post_layers=3,
+              reread=2)
+    x = torch.randint(0, 64, (2, 12))
+
+    # 1) default and explicit-uniform are the same arm, bit for bit
+    a = build_iecnn(_cfg(**kw), 64).eval()
+    b = build_iecnn(_cfg(reread_spans=(8, 8), **kw), 64).eval()
+    b.load_state_dict(a.state_dict())
+    with torch.no_grad():
+        assert torch.equal(a(x)["final_log_probs"], b(x)["final_log_probs"])
+    assert a.regions[0].reread_spans == (8, 8) == b.regions[0].reread_spans
+
+    # 2) a short ladder repeats its last rung, and the ladder adds no params
+    lad = build_iecnn(_cfg(reread=3, reread_spans=(2, 8, 32), **kw), 64)
+    assert lad.regions[0].reread_spans == (2, 8, 32)
+    assert lad.regions[0]._reread_span_at(0) == 2
+    assert lad.regions[0]._reread_span_at(2) == 32
+    short = build_iecnn(_cfg(reread=3, reread_spans=(4,), **kw), 64)
+    assert short.regions[0].reread_spans == (4, 4, 4)
+    ref = build_iecnn(_cfg(reread=3, **kw), 64)
+    assert (sum(p.numel() for p in lad.parameters())
+            == sum(p.numel() for p in ref.parameters()))
+
+    # 3) the ladder actually reads different horizons (switch the read on,
+    #    because rr_o is zero-initialised and would hide every difference)
+    lad.load_state_dict(ref.state_dict())
+    with torch.no_grad():
+        for reg in (lad.regions[0], ref.regions[0]):
+            torch.nn.init.normal_(reg.rr_o.weight, std=0.5)
+        assert not torch.allclose(lad(x)["final_log_probs"],
+                                  ref(x)["final_log_probs"], atol=1e-4)
+
+    # 4) causality at the longest rung, and end to end through the ladder
+    reg = lad.regions[0]
+    h = torch.randn(2, 12, reg.d)
+    h2 = h.clone()
+    h2[:, -1] += torch.randn(reg.d)     # not a uniform shift: LN ignores those
+    with torch.no_grad():
+        p, q = reg._reread(h, 32), reg._reread(h2, 32)
+        assert torch.allclose(p[:, :-1], q[:, :-1], atol=1e-6)
+        assert not torch.allclose(p[:, -1], q[:, -1], atol=1e-6)
+        x2 = x.clone()
+        x2[:, -1] = (x2[:, -1] + 1) % 64
+        lad.eval()
+        l1, l2 = lad(x)["final_log_probs"], lad(x2)["final_log_probs"]
+        assert torch.allclose(l1[:, :-1], l2[:, :-1], atol=1e-5)
+
+    # 5) the shared read still trains through a ladder
+    lad.train()
+    lad(x)["final_log_probs"].exp().gather(
+        -1, torch.zeros(2, 12, 1, dtype=torch.long)).sum().backward()
+    for p_ in (reg.rr_q.weight, reg.rr_k.weight, reg.rr_v.weight,
+               reg.rr_o.weight):
+        assert p_.grad is not None and torch.isfinite(p_.grad).all()
+    assert reg.rr_o.weight.grad.abs().sum() > 0
+
+
 def test_gather_windows_plain_flag_matches_the_tensor_check():
     """The compile-safe `plain` argument must be a pure optimisation: for the
     default sliding window it has to return bit-identical windows to the eager

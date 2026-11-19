@@ -370,6 +370,23 @@ class Region(nn.Module):
         # in, so a null result is "no gain", not "damaged training".
         self.reread = int(m.get("reread", 0))
         self.reread_span = int(m.get("reread_span", 8))
+        # reread_spans: one exact horizon per reread site, e.g. (2, 8, 32).
+        #
+        # The default applies `reread_span` at EVERY site, so a 3-site stack
+        # reads the same 8 slots three times -- the same scale the dots'
+        # window already has. The stack then has exactly two views of the
+        # past: window-8 and the global decayed bag, with nothing exact in
+        # between. A ladder spends the same parameters (rr_* are shared
+        # across sites) and ~1.2k extra MAC/token on a coarse-to-fine view:
+        # site 0 reads 2 back, site 1 reads 8, site 2 reads 32. Empty (the
+        # default) is bit-identical to uniform `reread_span`; a short ladder
+        # repeats its last rung, so the flag can never run out of spans.
+        _sp = tuple(int(x) for x in (m.get("reread_spans", ()) or ()))
+        if not _sp:
+            _sp = (self.reread_span,) * max(1, self.reread)
+        if len(_sp) < self.reread:
+            _sp = _sp + (_sp[-1],) * (self.reread - len(_sp))
+        self.reread_spans = _sp
         self.reread_dq = int(m.get("reread_dq", 16))
         self.reread_dv = int(m.get("reread_dv", 32))
         if self.reread > 0:
@@ -477,8 +494,14 @@ class Region(nn.Module):
             r = torch.cat([torch.zeros_like(r[:, :k]), r[:, :-k]], dim=1)
         return r.matmul(self.w_qi)
 
-    def _reread(self, h: torch.Tensor) -> torch.Tensor:
-        """One causal single-head read of the last `reread_span` positions.
+    def _reread_span_at(self, i: int) -> int:
+        """Span for the i-th reread site (see reread_spans)."""
+        if i < len(self.reread_spans):
+            return self.reread_spans[i]
+        return self.reread_spans[-1]
+
+    def _reread(self, h: torch.Tensor, span=None) -> torch.Tensor:
+        """One causal single-head read of the last `span` positions.
 
         Written as a gather (`unfold` over a left-padded stream) rather than
         `scaled_dot_product_attention` with a band mask: SDPA still computes
@@ -488,7 +511,7 @@ class Region(nn.Module):
         with -inf.
         """
         b, t, _ = h.shape
-        s = self.reread_span
+        s = self.reread_span if span is None else int(span)
         u = self.rr_ln(h)
         q = self.rr_q(u)                                   # [B,T,dq]
         k = self.rr_k(u)                                   # [B,T,dq]
@@ -517,13 +540,13 @@ class Region(nn.Module):
             for i in range(self.post_repeat):
                 h = h + blk["w2"](F.gelu(blk["w1"](blk["ln"](h))))
                 if self.reread > i and h.dim() == 3:
-                    h = h + self._reread(h)
+                    h = h + self._reread(h, self._reread_span_at(i))
             return h
         for i, blk in enumerate(self.post_blocks):
             w1 = blk["w1"] if self.post_w1 is None else self.post_w1
             h = h + blk["w2"](F.gelu(w1(blk["ln"](h))))
             if self.reread > i and h.dim() == 3:
-                h = h + self._reread(h)
+                h = h + self._reread(h, self._reread_span_at(i))
         return h
 
     def _head_logits(self, h: torch.Tensor, emb_table: torch.Tensor):

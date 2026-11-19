@@ -61,7 +61,8 @@ def iecnn(cell="gru", lean=False, n_passes=3, n_dots=8, d_s=128, d=128,
           d_q=16, d_v=32, head_post=0, head_post_layers=1,
           interleave=False, read_ln=False, head_ln=False, read_heads=1,
           global_decay=False, post_share="none", global_decay_k=1,
-          gate_agree=False, reread=0, reread_span=8, q_shift=0, k_lag=0,
+          gate_agree=False, reread=0, reread_span=8, reread_spans=(),
+          q_shift=0, k_lag=0,
           scan_mode="cumsum"):
     m = {
         "kind": "iecnn", "d": d, "d_q": d_q, "d_v": d_v, "d_s": d_s,
@@ -105,6 +106,7 @@ def iecnn(cell="gru", lean=False, n_passes=3, n_dots=8, d_s=128, d=128,
         "post_share": post_share,
         "reread": reread,
         "reread_span": reread_span,
+        "reread_spans": tuple(reread_spans),
         "q_shift": q_shift,
         "k_lag": k_lag,
         "scan_mode": scan_mode,
@@ -1486,6 +1488,33 @@ ARMS = {
         global_read=True, spans=(8,), head_post=512, head_post_layers=3,
         read_ln=True, head_ln=True, global_decay=True,
         query_from_input=True, k_lag=1),
+        {"lr": 2e-3, "swa": 0.99}),
+    # --- reread scale ladder ----------------------------------------------
+    # rr2 (uniform span 8 at both sites) is the only mechanism that has paid
+    # at 900 s. But span 8 is also the dot window's scale, so the stack has
+    # two views of the past: window-8 and the global decayed bag, and nothing
+    # exact in between. These three arms hold the site count at 3 and vary
+    # ONLY the horizon, so they separate "more mixing" from "a new scale":
+    #   rr3     = 8/8/8   (control: same operation a third time)
+    #   rr3-u32 = 32/32/32 (control: same budget, uniformly long)
+    #   rr3-lad = 2/8/32  (coarse-to-fine, ~1.2k extra MAC/token)
+    # rr2-s16 (uniform 16, 2 sites) is the already-registered intermediate.
+    "iecnn-n3-x3-p1-ln-decay-d128-w512-rr3": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=512, head_post_layers=3,
+        read_ln=True, head_ln=True, global_decay=True, reread=3),
+        {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-n3-x3-p1-ln-decay-d128-w512-rr3-u32": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=512, head_post_layers=3,
+        read_ln=True, head_ln=True, global_decay=True, reread=3,
+        reread_span=32),
+        {"lr": 2e-3, "swa": 0.99}),
+    "iecnn-n3-x3-p1-ln-decay-d128-w512-rr3-lad": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=512, head_post_layers=3,
+        read_ln=True, head_ln=True, global_decay=True, reread=3,
+        reread_spans=(2, 8, 32)),
         {"lr": 2e-3, "swa": 0.99}),
     "iecnn-n3-x3-p1-ln-decay-d128-w512-rr2-s16": ("iecnn", lambda: iecnn(
         "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
