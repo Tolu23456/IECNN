@@ -164,11 +164,17 @@ def generate(model, prompt: torch.Tensor, n: int, seed: int) -> bytes:
 
 
 def scores(gen: bytes, prompt: bytes, truth: bytes, cc: "CorpusCounts",
-           corpus_tri: dict, alpha: float = 0.5) -> dict:
+           corpus_tri: dict, alpha: float = 0.02) -> dict:
     g = np.frombuffer(gen, dtype=np.uint8)
     p = np.frombuffer(prompt, dtype=np.uint8)
     gk, pk = _keys4(g), _keys4(p)
     gc, pc = cc.count(gk), cc.count(pk)
+    # `warm` is the informative band: n-grams that are neither so common the
+    # whole corpus says them (>= HOT) nor absent (0). At 2.6 bpc both models
+    # emitted 96% HOT 4-grams, so that split had no headroom; the warm band
+    # and the mean log-count are what can still separate them.
+    warm = np.mean((gc >= 1) & (gc < HOT)) if gk.size else 0.0
+    logcount = float(np.mean(np.log2(1.0 + gc))) if gk.size else 0.0
     prompt_set = set(int(x) for x in pk)
     in_prompt = np.array([int(x) in prompt_set for x in gk], dtype=bool) \
         if gk.size else np.zeros(0, dtype=bool)
@@ -187,9 +193,13 @@ def scores(gen: bytes, prompt: bytes, truth: bytes, cc: "CorpusCounts",
         cq = corpus_tri.get(k, 0) / max(1, n_corp)
         lr.append(np.log((cp + alpha) / (cq + alpha)))
     return {
-        "copy": float(np.mean(in_prompt & (gc == 0))) if gk.size else 0.0,
+        # copy of a RARE prompt phrase (train count <= 2): a common 4-gram in
+        # both prompt and corpus is not evidence of reading the prompt.
+        "copy": float(np.mean(in_prompt & (pc <= 2))) if gk.size else 0.0,
         "hot": float(np.mean(gc >= HOT)) if gk.size else 0.0,
+        "warm": float(warm),
         "novel": float(np.mean(gc == 0)) if gk.size else 0.0,
+        "logc": logcount,
         "match": float(match),
         "lr": float(np.mean(lr)) if lr else 0.0,
     }
