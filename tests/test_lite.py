@@ -1469,3 +1469,14 @@ def test_channel_probe_truncation_is_exact():
     kout = truncate_keys(sd, kq)
     assert kout["regions.0.w_k.weight"][:dq - 2].abs().sum() > 0
     assert kout["regions.0.w_k.weight"][dq - 1].abs().sum() == 0
+
+
+def test_generation_probe_text_stats():
+    """The sample statistics the generation probe reports must be the
+    obvious functions of the text, or its "more varied" claim is a bug."""
+    from scripts.probe_generation import distinct, longest_repeat
+    a = b"the [[wiki]] text the [[wiki]] text" * 3
+    assert distinct(a, 1) < 1.0 < distinct(a, 8)
+    assert longest_repeat(a, 4) > 1
+    assert longest_repeat(b"abcdefgh", 4) == 1
+    assert distinct(b"abcdefgh", 1) == 1.0
