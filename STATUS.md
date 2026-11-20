@@ -292,6 +292,10 @@ reread (−0.0051 bpc, −22% step), so the frontier is `rr2-c` at 1.9282.
   a two-seed claim (+0.0339 here, +0.0329 in long5).
 - `hs1` (done, 360 s) — the Hillis scan is a null: −1.4% step, +0.003 bpc. The
   eager boundary was never the cost; the scan lane is closed.
+- `t3h` (done, 10,800 s/arm) — **tf-c 1.7123 vs rr2-c 1.8276**: gap 0.1153 at 4.25B
+  tokens (~47 passes). Train bpc tf 1.7119 vs rr2 1.8073 — the dot model is
+  behind on FITTING, not on generalising. Generation at 3 h is wiki-shaped for
+  both, contentless for both. One dot still collapsed (dot 0 this time).
 - `lad2` (done, 360 s, 90/5) — **the `reread_spans` ladder is a NULL**: rr3
   (8/8/8) 1.9345, rr3-lad (2/8/32) 1.9402, rr3-u32 (32/32/32) 1.9543, tf 1.9377.
   A longer horizon buys +0.0038 at equal tokens and costs 0.0057 at equal wall

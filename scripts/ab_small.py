@@ -1510,6 +1510,19 @@ ARMS = {
     #   rr3-u32 = 32/32/32 (control: same budget, uniformly long)
     #   rr3-lad = 2/8/32  (coarse-to-fine, ~1.2k extra MAC/token)
     # rr2-s16 (uniform 16, 2 sites) is the already-registered intermediate.
+    # compiled versions of the two open questions, so they can be compared to
+    # the compiled frontier (rr2-c) in ONE session: does a third reread still
+    # pay (count), and does head capacity pay on top of mixing (x5+rr2)?
+    "iecnn-n3-x3-p1-ln-decay-d128-w512-rr3-c": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=512, head_post_layers=3,
+        read_ln=True, head_ln=True, global_decay=True, reread=3),
+        {"lr": 2e-3, "swa": 0.99, "compile": True}),
+    "iecnn-n3-x5-p1-ln-decay-d128-w512-rr2-c": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=512, head_post_layers=5,
+        read_ln=True, head_ln=True, global_decay=True, reread=2),
+        {"lr": 2e-3, "swa": 0.99, "compile": True}),
     "iecnn-n3-x3-p1-ln-decay-d128-w512-rr3": ("iecnn", lambda: iecnn(
         "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
         global_read=True, spans=(8,), head_post=512, head_post_layers=3,
