@@ -13,17 +13,26 @@ change to models/:
     keep only the subspace spanned by orthonormal P      [d_v, k]:
     v' = P P^T v    <=>    W_v <- P P^T W_v
 
-and the same projection on the consumer side (the d_v rows of the cell input
-weight, the d_v columns of the reread output, the d_v rows of w_v again --
-P P^T is idempotent, so applying it on both sides is still exactly one
-projection). With P = I every tensor is bit-identical, so every delta is
-measured against a base pass that must reproduce the checkpoint's own val bpc.
+and the same projection on the consumer side (the d_v rows of the cell input,
+the d_v columns of the reread output). P P^T is idempotent, so applying it on
+both sides is still exactly ONE projection. With P = I every tensor is
+bit-identical, so the k = d row of every table is the zero point.
+
+WHAT IS AND IS NOT ABLATED
+  value  the dot channel (w_v -> cell input) AND, when the arm has one, the
+         reread's own value channel (rr_v -> rr_o). Both are needed: if only
+         the dot channel is cut, the reread still reads the raw rows and a
+         null result could not tell "32 dims are enough" from "the reread
+         supplies the rest".
+  key    the dot channel (w_k) only. rr_k is a separate projection with its
+         own geometry; cutting half of one key space and not the other would
+         report a mixture of two different questions.
 
 Bases compared per k -- variance is not value, so a low-variance direction is
 not assumed to be useless:
-  pca   top-k principal directions of the model's own value distribution
-  rand  a random k-subspace (control: is this just "damage"?)
-  tail  the last k canonical dims (the naive "chop the end" ablation)
+  pca     top-k principal directions of the model's own activation
+  rand    a random k-subspace (control: is this just "damage"?)
+  prefix  the first k canonical dims, i.e. what "chop the channel" does
 
 Usage:
   PYTHONPATH=. python3 scripts/probe_channels.py ckpt.pt [--windows 160]
@@ -59,21 +68,18 @@ def spectrum(x: torch.Tensor) -> dict:
 
     participation ratio = (sum l)^2 / sum l^2, the standard "how many
     directions is this really using" number: r for r equal eigenvalues, 1 for
-    rank 1. Reported next to the cumulative variance curve because the two
-    disagree exactly when a few directions dominate.
+    rank 1. Reported next to the cumulative curve because the two disagree
+    exactly when a few directions dominate.
     """
     x = x.reshape(-1, x.shape[-1]).float()
     x = x - x.mean(0, keepdim=True)
     cov = x.t() @ x / max(x.shape[0] - 1, 1)
     ev = torch.linalg.eigvalsh(cov).flip(0).clamp_min(0)   # descending
-    tot = ev.sum().clamp_min(1e-12)
-    frac = (ev / tot).tolist()
+    frac = (ev / ev.sum().clamp_min(1e-12)).tolist()
     cum = torch.tensor(frac).cumsum(0).tolist()
     pr = float(ev.sum() ** 2 / (ev ** 2).sum().clamp_min(1e-12))
     return {"dim": int(ev.numel()), "participation_ratio": round(pr, 3),
-            "top1": round(frac[0], 4), "top4": round(cum[min(3, len(cum) - 1)], 4),
-            "top8": round(cum[min(7, len(cum) - 1)], 4),
-            "top16": round(cum[min(15, len(cum) - 1)], 4),
+            "cum": [round(c, 4) for c in cum],
             "frac": [round(f, 5) for f in frac]}
 
 
@@ -92,18 +98,18 @@ def basis_random(d: int, k: int, seed: int = 0) -> torch.Tensor:
     return q
 
 
-def basis_tail(d: int, k: int) -> torch.Tensor:
-    """The last k canonical dims -- what "chop the end" actually does."""
-    return torch.eye(d)[:, d - k:]
+def basis_prefix(d: int, k: int) -> torch.Tensor:
+    """The first k canonical dims -- what "chop the channel" does."""
+    return torch.eye(d)[:, :k]
 
 
 def project_out(w: torch.Tensor, P: torch.Tensor, dim: int = 0) -> torch.Tensor:
     """Zero the component of `w` outside span(P) along `dim`.
 
-    dim=0/-2: `w` indexes the space on a ROW axis -- P is [d, k] and the result
-    is P P^T w, which torch broadcasts over any leading dims (the cell input is
+    dim=0/-2: `w` indexes the space on a ROW axis -- the result is P P^T w,
+    which torch broadcasts over any leading dims (the cell input is
     [p, n, in_dim, 2*d_s] and only its first d_v rows are the ctx block).
-    dim=-1: the space is the LAST axis (e.g. rr_o is [.., d_out, d_v]), so the
+    dim=-1: the space is the LAST axis (rr_o is [.., d_out, d_v]), so the
     projection goes on the right: w P P^T.
     """
     M = P @ P.t()
@@ -113,28 +119,31 @@ def project_out(w: torch.Tensor, P: torch.Tensor, dim: int = 0) -> torch.Tensor:
 # --------------------------------------------------------------------------
 # which tensors to touch
 # --------------------------------------------------------------------------
-def _find(sd: dict, suffix: str, n: int = 1) -> list:
+def _find(sd: dict, suffix: str) -> list:
+    """Every key ending in `suffix`; at least one is required."""
     hits = [k for k in sd if k.endswith(suffix)]
-    if len(hits) != n:
-        raise SystemExit(f"state_dict has {len(hits)} keys ending in {suffix!r}, "
-                         f"expected {n}: {hits}")
+    if not hits:
+        raise SystemExit(f"state_dict has no key ending in {suffix!r}")
     return hits
 
 
-def truncate_values(sd: dict, P: torch.Tensor) -> dict:
-    """Restrict the VALUE channel v (d_v) to span(P), exactly.
+def truncate_values(sd: dict, P: torch.Tensor, P_rr: torch.Tensor | None = None) -> dict:
+    """Restrict the value channel(s) to span(P) / span(P_rr), exactly.
 
-    Four places consume the value vector, all of them linear in v:
-      * w_v            -> v                    (the projection itself)
-      * dots.w_ih(_lug) rows [:d_v]             (the cell input, ctx block)
-      * rr_v / rr_o    -> the reread's own value channel (same d_v)
-    Projecting the projection and the consumer is one projection, not two:
-    (P P^T)(P P^T) = P P^T.
+    Two independent value channels, each linear in its own v:
+      * dot w_v -> cell input rows [:d_v]         (P,     the shared pipe)
+      * reread rr_v -> rr_o input columns [:dv]   (P_rr,  optional, own width)
+    The reread is cut too when a basis is given: leaving it intact would let
+    the model recover the value information through a second path and make a
+    null result uninterpretable.
     """
     sd = {k: v.clone() for k, v in sd.items()}
     for key in _find(sd, ".w_v.weight"):
         pre = key[:-len("w_v.weight")]
         dv = sd[key].shape[0]
+        if P.shape[0] != dv:
+            raise SystemExit(f"basis {tuple(P.shape)} does not match {key} "
+                             f"dim {dv}")
         sd[key] = project_out(sd[key], P, 0)
         for cell_key in (pre + "dots.w_ih_lug", pre + "dots.w_ih"):
             if cell_key in sd:
@@ -142,26 +151,30 @@ def truncate_values(sd: dict, P: torch.Tensor) -> dict:
                 sd[cell_key] = torch.cat(
                     [project_out(w[..., :dv, :], P, -2), w[..., dv:, :]], dim=-2)
     for key in [k for k in sd if k.endswith(".rr_v.weight")]:
+        if P_rr is None:
+            continue
         pre = key[:-len("rr_v.weight")]
         dv = sd[key].shape[0]
-        sd[key] = project_out(sd[key], P, 0)
+        if P_rr.shape[0] != dv:
+            raise SystemExit(f"reread basis {tuple(P_rr.shape)} does not match "
+                             f"{key} dim {dv}")
+        sd[key] = project_out(sd[key], P_rr, 0)
         sd[pre + "rr_o.weight"] = project_out(
-            sd[pre + "rr_o.weight"], P, -1)
-        assert sd[pre + "rr_o.weight"].shape[-1] == dv, (pre, dv)
+            sd[pre + "rr_o.weight"], P_rr, -1)
     return sd
 
 
 def truncate_keys(sd: dict, P: torch.Tensor) -> dict:
-    """Restrict the KEY channel k (d_q) to span(P).
+    """Restrict the DOT key channel (w_k) to span(P).
 
-    Only w_k (and the reread's rr_k) project into key space; the consumer is a
-    dot product against a query, so there is no weight matrix on the other
-    side. Truncating the key subspace is therefore strictly a loss of geometry
-    -- it says "how much do the directions outside P matter", not "how wide
-    should the pipe be".
+    The consumer is a dot product against a query, so there is no weight
+    matrix on the other side: truncating the key subspace is strictly a loss
+    of geometry. rr_k is deliberately left alone (see the module docstring).
     """
     sd = {k: v.clone() for k, v in sd.items()}
-    for key in _find(sd, ".w_k.weight") + _find(sd, ".rr_k.weight"):
+    for key in _find(sd, ".w_k.weight"):
+        if P.shape[0] != sd[key].shape[0]:
+            raise SystemExit(f"basis {tuple(P.shape)} does not match {key}")
         sd[key] = project_out(sd[key], P, 0)
     return sd
 
@@ -194,9 +207,13 @@ def val_bpc(model, val: torch.Tensor, windows: int, device) -> float:
 
 
 def collect_vectors(model, val: torch.Tensor, windows: int, device) -> dict:
-    """Value / key / ctx / state rows over the val windows (one pass)."""
+    """Value / key / ctx / state / reread-value rows over the val windows."""
     r = model.regions[0]
-    outs = {"v": [], "k": [], "ctx": [], "s": []}
+    outs = {"v": [], "k": [], "ctx": [], "s": [], "rv": []}
+    got_rv = []
+    hook = (r.rr_v.register_forward_hook(
+        lambda _m, _i, o: got_rv.append(o.detach())) if r.rr_v is not None
+        else None)
     with torch.no_grad():
         for w in range(windows):
             i = w * T * VALSTRIDE
@@ -219,8 +236,11 @@ def collect_vectors(model, val: torch.Tensor, windows: int, device) -> dict:
             outs["k"].append(k_all)
             outs["ctx"].append(ctx)
             outs["s"].append(out["region_outputs"][0]["region_summary"])
+    if hook is not None:
+        hook.remove()
+        outs["rv"] = got_rv
     return {k: torch.cat(v, dim=0).reshape(-1, v[-1].shape[-1]).float()
-            for k, v in outs.items()}
+            for k, v in outs.items() if v}
 
 
 def main() -> None:
@@ -234,58 +254,78 @@ def main() -> None:
     raw = open(VAL_PATH, "rb").read(N_VAL)
     val = torch.frombuffer(raw, dtype=torch.uint8).long()
     model, ck = load_model(args.ckpt, device)
-    row = ck.get("row", {})
     base_sd = ck["state_dict"]
+    row = ck.get("row", {})
 
     base = val_bpc(model, val, args.windows, device)
     print(f"=== {os.path.basename(args.ckpt)}  {ck['kind']}  "
           f"windows {args.windows}x{T}", flush=True)
     print(f"base val {base:.4f} bpc (checkpoint row said "
           f"{row.get('bpc_final', 'n/a')})", flush=True)
+    if base_sd.get("regions.0.w_v.weight") is None:
+        raise SystemExit("no dots value channel in this checkpoint (not IECNN)")
 
-    vec = collect_vectors(model, val, min(args.windows, 40), device)
+    vec = collect_vectors(model, val, min(args.windows, 24), device)
     print("\n-- channel spectra (covariance participation ratio) --", flush=True)
-    for name in ("v", "k", "ctx", "s"):
+    for name in ("v", "k", "ctx", "s", "rv"):
+        if name not in vec:
+            continue
         s = spectrum(vec[name])
+        c = s["cum"]
         print(f"{name:>4} dim {s['dim']:>3}  PR {s['participation_ratio']:>6.2f}"
-              f"  cumvar top4 {s['top4']:.3f} top8 {s['top8']:.3f}"
-              f" top16 {s['top16']:.3f}", flush=True)
-
-    def run_basis(kind: str, d: int, ks: list) -> None:
-        print(f"\n-- {kind} channel truncation (delta vs base, + = worse) --",
-              flush=True)
-        for k in ks:
-            for basis_name in ("pca", "rand", "tail"):
-                if basis_name == "pca":
-                    P = basis_pca(vec["v" if kind == "value" else "k"], k)
-                elif basis_name == "rand":
-                    P = basis_random(d, k, seed=1000 + k)
-                else:
-                    P = basis_tail(d, k)
-                if k == d:                      # identity check, must be 0
-                    P = torch.eye(d)
-                sd = (truncate_values(base_sd, P) if kind == "value"
-                      else truncate_keys(base_sd, P))
-                model.load_state_dict(sd)
-                b = val_bpc(model, val, args.windows, device)
-                print(f"  {kind:>5} k {k:>2}/{d}  {basis_name:<4}"
-                      f"  {b:.4f}  {b - base:+.4f}", flush=True)
-                model.load_state_dict(base_sd)
+              f"  cumvar@4 {c[min(3, len(c) - 1)]:.3f}"
+              f"  @8 {c[min(7, len(c) - 1)]:.3f}"
+              f"  @16 {c[min(15, len(c) - 1)]:.3f}", flush=True)
 
     dv = base_sd[_find(base_sd, ".w_v.weight")[0]].shape[0]
     dq = base_sd[_find(base_sd, ".w_k.weight")[0]].shape[0]
-    run_basis("value", dv, [1, 2, 4, 6, 8, 12, 16, 24, 32, dv] if dv == 32
-              else [1, 2, 4, 8, dq])
-    run_basis("key", dq, [1, 2, 4, 6, 8, 12, 16] if dq == 16 else [1, 2, 4, 8, dq])
+    rv_keys = [k for k in base_sd if k.endswith(".rr_v.weight")]
+    drr = base_sd[rv_keys[0]].shape[0] if rv_keys else None
+    # the hook only fires if the arm actually runs its reread sites (an arm
+    # that builds rr_* but never calls them has no recordable channel)
+    if "rv" not in vec:
+        drr = None
+
+    def basis(kind: str, act: str, d: int, k: int) -> torch.Tensor:
+        if k >= d:
+            return torch.eye(d)
+        if kind == "pca":
+            return basis_pca(vec[act], k)
+        if kind == "rand":
+            return basis_random(d, k, seed=1000 + k)
+        return basis_prefix(d, k)
+
+    def run_basis(which: str, dims: list, ks: list, act: str,
+                  act_rr: str | None = None, d_rr: int | None = None) -> None:
+        print(f"\n-- {which} channel truncation (delta vs base, + = worse) --",
+              flush=True)
+        for k in ks:
+            for kind in ("pca", "rand", "prefix"):
+                P = basis(kind, act, dims[0], k)
+                P_rr = (basis(kind, act_rr, d_rr, min(k, d_rr))
+                        if d_rr is not None else None)
+                sd = (truncate_values(base_sd, P, P_rr) if which == "value"
+                      else truncate_keys(base_sd, P))
+                model.load_state_dict(sd)
+                b = val_bpc(model, val, args.windows, device)
+                tag = f"k {k:>2}/{dims[0]}"
+                if d_rr is not None:
+                    tag += f" (rr {min(k, d_rr)}/{d_rr})"
+                print(f"  {which:>5} {tag:<16} {kind:<6} {b:.4f}"
+                      f"  {b - base:+.4f}", flush=True)
+                model.load_state_dict(base_sd)
+
+    run_basis("value", [dv], [1, 2, 4, 6, 8, 12, 16, 24, 32, dv], "v",
+              act_rr="rv", d_rr=drr)
+    run_basis("key", [dq], [1, 2, 4, 6, 8, 12, dq], "k")
 
     model.load_state_dict(base_sd)
     final = val_bpc(model, val, args.windows, device)
     print(f"\nrestored val {final:.4f} bpc (drift {final - base:+.4f})", flush=True)
-    print("JSON " + json.dumps({"ckpt": os.path.basename(args.ckpt),
-                                "base": round(base, 4),
-                                "restored": round(final, 4),
-                                "spectra": {n: spectrum(vec[n]) for n in
-                                            ("v", "k", "ctx", "s")}}), flush=True)
+    print("JSON " + json.dumps({
+        "ckpt": os.path.basename(args.ckpt), "base": round(base, 4),
+        "restored": round(final, 4),
+        "spectra": {n: spectrum(vec[n]) for n in vec}}), flush=True)
 
 
 if __name__ == "__main__":

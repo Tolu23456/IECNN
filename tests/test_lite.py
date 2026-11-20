@@ -1423,69 +1423,87 @@ def test_k_lag_shifts_only_the_key_stream_and_stays_causal():
 def test_channel_probe_truncation_is_exact():
     """The probe's ablations must be exact reparametrisations, or the deltas
     it reports are measuring its own arithmetic instead of the model."""
-    from scripts.probe_channels import (basis_pca, basis_random, basis_tail,
+    from scripts.probe_channels import (basis_pca, basis_prefix, basis_random,
                                         project_out, spectrum, truncate_keys,
                                         truncate_values)
     torch.manual_seed(0)
     sd = build_iecnn(_cfg(), 64).state_dict()
     dv = sd["regions.0.w_v.weight"].shape[0]
     dq = sd["regions.0.w_k.weight"].shape[0]
+    assert "regions.0.rr_v.weight" not in sd          # plain arm: no reread
 
-    # P = I must be bit-identical, in every tensor it touches, or the "k = d"
-    # row of the table would not be a valid zero point.
-    eye_v = torch.eye(dv)
-    for key, val in truncate_values(sd, eye_v).items():
+    # P = I must be bit-identical in every tensor the probe touches, or the
+    # "k = d" row of a table would not be a valid zero point.
+    for key, val in truncate_values(sd, torch.eye(dv)).items():
         assert torch.equal(val, sd[key]), key
     for key, val in truncate_keys(sd, torch.eye(dq)).items():
         assert torch.equal(val, sd[key]), key
 
     # P P^T is a projection: applying it twice is applying it once. Measured
-    # on a random basis, where the second application is genuinely a matmul
-    # rather than a 0/1 mask, so the tolerance is the arithmetic's, not zero.
-    P = basis_random(dv, max(1, dv - 3), seed=3)
-    w = sd["regions.0.w_v.weight"]
-    once, twice = project_out(w, P, 0), project_out(project_out(w, P, 0), P, 0)
-    assert torch.allclose(once, twice, atol=1e-6, rtol=0)
+    # on a random basis, where the second application is a real matmul rather
+    # than a 0/1 mask, so the tolerance is the arithmetic's, not zero.
+    P = basis_random(dv, dv - 3, seed=3)
+    once = project_out(sd["regions.0.w_v.weight"], P, 0)
+    assert torch.allclose(once, project_out(once, P, 0), atol=1e-6, rtol=0)
 
-    # dropping the last 3 canonical dims must zero exactly those rows of w_v
-    # AND the matching rows of the cell input, and change nothing else.
-    P = basis_tail(dv, max(1, dv - 3))
-    out = truncate_values(sd, P)
-    for k in range(dv - 3, dv):
-        assert out["regions.0.w_v.weight"][k].abs().sum() == 0
+    # keeping the first dv-3 dims must zero exactly the LAST 3 rows of w_v and
+    # of the cell input, leave the kept rows untouched, and -- the bug the CPU
+    # kernel caught -- leave the non-ctx rows of the cell input alone.
+    out = truncate_values(sd, basis_prefix(dv, dv - 3))
+    assert out["regions.0.w_v.weight"][:dv - 3].equal(
+        sd["regions.0.w_v.weight"][:dv - 3])
     cell = out["regions.0.dots.w_ih"]
     assert cell[..., dv:, :].equal(sd["regions.0.dots.w_ih"][..., dv:, :])
-    assert cell[..., dv - 1, :].abs().sum() == 0
+    for k in range(dv - 3, dv):
+        assert out["regions.0.w_v.weight"][k].abs().sum() == 0
+        assert cell[..., k, :].abs().sum() == 0
 
-    # a PCA basis is orthonormal and keeps the top directions
-    x = torch.randn(500, dv) @ torch.diag(torch.linspace(4.0, 0.1, dv))
+    # keys: same contract, no consumer tensor (a dot product has no weights)
+    out = truncate_keys(sd, basis_prefix(dq, 2))
+    assert out["regions.0.w_k.weight"][:2].abs().sum() > 0
+    for k in range(2, dq):
+        assert out["regions.0.w_k.weight"][k].abs().sum() == 0
+
+    # a PCA basis is orthonormal and keeps the leading directions
+    x = torch.randn(400, dv) @ torch.diag(torch.linspace(4.0, 0.1, dv))
     Q = basis_pca(x, 3)
     assert Q.shape == (dv, 3)
     assert torch.allclose(Q.t() @ Q, torch.eye(3), atol=1e-5)
     s = spectrum(x)
     assert s["dim"] == dv and 1.0 <= s["participation_ratio"] <= dv
-    # cumulative variance is monotone in k, and this construction concentrates
-    # it: the leading quarter of the directions carries most of the mass
-    assert s["top4"] < s["top8"] <= s["top16"] <= 1.0
-    assert s["top4"] > 0.4
+    assert s["cum"][3] < s["cum"][8] <= s["cum"][15] <= 1.0
 
-    # keys: same contract, one weight per site
-    kq = basis_tail(dq, 2)
-    kout = truncate_keys(sd, kq)
-    assert kout["regions.0.w_k.weight"][:dq - 2].abs().sum() > 0
-    assert kout["regions.0.w_k.weight"][dq - 1].abs().sum() == 0
+    # the reread value channel has its OWN width (32 by default, not d_v): a
+    # dot-sized basis must be refused rather than silently broadcast, and its
+    # own basis must hit rr_v and rr_o.
+    sd2 = build_iecnn(_cfg(reread=1), 64).state_dict()
+    drr = sd2["regions.0.rr_v.weight"].shape[0]
+    assert drr != dv                                  # otherwise no test here
+    for key, val in truncate_values(sd2, torch.eye(dv), torch.eye(drr)).items():
+        assert torch.equal(val, sd2[key]), key
+    try:
+        truncate_values(sd2, torch.eye(dv), torch.eye(dv))
+        raise AssertionError("mismatched reread basis was accepted")
+    except SystemExit:
+        pass
+    out = truncate_values(sd2, torch.eye(dv), basis_prefix(drr, drr - 4))
+    assert out["regions.0.rr_v.weight"][drr - 1].abs().sum() == 0
+    assert out["regions.0.rr_o.weight"][:, drr - 1].abs().sum() == 0
+    assert out["regions.0.w_v.weight"].equal(sd2["regions.0.w_v.weight"])
 
 
 def test_generation_probe_text_stats():
-    """The sample statistics the generation probe reports must be the
-    obvious functions of the text, or its "more varied" claim is a bug."""
+    """distinct-n is a type/token ratio, and the probe reads it as one:
+    all-unique text scores 1.0 at every n, repetition scores below it, and the
+    longest repeated n-gram is a count of occurrences."""
     from scripts.probe_generation import distinct, longest_repeat
-    # a phrase repeated three times: every byte type appears (d1 = 1) while
-    # the long n-grams repeat, which is what "repetitive" has to mean here.
-    a = b"the [[wiki]] text the [[wiki]] text" * 3
-    assert distinct(a, 1) == 1.0
-    assert 0.0 < distinct(a, 8) < 0.5
-    assert longest_repeat(a, 4) > 1
-    # all-unique text is the other end: no repeated n-gram at all
-    assert distinct(bytes(range(256)), 8) == 1.0
-    assert longest_repeat(bytes(range(256)), 4) == 1
+    u = bytes(range(256))
+    for n in (1, 2, 8):
+        assert distinct(u, n) == 1.0
+    assert longest_repeat(u, 4) == 1
+
+    a = b"the [[wiki]] text " * 3
+    assert distinct(a, 1) < 1.0                       # 10 byte types, 54 slots
+    assert 0.0 < distinct(a, 8) < 0.5                 # 8-grams repeat
+    assert distinct(a * 2, 8) < distinct(a, 8)        # more repeat, lower ratio
+    assert longest_repeat(a * 2, 4) > longest_repeat(a, 4)

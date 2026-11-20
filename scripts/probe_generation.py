@@ -1,27 +1,32 @@
 """Does the checkpoint that loses on bpc produce better SAMPLED text?
 
-A single 240-byte sample per arm is not evidence of anything, but it is a
-falsifiable observation: rr2-c (1.8276 bpc) wrote recognisable wiki phrases
-while tf-c (1.7123 bpc) wrote "cropstacious cropstacious". Two hypotheses
-explain that without overturning bpc, and both are measurable on the saved
-checkpoints:
+One 240-byte sample per arm is not evidence, but the observation is
+falsifiable on the saved checkpoints. Twenty DIFFERENT unseen prompts, the
+SAME prompts and the SAME seeds for both models, so every comparison is a
+matched pair and the statistic is a distribution over prompts, not one draw.
+
+Three hypotheses, all cheap to test at inference:
 
   H1 SHARPNESS. The better model is more confident, so top-k40/T0.7 keeps
-     re-drawing its own favourite tokens, and its sample looks repetitive
-     while the worse-calibrated model's sample looks varied ("more phrases").
-     Test: compare predictive entropy / top-1 accuracy / ECE, then resample
-     with the temperature per model chosen so both have the SAME effective
-     sampling entropy. If the difference survives that, it is not sharpness.
+     re-drawing its own favourite tokens and looks repetitive, while the
+     worse-calibrated model looks varied. Test: predictive entropy / top-1 /
+     ECE, then resample with a per-model temperature chosen so both have the
+     SAME effective sampling entropy. If the difference survives that, it is
+     not sharpness.
 
-  H2 DRAW. Both distributions are near the byte marginal at this scale; a
-     single trajectory from a 0.5M-parameter model is mostly the decoder's
-     randomness. Test: N matched-seed samples per model, and report
-     distinct-1/2/3, the longest repeated n-gram and sample-to-sample
-     agreement. A "language-like" impression that does not survive 16 draws
-     is a draw.
+  H2 DRAW. At this scale both distributions are near the byte marginal and a
+     single trajectory is mostly decoder randomness. Test: 20 matched prompts
+     per model, distinct-1/2/3, longest repeated 4-gram, markup rate, and the
+     spread ACROSS prompts (sd), not just the mean.
+
+  H3 SAMPLE vs MODEL. A sample can look more language-like while being less
+     probable under the better model. Test: score every sample with BOTH
+     models (teacher-forced bpc). If tf finds rr2's text more likely than its
+     own, the "better sample" is a real distributional difference; if tf
+     prefers its own, the judge preferred variety.
 
 bpc stays the metric for the model (a proper scoring rule over the whole val
-distribution); this probe only asks what the sampled channel can support.
+distribution); this probe asks what the sampled channel can support.
 
 Usage:
   PYTHONPATH=. python3 scripts/probe_generation.py ckptA.pt [ckptB.pt ...]
@@ -33,6 +38,7 @@ import argparse
 import json
 import math
 import os
+import random
 from collections import Counter
 
 import torch
@@ -42,14 +48,17 @@ from models.generate import generate_bytes
 from scripts.probe_channels import T, VALSTRIDE, V, load_model
 
 VAL_PATH = os.environ.get("ARM_VAL", "data/toy_val.txt")
-N_VAL = int(os.environ.get("ARM_NVAL", 5_000_000))
+N_VAL = int(os.environ.get("ARM_NVAL", "5_000_000"))
 VALW = int(os.environ.get("ARM_VALW", "160"))
-NSAMP = int(os.environ.get("PGEN_N", "12"))
+NPROMPT = int(os.environ.get("PGEN_PROMPTS", "20"))
 NSAMP_B = int(os.environ.get("PGEN_BYTES", "240"))
 PROMPT = int(os.environ.get("PGEN_PROMPT", "120"))
 TEMP = float(os.environ.get("PGEN_TEMP", "0.7"))
 TOPK = int(os.environ.get("PGEN_TOPK", "40"))
-SEEDS = [1234 + i for i in range(NSAMP)]
+MATCH_N = int(os.environ.get("PGEN_MATCH_N", "10"))
+# one seed per prompt, identical across models: same prompt AND same uniform
+# stream, so a difference cannot come from a lucky draw
+SEEDS = [1234 + i for i in range(NPROMPT)]
 
 
 # --------------------------------------------------------------------------
@@ -115,11 +124,10 @@ def sampling_entropy(model, val: torch.Tensor, windows: int, device,
 
 
 def match_temp(model, val, windows, device, target: float) -> float:
-    """Smallest temperature (grid, then 3 bisections) reaching `target` entropy."""
+    """Grid temperature closest to `target` effective sampling entropy."""
     grid = [0.3, 0.4, 0.5, 0.6, 0.7, 0.85, 1.0, 1.2, 1.5, 2.0, 2.6, 3.4]
-    lo, hi = grid[0], grid[-1]
-    best = (abs(sampling_entropy(model, val, windows, device, lo, TOPK) - target), lo)
-    for t in grid[1:]:
+    best = (1e9, grid[0])
+    for t in grid:
         d = abs(sampling_entropy(model, val, windows, device, t, TOPK) - target)
         if d < best[0]:
             best = (d, t)
@@ -140,32 +148,52 @@ def longest_repeat(bs: bytes, n: int) -> int:
     return max(Counter(grams).values()) if grams else 0
 
 
-def sample_stats(model, prompt, device, temp: float, seeds=SEEDS) -> dict:
-    samples = []
-    ents = []
-    for s in seeds:
-        b = generate_bytes(model, prompt, NSAMP_B, mode="sample", temp=temp,
-                           topk=TOPK, seed=s)
-        samples.append(b)
-    # effective entropy of the sampling distribution on the prompt (cheap proxy
-    # for "how much randomness the decoder is injecting")
+def _mean_sd(xs) -> tuple:
+    m = sum(xs) / len(xs)
+    if len(xs) < 2:
+        return round(m, 4), 0.0
+    var = sum((x - m) ** 2 for x in xs) / (len(xs) - 1)
+    return round(m, 4), round(math.sqrt(var), 4)
+
+
+def score_bytes(model, prompt: torch.Tensor, text: bytes, device) -> float:
+    """Teacher-forced bpc of `text`, conditioned on the prompt it came from."""
+    p = prompt.reshape(-1).tolist()
+    t = list(text)
+    # 16 bytes of context + 240 sample bytes = the trained T=256 exactly. The
+    # transformer's position table is fixed at 256, so this cannot be "a bit
+    # more context": 17 would raise inside the baseline's pos embedding.
+    seq = p[-16:] + t
+    x = torch.tensor(seq, dtype=torch.long, device=device)[None]
     with torch.no_grad():
-        lp = model(prompt.to(device))["final_log_probs"][0, -1] / max(temp, 1e-6)
-        if 0 < TOPK < V:
-            th = torch.topk(lp, TOPK).values[-1:]
-            lp = lp.masked_fill(lp < th, float("-inf"))
-        lp = F.log_softmax(lp, -1)
-        ents.append(float(-(lp.exp() * lp).sum()))
-    return {"temp": round(temp, 3),
-            "d1": round(sum(distinct(b, 1) for b in samples) / len(samples), 4),
-            "d2": round(sum(distinct(b, 2) for b in samples) / len(samples), 4),
-            "d3": round(sum(distinct(b, 3) for b in samples) / len(samples), 4),
-            "max_rep4": max(longest_repeat(b, 4) for b in samples),
-            "len_mean": round(sum(len(b) for b in samples) / len(samples), 1),
-            "markup_per_sample": round(
-                sum(b.count(b"[[") for b in samples) / len(samples), 2),
-            "distinct_samples": len(set(samples)),
-            "samples": [b.decode("latin-1") for b in samples]}
+        lp = model(x)["final_log_probs"][0, :-1]
+        y = x[0, 1:]
+        start = len(seq) - len(t) - 1     # first predicted sample byte
+        nll = float(F.nll_loss(lp[start:], y[start:], reduction="sum"))
+    return round(nll / len(t) / math.log(2), 4)
+
+
+def sample_stats(model, prompts, device, temp: float) -> dict:
+    per = []
+    for i, p in enumerate(prompts):
+        b = generate_bytes(model, p, NSAMP_B, mode="sample", temp=temp,
+                           topk=TOPK, seed=SEEDS[i])
+        per.append({"d1": distinct(b, 1), "d2": distinct(b, 2),
+                    "d3": distinct(b, 3), "max_rep4": longest_repeat(b, 4),
+                    "markup": b.count(b"[["), "text": b.decode("latin-1"),
+                    "self_bpc": score_bytes(model, p, b, device)})
+    agg = {}
+    for key in ("d1", "d2", "d3", "markup", "self_bpc"):
+        agg[key] = _mean_sd([r[key] for r in per])
+    agg["max_rep4_mean"], agg["max_rep4_sd"] = _mean_sd([r["max_rep4"] for r in per])
+    pooled = "".join(r["text"] for r in per).encode("latin-1")
+    agg["pooled_d2"] = round(distinct(pooled, 2), 4)
+    agg["pooled_d3"] = round(distinct(pooled, 3), 4)
+    agg["temp"] = round(temp, 3)
+    agg["samples"] = [{"prompt": i, "text": r["text"], "d2": round(r["d2"], 3),
+                       "max_rep4": r["max_rep4"], "markup": r["markup"]}
+                      for i, r in enumerate(per)]
+    return agg
 
 
 def main() -> None:
@@ -178,8 +206,11 @@ def main() -> None:
 
     raw = open(VAL_PATH, "rb").read(N_VAL)
     val = torch.frombuffer(raw, dtype=torch.uint8).long()
-    # the SAME unseen prompt for every model: no model gets an easier prefix
-    prompt = val[VALSTRIDE * 5:VALSTRIDE * 5 + PROMPT].unsqueeze(0)
+    # NPROMPT prompts spread over the whole dev slice, all unseen by training.
+    # The SAME list is given to every model, in the same order.
+    offs = [max(300, (i + 1) * (len(val) - PROMPT - 300) // (NPROMPT + 1)) + 300
+            for i in range(NPROMPT)]
+    prompts = [val[o:o + PROMPT].unsqueeze(0) for o in offs]
 
     out, models = {}, {}
     for path in args.ckpts:
@@ -194,35 +225,74 @@ def main() -> None:
               f"  top1 {st['top1']:.3f}  top5 {st['top5']:.3f}"
               f"  rank {st['mean_rank']:.1f}  conf {st['mean_conf']:.3f}"
               f"  ECE {st['ece']:.4f}", flush=True)
-        fixed = sample_stats(model, prompt, device, TEMP)
-        print(f"  T{TEMP}/k{TOPK}  d1 {fixed['d1']:.3f} d2 {fixed['d2']:.3f}"
-              f" d3 {fixed['d3']:.3f}  maxrep4 {fixed['max_rep4']}"
-              f"  [[ {fixed['markup_per_sample']:.1f}/sample"
-              f"  unique {fixed['distinct_samples']}/{NSAMP}", flush=True)
-        out[name] = {"teacher": st, "fixed": {k: v for k, v in fixed.items()
-                                              if k != "samples"}}
+        fixed = sample_stats(model, prompts, device, TEMP)
+        print(f"  T{TEMP}/k{TOPK}  {NPROMPT} prompts:"
+              f"  d2 {fixed['d2'][0]:.3f}±{fixed['d2'][1]:.3f}"
+              f"  d3 {fixed['d3'][0]:.3f}±{fixed['d3'][1]:.3f}"
+              f"  maxrep4 {fixed['max_rep4_mean']:.2f}"
+              f"  [[ {fixed['markup'][0]:.1f}"
+              f"  self-bpc {fixed['self_bpc'][0]:.3f}", flush=True)
+        out[name] = {"teacher": st, "fixed": fixed}
 
-    # H1: match the effective sampling entropy across models, then resample.
-    # If the "more phrases" impression is only sharper decoding, equalising
-    # entropy removes it; if it survives, sharpness was not the explanation.
     names = list(out)
+
+    # H3: score every sample with BOTH models. A sample that a judge likes but
+    # the better model finds less likely than its own is a style preference,
+    # not a distributional win.
     if len(names) > 1:
-        target = sampling_entropy(models[names[0]], val,
-                                  min(8, args.windows), device, TEMP, TOPK)
+        print("\n-- H3 cross-scoring (bpc of each sample under each model) --",
+              flush=True)
+        texts = {n: [s["text"].encode("latin-1") for s in out[n]["fixed"]["samples"]]
+                 for n in names}
+        for owner in names:
+            for scorer in names:
+                bpcs = [score_bytes(models[scorer], prompts[i], t, device)
+                        for i, t in enumerate(texts[owner])]
+                m, sd = _mean_sd(bpcs)
+                print(f"  {owner:<48} under {scorer:<48} {m:.3f}±{sd:.3f}",
+                      flush=True)
+                out[owner][f"scored_by_{scorer}"] = [round(b, 4) for b in bpcs]
+
+    # H1: match the effective sampling entropy across models, then resample on
+    # the same prompts. If "more phrases" is only sharper decoding, equalising
+    # entropy removes it; if it survives, sharpness was not the explanation.
+    if len(names) > 1:
+        target = sampling_entropy(models[names[0]], val, min(8, args.windows),
+                                  device, TEMP, TOPK)
         print(f"\n-- H1 matched sampling entropy (target {target:.3f} nats) --",
               flush=True)
         for name in names:
-            model = models[name]
-            t = match_temp(model, val, min(8, args.windows), device, target)
-            m = sample_stats(model, prompt, device, t)
-            print(f"  {name}  T {t:.2f}  d2 {m['d2']:.3f} d3 {m['d3']:.3f}"
-                  f"  maxrep4 {m['max_rep4']}  [[ {m['markup_per_sample']:.1f}",
-                  flush=True)
+            t = match_temp(models[name], val, min(8, args.windows), device, target)
+            m = sample_stats(models[name], prompts[:MATCH_N], device, t)
+            print(f"  {name}  T {t:.2f}  d2 {m['d2'][0]:.3f}±{m['d2'][1]:.3f}"
+                  f"  d3 {m['d3'][0]:.3f}  maxrep4 {m['max_rep4_mean']:.2f}"
+                  f"  [[ {m['markup'][0]:.1f}", flush=True)
             out[name]["matched"] = {k: v for k, v in m.items() if k != "samples"}
-            out[name]["matched_samples"] = m["samples"]
+            out[name]["matched_samples"] = [s["text"] for s in m["samples"]]
 
-    print("\nJSON " + json.dumps({"prompt": prompt.reshape(-1).tolist()[:40],
-                                  "stats": out}), flush=True)
+    # Blind pairs for a judge: same prompt index, order shuffled by a fixed
+    # seed. `key` is printed separately so the pairs alone can be pasted.
+    if len(names) == 2:
+        rng = random.Random(20261120)
+        pairs, key = [], []
+        for i in range(NPROMPT):
+            a = out[names[0]]["fixed"]["samples"][i]["text"]
+            b = out[names[1]]["fixed"]["samples"][i]["text"]
+            flip = rng.random() < 0.5
+            pairs.append({"prompt": i,
+                          "first": b if flip else a,
+                          "second": a if flip else b})
+            key.append({"prompt": i,
+                        "first": names[1] if flip else names[0],
+                        "second": names[0] if flip else names[1]})
+        print("\nBLIND PAIRS " + json.dumps({"pairs": pairs,
+                                             "prompt_text": [
+                                                 p.reshape(-1).tolist()[:60]
+                                                 for p in prompts]}, indent=1),
+              flush=True)
+        print("\nKEY " + json.dumps(key), flush=True)
+
+    print("\nJSON " + json.dumps({"stats": out}), flush=True)
 
 
 if __name__ == "__main__":
