@@ -1507,3 +1507,25 @@ def test_generation_probe_text_stats():
     assert 0.0 < distinct(a, 8) < 0.5                 # 8-grams repeat
     assert distinct(a * 2, 8) < distinct(a, 8)        # more repeat, lower ratio
     assert longest_repeat(a * 2, 4) > longest_repeat(a, 4)
+
+def test_generation_probe_entropy_is_finite():
+    """The matched-entropy arm printed nan because log_softmax on a -inf mask
+    gives `0 * -inf` in the entropy sum, which made match_temp fall back to the
+    coldest grid point for BOTH models. The truncation must be finite and must
+    keep exactly k entries."""
+    import torch.nn.functional as F
+    from scripts.probe_generation import _entropy_from_logits
+    torch.manual_seed(0)
+    logits = torch.randn(7, 64)
+    full = _entropy_from_logits(logits, 64)
+    top4 = _entropy_from_logits(logits, 4)
+    assert torch.isfinite(full).all() and torch.isfinite(top4).all()
+    # truncation can only remove mass, and a 4-way mixture is capped at log 4
+    assert (top4 <= full + 1e-5).all()
+    assert (top4 <= math.log(4) + 1e-5).all()
+    # exactly k entries survive: equals the entropy of the top-k renormalised
+    top = logits.topk(4, dim=-1).values
+    ref = -(F.softmax(top, -1) * F.log_softmax(top, -1)).sum(-1)
+    assert torch.allclose(top4, ref, atol=1e-5)
+    # k = 1 is a point mass, entropy 0
+    assert torch.allclose(_entropy_from_logits(logits, 1), torch.zeros(7), atol=1e-6)

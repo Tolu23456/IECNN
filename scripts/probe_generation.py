@@ -105,6 +105,25 @@ def teacher_stats(model, val: torch.Tensor, windows: int, device) -> dict:
             "mean_conf": round(conf_sum / n, 4), "ece": round(ece, 4)}
 
 
+def _entropy_from_logits(logits: torch.Tensor, topk: int) -> torch.Tensor:
+    """Per-position entropy of the top-k-truncated softmax of `logits`.
+
+    The tail must be removed with a FINITE mask. `masked_fill(..., -inf)` looks
+    equivalent, but log_softmax then returns -inf for the tail and the entropy
+    term is `0 * -inf` = nan, which propagated to a nan mean and made match_temp
+    fall back to the coldest grid point (both models were sampled at T=0.30).
+    Keeping exactly `topk` indices also removes the tie ambiguity a threshold
+    has ("logits < th" can keep more than k entries).
+    """
+    if 0 < topk < logits.shape[-1]:
+        idx = torch.topk(logits, topk, dim=-1).indices
+        keep = torch.zeros_like(logits, dtype=torch.bool)
+        keep.scatter_(-1, idx, True)
+        logits = logits.masked_fill(~keep, -1e30)
+    lp = F.log_softmax(logits, dim=-1)
+    return -(lp.exp() * lp).sum(-1)
+
+
 def sampling_entropy(model, val: torch.Tensor, windows: int, device,
                      temp: float, topk: int) -> float:
     """Mean entropy of the distribution top-k40/T<temp> actually samples from."""
@@ -114,12 +133,8 @@ def sampling_entropy(model, val: torch.Tensor, windows: int, device,
             i = w * T * VALSTRIDE
             x = val[i:i + T].unsqueeze(0).to(device)
             logits = model(x)["final_log_probs"].reshape(-1, V) / max(temp, 1e-6)
-            if 0 < topk < V:
-                th = torch.topk(logits, topk, dim=-1).values[:, -1:]
-                logits = logits.masked_fill(logits < th, float("-inf"))
-            lp = F.log_softmax(logits, dim=-1)
-            tot += float(-(lp.exp() * lp).sum())
-            n += lp.shape[0]
+            tot += float(_entropy_from_logits(logits, topk).sum())
+            n += logits.shape[0]
     return tot / n
 
 

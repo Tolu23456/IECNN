@@ -1,10 +1,55 @@
-# IECNN status — 2026-11-19 (autonomous overnight block, updated)
+# IECNN status — 2026-11-20
 
 One-page state of the campaign. The evidence ledger is `DECISIONS.md` (every row
 is a measured batch with its in-session transformer anchor); this is the map, not
 the evidence.
 
-## The headline, corrected twice
+
+## Today (2026-11-20): the constraint was the HEAD, and the gap halved
+
+Three results landed, all on the canonical 90/5 split with an in-session
+transformer anchor. They change what the campaign is doing.
+
+**1. Head capacity pays — the first arm to move TRAIN fit.** 900 s/arm,
+compiled, common 272.23M tokens:
+
+| arm | params | s/step | tokens | bpc | bpc@eqtok | train |
+|---|---|---|---|---|---|---|
+| tf-swa-c | 408k | 0.0185 | 398.41M | **1.7923** | 1.8666 | 1.7920 |
+| rr2-c | 571k | 0.0206 | 357.83M | 1.8847 | 1.9451 | 1.8677 |
+| rr3-c | 571k | 0.0224 | 329.65M | 1.8769 | 1.9369 | 1.8682 |
+| **x5+rr2-c** | 835k | 0.0271 | 272.23M | **1.8383** | **1.8894** | **1.8183** |
+
+x5 adds 264k params, costs 31% more per step and therefore sees 24% fewer
+tokens — and still wins by **0.046 wall / 0.056 equal-token**, with train bpc
+down 0.049. The in-session gap to tf goes **0.092 → 0.046** (wall) and
+**0.079 → 0.023** (tokens). So "the head is not the constraint" is dead: the
+dot model was underfitting in its head stack, not only in its dots. rr3 is a
+null against rr2 (-0.0078, one seed, inside the dot noise floor).
+
+**2. The channels are asymmetric: value is full, key is 4× too wide.** Exact
+subspace truncation at the weights on 3 h rr2-c (base and restored both
+1.8276): `v` 32 dims cost +0.633 at 24/32 and +1.78 at 16/32 — every dim is
+load-bearing, so there is no slack to reclaim. `k` 16 dims hold **80% of their
+variance in ONE dimension** and PCA-4/16 costs +0.008 — it is over-provisioned,
+not starved. `s` 96 is distributed (PR 41). Random/prefix bases are always
+worse than PCA at equal k, so the channel is organised. Do not read "in use"
+as "insufficient": the `d_v=64` arm is the direct test of whether more width
+helps, and it is running.
+
+**3. Generation does not support the dot model.** 20 unseen prompts, matched
+seeds. rr2's text is more varied (distinct-2 0.583 vs 0.491) and a judge liked
+one pair of it — but the cross-scoring kills the claim: tf finds rr2's samples
+*less* likely (1.587) than its own (1.188), and prefers its own sample on 19/20
+prompts. A blind judge over 20 balanced pairs splits **11-9 for tf (p=0.82)**.
+The extra variety is what higher entropy looks like at fixed temperature
+(rr2 H 1.243 nats vs tf 1.174, both calibrated at ECE ≈ 0.007). bpc stays the
+metric; generation is not an architecture argument.
+
+**What is running:** 900 s capacity/bandwidth screen — `head_post_layers=7`,
+`d_v=64`, `d_s=128`, each against the tf-c anchor and the x5+rr2-c reference.
+
+## History — 2026-11-19 snapshot (numbers superseded by the table above)
 
 **The dot model is a fast-start model with a ceiling at ~1.93 bpc, and it is a
 CEILING IN THE TRAINING FIT, not in the data.** Same protocol, 900 s/arm:
