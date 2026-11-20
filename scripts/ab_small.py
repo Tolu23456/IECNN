@@ -1548,6 +1548,24 @@ ARMS = {
         global_read=True, spans=(8,), head_post=512, head_post_layers=5,
         read_ln=True, head_ln=True, global_decay=True, reread=2),
         {"lr": 2e-3, "swa": 0.99, "compile": True}),
+    # --- is depth the lever, or is WIDTH? ---------------------------------
+    # x5 (head_post 512) bought -0.046 bpc for +32% step time, i.e. 0.18 bpc
+    # per 1k params at equal WALL clock. The head is now the most expensive
+    # part of the step (5 blocks x 2 x 128 x 512 ~= 655k MAC/token, against
+    # ~1.1M for the whole model), so a narrower block is the direct test of
+    # whether the gain comes from depth or from width. x7w256 is DEEPER than
+    # x5 and uses FEWER head params (458k MAC vs 655k), so if it holds the
+    # bpc it is a strictly cheaper arm, which is the campaign's whole bar.
+    "iecnn-n3-x5-p1-ln-decay-d128-w256-rr2-c": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=256, head_post_layers=5,
+        read_ln=True, head_ln=True, global_decay=True, reread=2),
+        {"lr": 2e-3, "swa": 0.99, "compile": True}),
+    "iecnn-n3-x7-p1-ln-decay-d128-w256-rr2-c": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=256, head_post_layers=7,
+        read_ln=True, head_ln=True, global_decay=True, reread=2),
+        {"lr": 2e-3, "swa": 0.99, "compile": True}),
     "iecnn-n3-x3-p1-ln-decay-d128-w512-rr3": ("iecnn", lambda: iecnn(
         "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
         global_read=True, spans=(8,), head_post=512, head_post_layers=3,
