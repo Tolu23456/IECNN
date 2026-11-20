@@ -1415,3 +1415,57 @@ def test_k_lag_shifts_only_the_key_stream_and_stays_causal():
     out.exp().gather(-1, torch.zeros(2, 12, 1, dtype=torch.long)).sum().backward()
     assert reg.w_qi.grad is not None and torch.isfinite(reg.w_qi.grad).all()
     assert reg.w_qi.grad.abs().sum() > 0
+
+
+# --------------------------------------------------------------------------
+# channel-capacity probe (scripts/probe_channels.py)
+# --------------------------------------------------------------------------
+def test_channel_probe_truncation_is_exact():
+    """The probe's ablations must be exact reparametrisations, or the deltas
+    it reports are measuring its own arithmetic instead of the model."""
+    from scripts.probe_channels import (basis_pca, basis_tail, project_out,
+                                        spectrum, truncate_keys,
+                                        truncate_values)
+    torch.manual_seed(0)
+    sd = build_iecnn(_cfg(), 64).state_dict()
+    dv = sd["regions.0.w_v.weight"].shape[0]
+    dq = sd["regions.0.w_k.weight"].shape[0]
+
+    # P = I must be bit-identical, in every tensor it touches, or the "k = d"
+    # row of the table would not be a valid zero point.
+    eye_v = torch.eye(dv)
+    for key, val in truncate_values(sd, eye_v).items():
+        assert torch.equal(val, sd[key]), key
+    for key, val in truncate_keys(sd, torch.eye(dq)).items():
+        assert torch.equal(val, sd[key]), key
+
+    # P P^T is a projection: applying it twice is applying it once.
+    P = basis_tail(dv, max(1, dv - 3))
+    w = sd["regions.0.w_v.weight"]
+    once, twice = project_out(w, P, 0), project_out(project_out(w, P, 0), P, 0)
+    assert torch.allclose(once, twice, atol=0, rtol=0)
+
+    # dropping the last 3 canonical dims must zero exactly those rows of w_v
+    # AND the matching rows of the cell input, and change nothing else.
+    out = truncate_values(sd, P)
+    for k in range(dv - 3, dv):
+        assert out["regions.0.w_v.weight"][k].abs().sum() == 0
+    cell = out["regions.0.dots.w_ih"]
+    assert cell[..., dv:, :].equal(sd["regions.0.dots.w_ih"][..., dv:, :])
+    assert cell[..., dv - 1, :].abs().sum() == 0
+
+    # a PCA basis is orthonormal and keeps the top directions
+    x = torch.randn(500, dv) @ torch.diag(torch.linspace(4.0, 0.1, dv))
+    Q = basis_pca(x, 3)
+    assert Q.shape == (dv, 3)
+    assert torch.allclose(Q.t() @ Q, torch.eye(3), atol=1e-5)
+    s = spectrum(x)
+    assert s["dim"] == dv and 1.0 <= s["participation_ratio"] <= dv
+    # variance is concentrated in the leading directions of this construction
+    assert s["top4"] > s["top16"]
+
+    # keys: same contract, one weight per site
+    kq = basis_tail(dq, 2)
+    kout = truncate_keys(sd, kq)
+    assert kout["regions.0.w_k.weight"][:dq - 2].abs().sum() > 0
+    assert kout["regions.0.w_k.weight"][dq - 1].abs().sum() == 0
