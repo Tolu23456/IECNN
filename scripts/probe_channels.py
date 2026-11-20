@@ -228,7 +228,9 @@ def collect_vectors(model, val: torch.Tensor, windows: int, device) -> dict:
             # only: the global read is a separate, already O(T) path).
             q = r.dots._sel(0, r.dots.q)
             sc = torch.einsum("bfwj,nj->bfnw", wind_k, q) / math.sqrt(r.d_q)
-            sc = sc.masked_fill(~valid[None, None, None, :], float("-inf"))
+            # valid is [T, span] (see gather_windows), so the mask is
+            # [1, T, 1, span] against scores [B, T, N, span].
+            sc = sc.masked_fill(~valid[None, :, None, :], float("-inf"))
             a = torch.nan_to_num(F.softmax(sc, dim=-1), nan=0.0)
             ctx = torch.matmul(a.unsqueeze(-2), wind_v.unsqueeze(-3)).squeeze(-2)
             out = model(x)
