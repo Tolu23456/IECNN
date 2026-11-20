@@ -100,11 +100,14 @@ def basis_tail(d: int, k: int) -> torch.Tensor:
 def project_out(w: torch.Tensor, P: torch.Tensor, dim: int = 0) -> torch.Tensor:
     """Zero the component of `w` outside span(P) along `dim`.
 
-    dim=0: w is [d, ...] (a projection OUTPUT, e.g. w_v), so P P^T on the left.
-    dim=-1: w is [..., d] (a projection INPUT, e.g. rr_o), so P P^T on the right.
+    dim=0/-2: `w` indexes the space on a ROW axis -- P is [d, k] and the result
+    is P P^T w, which torch broadcasts over any leading dims (the cell input is
+    [p, n, in_dim, 2*d_s] and only its first d_v rows are the ctx block).
+    dim=-1: the space is the LAST axis (e.g. rr_o is [.., d_out, d_v]), so the
+    projection goes on the right: w P P^T.
     """
     M = P @ P.t()
-    return M @ w if dim == 0 else w @ M
+    return M @ w if dim in (0, -2) else w @ M
 
 
 # --------------------------------------------------------------------------

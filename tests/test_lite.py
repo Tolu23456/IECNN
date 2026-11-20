@@ -1423,8 +1423,8 @@ def test_k_lag_shifts_only_the_key_stream_and_stays_causal():
 def test_channel_probe_truncation_is_exact():
     """The probe's ablations must be exact reparametrisations, or the deltas
     it reports are measuring its own arithmetic instead of the model."""
-    from scripts.probe_channels import (basis_pca, basis_tail, project_out,
-                                        spectrum, truncate_keys,
+    from scripts.probe_channels import (basis_pca, basis_random, basis_tail,
+                                        project_out, spectrum, truncate_keys,
                                         truncate_values)
     torch.manual_seed(0)
     sd = build_iecnn(_cfg(), 64).state_dict()
@@ -1439,14 +1439,17 @@ def test_channel_probe_truncation_is_exact():
     for key, val in truncate_keys(sd, torch.eye(dq)).items():
         assert torch.equal(val, sd[key]), key
 
-    # P P^T is a projection: applying it twice is applying it once.
-    P = basis_tail(dv, max(1, dv - 3))
+    # P P^T is a projection: applying it twice is applying it once. Measured
+    # on a random basis, where the second application is genuinely a matmul
+    # rather than a 0/1 mask, so the tolerance is the arithmetic's, not zero.
+    P = basis_random(dv, max(1, dv - 3), seed=3)
     w = sd["regions.0.w_v.weight"]
     once, twice = project_out(w, P, 0), project_out(project_out(w, P, 0), P, 0)
-    assert torch.allclose(once, twice, atol=0, rtol=0)
+    assert torch.allclose(once, twice, atol=1e-6, rtol=0)
 
     # dropping the last 3 canonical dims must zero exactly those rows of w_v
     # AND the matching rows of the cell input, and change nothing else.
+    P = basis_tail(dv, max(1, dv - 3))
     out = truncate_values(sd, P)
     for k in range(dv - 3, dv):
         assert out["regions.0.w_v.weight"][k].abs().sum() == 0
@@ -1461,8 +1464,10 @@ def test_channel_probe_truncation_is_exact():
     assert torch.allclose(Q.t() @ Q, torch.eye(3), atol=1e-5)
     s = spectrum(x)
     assert s["dim"] == dv and 1.0 <= s["participation_ratio"] <= dv
-    # variance is concentrated in the leading directions of this construction
-    assert s["top4"] > s["top16"]
+    # cumulative variance is monotone in k, and this construction concentrates
+    # it: the leading quarter of the directions carries most of the mass
+    assert s["top4"] < s["top8"] <= s["top16"] <= 1.0
+    assert s["top4"] > 0.4
 
     # keys: same contract, one weight per site
     kq = basis_tail(dq, 2)
@@ -1475,8 +1480,12 @@ def test_generation_probe_text_stats():
     """The sample statistics the generation probe reports must be the
     obvious functions of the text, or its "more varied" claim is a bug."""
     from scripts.probe_generation import distinct, longest_repeat
+    # a phrase repeated three times: every byte type appears (d1 = 1) while
+    # the long n-grams repeat, which is what "repetitive" has to mean here.
     a = b"the [[wiki]] text the [[wiki]] text" * 3
-    assert distinct(a, 1) < 1.0 < distinct(a, 8)
+    assert distinct(a, 1) == 1.0
+    assert 0.0 < distinct(a, 8) < 0.5
     assert longest_repeat(a, 4) > 1
-    assert longest_repeat(b"abcdefgh", 4) == 1
-    assert distinct(b"abcdefgh", 1) == 1.0
+    # all-unique text is the other end: no repeated n-gram at all
+    assert distinct(bytes(range(256)), 8) == 1.0
+    assert longest_repeat(bytes(range(256)), 4) == 1
