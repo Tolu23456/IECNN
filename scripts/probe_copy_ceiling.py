@@ -155,11 +155,48 @@ def main() -> None:
         line = "  gate:  " + "  ".join(f"{g:.2f}:{b:.3f}" for g, b in rows[::5])
         print(line, flush=True)
 
+        # ---- what an OBSERVABLE-feature gate could recover: 2-fold CV --------
+        # Features a gate can actually see: the match distance and the model's
+        # own uncertainty. Fit a constant gate per (distance bucket, entropy
+        # tercile) on one half of the positions and score the other half, both
+        # ways, so the number is not fitted on the data it is quoted on.
+        d = torch.from_numpy(ind_d)
+        dbin = torch.bucketize(d.float(), torch.tensor([9.0, 65.0, 257.0]))
+        H = -(p * p.clamp_min(1e-12).log()).sum(-1)
+        q = torch.quantile(H, torch.tensor([1 / 3, 2 / 3]))
+        ebin = torch.bucketize(H, q)
+        grp = dbin * 3 + ebin
+        perm = torch.randperm(len(p_true),
+                              generator=torch.Generator().manual_seed(0))
+        gate = torch.zeros_like(p_true)
+        for fit_idx, ev_idx in ((perm[: len(perm) // 2], perm[len(perm) // 2:]),
+                                (perm[len(perm) // 2:], perm[: len(perm) // 2])):
+            fit = torch.zeros(len(p_true), dtype=torch.bool)
+            fit[fit_idx] = True
+            for gidx in torch.unique(grp):
+                m_fit = (grp == gidx) & fit
+                m_ev = (grp == gidx) & ~fit
+                if not bool(m_fit.any()) or not bool(m_ev.any()):
+                    continue
+                gsel, _ = min(mixture_bpc(p_true[m_fit], right[m_fit],
+                                          vv[m_fit], GRID),
+                              key=lambda r: r[1])
+                gate[m_ev] = gsel
+        gv = gate * vv.float()
+        cv = float(-torch.log2(((1 - gv) * p_true
+                                + gv * right.float()).clamp_min(1e-12)).mean())
+        print(f"  2-fold feature gate (distance x entropy): {cv:.4f} bpc "
+              f"({base - cv:+.4f})", flush=True)
+
         # per-bucket: the best constant gate *within* the bucket and the oracle.
         # A bucket where the best gate is large is where a distance-conditioned
         # gate would spend its weight, i.e. this prices the next design.
         print(f"  {'bucket':>18}{'n':>7}{'base':>8}{'best':>8}{'gain':>8}"
               f"{'g*':>6}{'oracle':>8}", flush=True)
+        # The table below is an ORACLE decomposition: the buckets are defined
+        # by "the guess is right", which is the target, not a feature. It says
+        # where the value is, not what a gate can find. The honest version is
+        # the 2-fold fit further down, which only sees observable features.
         for bidx, bname in enumerate(IND_BUCKETS):
             m = torch.from_numpy(ind == bidx)
             if not bool(m.any()):
