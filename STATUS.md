@@ -107,6 +107,21 @@ The gate turns a poisoned 75-minute session into a 2-minute one, but it does not
 choose the host, so the horizon question stays open and is re-queued with the
 `suffix_copy` screen (same batch, same anchor).
 
+**Third pre-registration, for the `suffix_copy` screen** (`tf-swa-c`,
+`tf-swa-w3-c`, `tf-swa-w8-c`, `x5+rr2-c`, `x5+rr2-c-sc3`, 360 s, one session,
+one seed). The mechanism is a single learned gate on an exact 3-gram pointer, so
+the screen can only do three things:
+
+| outcome (x5+rr2-c-sc3 vs x5+rr2-c, same s/step) | reading |
+|---|---|
+| worse or flat (≥ −0.01) | the channel does not pay at this budget: reject it, log it, and do not tune the gate — the tests already rule out a silent no-op, so a flat result is a real verdict |
+| better by 0.01–0.04 | a peaked-prior effect is not excluded; run `scripts/probe_suffix_copy.py` on the checkpoint (true vs scrambled pointers) before any further spend |
+| better by > 0.04 | candidate, not result: 900 s confirm plus the scrambled-pointer control, and only then a second seed |
+
+The point of the screen is that **`scrambled` must be worse than `true`** for
+this to be induction rather than a mixture trick. If true ≈ scrambled on the
+trained checkpoint, the mechanism is closed regardless of the bpc margin.
+
 **The pre-registration below was written before the numbers, and the numbers
 came back on the first branch -- so the reading is fixed, not chosen: head
 capacity does not reach the band.** tf − x5 is 0.0460 total and the 9–64 band
