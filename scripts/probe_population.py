@@ -181,6 +181,54 @@ def main() -> None:
             v = js(torch.cat(read_p[a]), torch.cat(read_p[b]))
             print(f"      read JS dot {a} vs {b}: {v:.4f}", flush=True)
 
+    # ------------------------------------------------------------------
+    # IS THE ABLATION MEASURING THE DOT, OR THE HEAD'S OFF-MANIFOLD INPUT?
+    #
+    # The 3 h rr2-c checkpoint gives drop-one +4.60/+1.62/+0.34 bpc and any
+    # dot ALONE 4.0-7.9 bpc against a 1.83 committee. A convex blend of three
+    # near-uninformative states cannot be 3 nats better than each of them, so
+    # one of these is true:
+    #   (a) the pool WEIGHTS carry context (they are a 2-dof function of the
+    #       position), and removing/normalising them deletes information;
+    #   (b) the head is brittle: it only ever saw near-uniform weights, so any
+    #       reweighting is off-manifold and the result is garbage.
+    # A time-shuffle of w separates them: same values, same marginal, but the
+    # per-position pairing with the context is destroyed. If shuffled w costs
+    # like drop-one, the weights are information (a). If it stays at the
+    # committee, the weights are only a mixture and the ablation is (b).
+    orig_hidden = reg._pass_hidden
+
+    def patched(mode):
+        def fn(gam, trust_term, trust, mask, tau, floor):
+            tr, w = orig_hidden(gam, trust_term, trust, mask, tau, floor)
+            if mode == "uniform":
+                return tr, torch.full_like(w, 1.0 / n)
+            if mode == "shuffle_t":
+                return tr, w.flip(1)
+            if mode == "shuffle_n":
+                return tr, w[..., torch.randperm(n, device=w.device)]
+            if mode.startswith("floor"):
+                k = int(mode[-1])
+                keep = torch.ones_like(w)
+                keep[..., k] = 0.1 / n
+                w = w * keep
+                return tr, w / w.sum(-1, keepdim=True).clamp_min(1e-9)
+            raise ValueError(mode)
+        return fn
+
+    wmodes = ["uniform", "shuffle_t", "shuffle_n"] + [f"floor{k}" for k in range(n)]
+    wrep = {}
+    print("\n-- pool-weight controls (bpc; delta vs committee) --", flush=True)
+    for mode in wmodes:
+        reg._pass_hidden = patched(mode)
+        try:
+            b = float(nats_per_token(model, val, min(args.windows, 64),
+                                     device).mean()) / math.log(2)
+        finally:
+            reg._pass_hidden = orig_hidden
+        wrep[mode] = {"bpc": b, "delta": b - base}
+        print(f"{mode:<12} {b:.4f}  {b - base:+.4f}", flush=True)
+
     rep = {
         "ckpt": os.path.basename(args.ckpt), "dots": n,
         "windows": args.windows, "tokens": ntok,
@@ -192,6 +240,7 @@ def main() -> None:
         "dot_dist_back": [float(r_dist[k] / ntok) for k in range(n)],
         "dot_frac_end": [float(r_end[k] / ntok) for k in range(n)],
         "dot_read_entropy": [float(r_ent[k] / ntok) for k in range(n)],
+        "pool_weight_controls": wrep,
     }
     out = os.environ.get("POP_OUT")
     if out:
