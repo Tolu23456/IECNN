@@ -67,9 +67,13 @@ not charge a dot for — it is the only route for the current token into the cel
   against tf's 0.509**. Beyond 64 the two nearly agree (0.991 vs 0.900) on 40%
   of positions. Meanwhile 46% of positions (wrong guess, d>8) carry 9%.
   So the deficit is not uniform capacity: it is one band, and it is exactly the
-  band a 8-slot window cannot address. `x5-w16/w32/w64` target it; the MAC cost
-  is +0.14/+0.4/+1%, though the gather is memory-bound so step time must be
-  measured. `tf-w3/w8/w32` remain the causal control.
+  band a 8-slot window cannot address. **Do not re-stage the obvious fix:** the
+  longer *contiguous* window was already measured at 180 s (span8 2.0564,
+  span12 2.0392, span16 2.0577, seed noise 0.024) and its far dot's read
+  entropy saturates at span16 (2.53 of 2.77 nats), i.e. extra slots stop buying
+  resolution. That is a real, named weakness we currently have no cheap arm for
+  — it needs a materially different read, not a wider one. `tf-w3/w8/w32`
+  remain the causal control for whether *exact* access is the whole story.
 - **The machine is per-host, not per-hour.** The same T4/torch did 0.0170 s/step
   at 10:38 and 0.3551 s/step at 09:00, both alone. A slow run is a bad host:
   absolute bpc from it is void, and an in-session comparison needs the per-arm
@@ -99,11 +103,13 @@ more than 8 and no window arm will match.
 The compute map (`scripts/flops_audit.py`) says why this is the right question and
 not another capacity purchase: `x5+rr2-c` is **1.93×** the tf anchor's MACs/token
 and **79% of it is the post-MLP head**, while the window read is **0.14%** and the
-shared key/value projections 0.7%. So doubling the exact window 8 → 16 costs
-**+0.14% compute and zero parameters**, and doubling the head costs ~50% and
-+655k params (`w1024` = **3.45×** the anchor). The read is the cheap place to
-spend; width is the expensive one. Arms `x5-w16` / `x5-w32` are staged for
-exactly that.
+shared key/value projections 0.7%. So the read is cheap to *extend* and the head
+is expensive: doubling the head costs ~50% and +655k params (`w1024` =
+**3.45×** the anchor). But cheap is not sufficient — the longer contiguous
+window is measured dead (see the induction entry above), so the compute map's
+actionable consequence is the opposite direction: **width is the expensive
+thing, so if capacity is bought it should be bought by trading depth away**
+(`x5w768l4` / `x5w1024l3`, both 2.23× the anchor against x5's 1.93×).
 
 One thing this does **not** measure: the dot model's horizon is not really 8.
 Its window read is 8 exact slots, but the global decayed read is a prefix

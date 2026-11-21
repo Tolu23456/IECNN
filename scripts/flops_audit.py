@@ -70,20 +70,11 @@ CONFIGS = {
                           V=256, cell="lug", lean=True, nologit=True,
                           reread=2, global_read=True, head_post=1024,
                           head_post_layers=5),
-    # the read alternatives: longer exact windows at x5 width, pointed at the
-    # 9-64 band where probe_error_by_distance puts 55% of the gap
-    "x5-w16-rr2": dict(kind="ie", d=128, d_s=96, d_q=16, d_v=32, N=3, P=1, w=16,
-                       V=256, cell="lug", lean=True, nologit=True,
-                       reread=2, global_read=True, head_post=512,
-                       head_post_layers=5),
-    "x5-w32-rr2": dict(kind="ie", d=128, d_s=96, d_q=16, d_v=32, N=3, P=1, w=32,
-                       V=256, cell="lug", lean=True, nologit=True,
-                       reread=2, global_read=True, head_post=512,
-                       head_post_layers=5),
-    "x5-w64-rr2": dict(kind="ie", d=128, d_s=96, d_q=16, d_v=32, N=3, P=1, w=64,
-                       V=256, cell="lug", lean=True, nologit=True,
-                       reread=2, global_read=True, head_post=512,
-                       head_post_layers=5),
+    # NOTE: no w16/w32/w64 arms here. Longer CONTIGUOUS windows are measured
+    # closed at 180 s (span8 2.0564, span12 2.0392, span16 2.0577, seed noise
+    # 0.024) and the far dot's read entropy saturates (2.53 of 2.77 nats at
+    # span16), so extra slots stop buying resolution. The audit prices them at
+    # 1.93-1.95x the tf anchor -- cheap in MACs, and still not worth running.
 }
 
 
