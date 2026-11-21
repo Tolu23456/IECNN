@@ -1882,6 +1882,17 @@ SEED = int(os.environ.get("ARM_SEED", "0"))
 # healthy x5): it is there to catch the 18-20x signature, not to police a
 # mildly contended host, where in-session comparisons are still valid.
 SLOW_GATE = float(os.environ.get("ARM_SLOW_GATE", "0") or 0.0)
+# ARM_TOKENS (0 = off): stop the arm at an exact TOKEN count instead of at the
+# wall clock. The pool hands out throttled T4s that are 18x slower on exactly
+# the same software, and a wall-clock budget then buys 20x fewer tokens, so the
+# number is meaningless. A token budget makes the run host-independent: a fast
+# host and a throttled host train the SAME schedule and can differ only in
+# s/step, which is reported separately. Warmup/cosine/EMA follow the token
+# fraction when this is on, so the two runs match in token space too.
+TOKENS = int(os.environ.get("ARM_TOKENS", "0") or 0)
+# Hard wall-clock cap, only meaningful with ARM_TOKENS: a safety valve so one
+# pathologically slow host cannot eat the whole session before the first save.
+HARD_S = float(os.environ.get("ARM_HARD_S", "0") or 0.0)
 # set False the first time a backend rejects torch._foreach_* (XLA does)
 EMA_FOREACH = True
 BASE_LR = float(os.environ.get("ARM_LR", "1e-3"))
@@ -1937,13 +1948,25 @@ def run(name: str, kind: str, model, lr: float = None,
     # the end. This prints the live rate so a bad machine is caught in a
     # minute instead of fifteen. Diagnostic only: no effect on training.
     next_hb = 30.0
-    while time.time() - t0 < BUDGET:
+    tok = 0
+    while True:
+        el = time.time() - t0
+        if TOKENS:
+            if tok >= TOKENS:
+                break
+            if HARD_S > 0.0 and el > HARD_S:
+                print(f"HARD CAP {name[:44]} at {tok / 1e6:.1f}M of "
+                      f"{TOKENS / 1e6:.1f}M tok in {el:.0f}s -- saving what "
+                      f"exists rather than losing the arm.", flush=True)
+                break
+        elif el >= BUDGET:
+            break
         x, y = next(gen)
+        # progress: token fraction when token-budgeted (host-independent),
+        # wall clock otherwise. Both drive the same schedules.
+        frac = min(1.0, tok / TOKENS) if TOKENS else min(1.0, el / BUDGET)
         warm = min(1.0, (step + 1) / 100.0)
         if sched == "cos":
-            # time-based cosine over the FIXED wall-clock budget: the arm
-            # cannot know its step count in advance, but it knows the clock.
-            frac = min(1.0, (time.time() - t0) / BUDGET)
             warm = warm * 0.5 * (1.0 + math.cos(math.pi * frac))
         cur_lr = lr0 * warm
         for grp in opt.param_groups:
@@ -1956,7 +1979,8 @@ def run(name: str, kind: str, model, lr: float = None,
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         opt.step()
         step += 1
-        if ema is not None and (time.time() - t0) > 0.45 * BUDGET:
+        tok += nb * T
+        if ema is not None and frac > 0.45:
             with torch.no_grad():
                 if EMA_FOREACH:
                     try:
@@ -1975,8 +1999,11 @@ def run(name: str, kind: str, model, lr: float = None,
         if el >= next_hb:
             rate = el / max(step, 1)
             print(f"HB {name[:44]} step {step} {rate:.4f}s/step "
-                  f"{step * nb * T / 1e6:.1f}M tok", flush=True)
-            if SLOW_GATE > 0.0 and rate > SLOW_GATE:
+                  f"{tok / 1e6:.1f}M tok", flush=True)
+            # A token budget makes a slow host valid (same tokens, more wall
+            # clock), so the host gate is off by design in that mode: it would
+            # abort the only sessions that can still answer the question.
+            if not TOKENS and SLOW_GATE > 0.0 and rate > SLOW_GATE:
                 print(f"VOID slow host: {rate:.4f}s/step > gate {SLOW_GATE} "
                       f"at step {step} -- this session cannot produce a "
                       f"comparable bpc; stopping before the remaining arms.",
@@ -1999,6 +2026,8 @@ def run(name: str, kind: str, model, lr: float = None,
            "tokens": step * nb * T, "s_per_step": round(el / max(step, 1), 4),
            "s_per_1k_tokens": round(el / max(step * nb * T / 1000, 1e-9), 3),
            "curve": marks, "bpc_final": final, "bpc_train": tr_bpc}
+    if TOKENS:
+        row["target_tokens"] = TOKENS
     if kind == "iecnn":
         row["pointers"] = pointer_audit(em)
     if GEN_ON:
@@ -2132,8 +2161,10 @@ def main():
             print(f"ARM FAIL {name:<26}{type(e).__name__}: {e}", flush=True)
 
     common_tok = min(r["tokens"] for r in rows)
-    print(f"\n=== SUMMARY (equal wall-clock {BUDGET:.0f}s/arm, "
-          f"common {common_tok/1e6:.2f}M tokens) ===", flush=True)
+    mode = (f"equal tokens {TOKENS/1e6:.1f}M/arm" if TOKENS
+            else f"equal wall-clock {BUDGET:.0f}s/arm")
+    print(f"\n=== SUMMARY ({mode}, common {common_tok/1e6:.2f}M tokens) ===",
+          flush=True)
     hdr = f"{'arm':<18}{'params':>8}{'steps':>7}{'tokens':>9}{'s/step':>9}" \
           f"{'s/1k tok':>10}{'bpc_fin':>9}{'bpc@eqtok':>11}{'bpc_tr':>8}{'gap':>7}"
     print(hdr, flush=True)

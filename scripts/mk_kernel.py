@@ -14,6 +14,14 @@ Usage: mk_kernel.py <tag> <budget_s> <arms> <seed> <n_train> <val_off> <n_val>
   seed      ARM_SEED
   n_train / val_off / n_val   corpus split, in bytes
   mark_s    ARM_MARK_S (mid-run val marker; 0 = none)
+
+Env (read here and baked into the emitted kernel, so the run is self-describing):
+  ARM_TOKENS  stop each arm at exactly this many tokens (0 = use the clock).
+              This is what makes a throttled host usable: the pool hands out
+              T4s that are 18x slower on identical software, and a wall-clock
+              budget then buys 20x fewer tokens. Equal tokens, same schedule,
+              only s/step differs.
+  ARM_HARD_S  with ARM_TOKENS, a wall-clock safety valve per arm (0 = none).
   gen       1 = run the generation probe during the dry pass
   dir       output directory for the two kernel files
 
@@ -32,6 +40,8 @@ import os
 import sys
 
 TAG, BUDGET, ARMS, SEED, N_TRAIN, VAL_OFF, N_VAL, MARK_S, GEN, OUT = sys.argv[1:]
+TOKENS = os.environ.get("ARM_TOKENS", "0")
+HARD_S = os.environ.get("ARM_HARD_S", "0")
 
 TEMPLATE = '''"""Kaggle T4 runner for scripts/ab_small.py (long-corpus protocol).
 
@@ -147,10 +157,15 @@ env.update({{
     # (healthy tf is 0.0185 s/step, healthy x5 0.027; the bad signature is
     # 0.33-0.84). Costs ~30 s and saves the remaining arms.
     "ARM_SLOW_GATE": "0.10",
+    # token budget: the host-independent stop. With it set, a slow host trains
+    # the same tokens and the same schedule, so its bpc is comparable.
+    "ARM_TOKENS": {tokens!r},
+    "ARM_HARD_S": {hard_s!r},
 }})
 
 names = ARMS.split(",")
-print("=== TAG", TAG, "arms", ARMS, "budget", BUDGET, flush=True)
+print("=== TAG", TAG, "arms", ARMS, "budget", BUDGET,
+      "tokens", {tokens!r}, flush=True)
 
 # --- pre-flight: every arm builds, trains one step, evals, samples ----------
 dry_env = dict(env)
@@ -208,7 +223,7 @@ if os.path.isdir(ck_dir):
 os.makedirs(OUT, exist_ok=True)
 src = TEMPLATE.format(tag=TAG, budget=BUDGET, arms=ARMS, seed=SEED,
                       n_train=N_TRAIN, val_off=VAL_OFF, n_val=N_VAL,
-                      mark_s=MARK_S, gen=GEN)
+                      mark_s=MARK_S, gen=GEN, tokens=TOKENS, hard_s=HARD_S)
 with open(os.path.join(OUT, "iecnn_gpu.py"), "w") as f:
     f.write(src)
 meta = {"id": f"voidmaster000/iecnn-{TAG}-gpu", "title": f"iecnn {TAG} gpu",
