@@ -2,7 +2,26 @@
 
 **Iterative Emergent Convergent Neural Network**: a next-token prediction architecture built from a population of small learners ("dots") that rethink their answers over several passes and settle on a weighted consensus. Includes **UBM (Universal Basemapping)**, a byte-level tokenizer with model-driven vocabulary growth.
 
-> **Status: design stage.** The full specification and a project skeleton exist. Nothing has been trained yet, and no performance claims are made. See [Status and honesty notes](#status-and-honesty-notes).
+> **Status: actively trained and measured, not yet ahead.** The dot model has
+> been trained for thousands of GPU-seconds against an in-session transformer
+> anchor at several budgets, and it is currently **behind** at equal compute.
+> The evidence, including every negative result, is in [`STATUS.md`](STATUS.md)
+> (the map) and [`DECISIONS.md`](DECISIONS.md) (every measured batch).
+>
+> Single-session, same-data comparison at 900 s/arm (compiled, canonical
+> enwik8 90/5 MB split, `seed 0`):
+>
+> | arm | params | s/step | val bpc |
+> |---|---|---|---|
+> | transformer baseline (`tf-swa-c`) | 408k | 0.0185 | **1.7923** |
+> | IECNN `rr2-c` | 571k | 0.0206 | 1.8847 |
+> | IECNN `x5+rr2-c` | 835k | 0.0271 | 1.8383 |
+>
+> At 3 h/arm the same ordering holds (1.7123 vs 1.8276 for `rr2-c`). Two
+> mechanisms have paid for their compute so far: **`reread`** (−0.032 bpc at
+> 900 s, two seeds) and **head capacity** (−0.046 bpc, which halves the gap).
+> Neither closes it. The block "Status and honesty notes" below is the
+> original pre-training intent and is kept for the record.
 
 ---
 
