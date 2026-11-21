@@ -1560,8 +1560,9 @@ def test_input_res_is_zero_param_and_path_equivalent():
     with torch.no_grad():
         d = base2(x)["final_log_probs"]
     assert not torch.allclose(a, d, atol=1e-6)
-    # and gradients still reach the cell
-    loss = a.reshape(-1, 64).log_softmax(-1)[:, 0].sum()
+    # and gradients still reach the cell (a fresh graph: `a` was taken under
+    # no_grad, so it has no grad_fn to backprop through)
+    loss = res(x)["final_log_probs"].reshape(-1, 64).log_softmax(-1)[:, 0].sum()
     loss.backward()
     g = res.regions[0].dots.w_ih_lug.grad
     assert g is not None and torch.isfinite(g).all() and g.abs().sum() > 0
