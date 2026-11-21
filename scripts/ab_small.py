@@ -1599,6 +1599,25 @@ ARMS = {
         read_ln=True, head_ln=True, global_decay=True, reread=2,
         input_res=True),
         {"lr": 2e-3, "swa": 0.99, "compile": True}),
+    # --- the second doubling of the one thing that paid ----------------
+    # w256 -> w512 cost +0.074 bpc, so width is load-bearing at 512 and the
+    # next question is whether it is still load-bearing ABOVE 512. Each arm
+    # is one doubling of head_post against x5+rr2-c in the same session:
+    #   w768    +328k params, the affordable step
+    #   w1024   +655k params, the honest second doubling
+    # The x5 precedent is that +31% step still paid 0.046, so a ~25% step for
+    # w768 is inside the range where capacity has won before. Not launched
+    # until the horizon arms say the read is not the binding constraint.
+    "iecnn-n3-x5w768-p1-ln-decay-d128-w768-rr2-c": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=768, head_post_layers=5,
+        read_ln=True, head_ln=True, global_decay=True, reread=2),
+        {"lr": 2e-3, "swa": 0.99, "compile": True}),
+    "iecnn-n3-x5w1024-p1-ln-decay-d128-w1024-rr2-c": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=1024, head_post_layers=5,
+        read_ln=True, head_ln=True, global_decay=True, reread=2),
+        {"lr": 2e-3, "swa": 0.99, "compile": True}),
     "iecnn-n3-x5-p1-ln-decay-d128-w256-rr2-c": ("iecnn", lambda: iecnn(
         "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
         global_read=True, spans=(8,), head_post=256, head_post_layers=5,
