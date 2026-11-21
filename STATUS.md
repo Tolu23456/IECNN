@@ -77,6 +77,15 @@ transformer only needs a couple of dozen positions, and the dot model's 8-slot
 read is the handicap; if w94 is still behind tf-c, exact access is worth much
 more than 8 and no window arm will match.
 
+The compute map (`scripts/flops_audit.py`) says why this is the right question and
+not another capacity purchase: `x5+rr2-c` is **1.93×** the tf anchor's MACs/token
+and **79% of it is the post-MLP head**, while the window read is **0.14%** and the
+shared key/value projections 0.7%. So doubling the exact window 8 → 16 costs
+**+0.14% compute and zero parameters**, and doubling the head costs ~50% and
++655k params (`w1024` = **3.45×** the anchor). The read is the cheap place to
+spend; width is the expensive one. Arms `x5-w16` / `x5-w32` are staged for
+exactly that.
+
 One thing this does **not** measure: the dot model's horizon is not really 8.
 Its window read is 8 exact slots, but the global decayed read is a prefix
 attention with `g_decay` initialised at sigmoid(4.6) ≈ 0.99 and learned, i.e. a
