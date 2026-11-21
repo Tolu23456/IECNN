@@ -1745,7 +1745,13 @@ def test_suffix_copy_gate_gets_gradient_and_starts_closed():
                          n_passes=1, cell="lug"), 64)
     r = m.regions[0]
     assert torch.sigmoid(r.sc_gate).item() < 1e-3
-    x = torch.randint(0, 64, (2, 12))
+    # the sequence must CONTAIN a repeated 3-gram, otherwise every position is
+    # invalid, the mixture is the identity and the gate's gradient is exactly
+    # zero -- which is what the first version of this test measured
+    x = torch.tensor([[1, 2, 3, 4, 1, 2, 3, 5, 1, 2, 3, 6],
+                      [7, 8, 9, 4, 7, 8, 9, 5, 7, 8, 9, 6]])
+    copy_ids, valid = r._suffix_copy(x)
+    assert bool(valid.any()), "test sequence has no repeated 3-gram"
     lp = m(x)["final_log_probs"]
     assert torch.isfinite(lp).all()
     (-lp.mean()).backward()
