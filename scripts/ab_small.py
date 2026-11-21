@@ -73,7 +73,7 @@ def iecnn(cell="gru", lean=False, n_passes=3, n_dots=8, d_s=128, d=128,
           interleave=False, read_ln=False, head_ln=False, read_heads=1,
           global_decay=False, post_share="none", global_decay_k=1,
           gate_agree=False, reread=0, reread_span=8, reread_spans=(),
-          q_shift=0, k_lag=0,
+          q_shift=0, k_lag=0, input_res=False,
           scan_mode="cumsum"):
     m = {
         "kind": "iecnn", "d": d, "d_q": d_q, "d_v": d_v, "d_s": d_s,
@@ -89,6 +89,7 @@ def iecnn(cell="gru", lean=False, n_passes=3, n_dots=8, d_s=128, d=128,
         "seclusion_topk": seclusion_topk,
         "pool_first": pool_first,
         "gate_agree": gate_agree,
+        "input_res": input_res,
         "slot_slots": slot_slots,
         "dot_dist_bias": dist_bias,
         "global_read": global_read,
@@ -1556,6 +1557,20 @@ ARMS = {
     # whether the gain comes from depth or from width. x7w256 is DEEPER than
     # x5 and uses FEWER head params (458k MAC vs 655k), so if it holds the
     # bpc it is a strictly cheaper arm, which is the campaign's whole bar.
+    # input_res: the collapsed dot is the model's INPUT PATH, not a wasted
+    # specialist. With n_passes=1 the cell sees only ctx (a 32-dim softmax
+    # average of window VALUES), h_pool=0 and err=0, so the only way the
+    # current token reaches the state is a dot that attends to dist 0 --
+    # exactly the dot every audit finds collapsed (frac_end 0.97-1.00).
+    # Adding v(t) to every dot's ctx is zero parameters and frees the
+    # population to spend all three dots on memory. If the collapse is what
+    # it looks like, the third dot should move and bpc should follow.
+    "iecnn-n3-x5-p1-ln-decay-d128-w512-rr2-c-ires": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=512, head_post_layers=5,
+        read_ln=True, head_ln=True, global_decay=True, reread=2,
+        input_res=True),
+        {"lr": 2e-3, "swa": 0.99, "compile": True}),
     "iecnn-n3-x5-p1-ln-decay-d128-w256-rr2-c": ("iecnn", lambda: iecnn(
         "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
         global_read=True, spans=(8,), head_post=256, head_post_layers=5,

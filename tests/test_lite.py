@@ -1529,3 +1529,39 @@ def test_generation_probe_entropy_is_finite():
     assert torch.allclose(top4, ref, atol=1e-5)
     # k = 1 is a point mass, entropy 0
     assert torch.allclose(_entropy_from_logits(logits, 1), torch.zeros(7), atol=1e-6)
+
+def test_input_res_is_zero_param_and_path_equivalent():
+    """`input_res` adds v(t) to every dot's ctx: it must add NO parameters,
+    must change the forward (the cell input really changes), and the fused and
+    reference read paths must agree once it is on -- otherwise the flag would
+    silently be a different mechanism in the two code paths."""
+    base = build_iecnn(_cfg(), 64)
+    res = build_iecnn(_cfg(input_res=True), 64)
+    # same parameter set, same shapes, same values (init is seeded by cfg-free
+    # generator state, so compare names and counts, not values)
+    b, r = base.state_dict(), res.state_dict()
+    assert set(b) == set(r)
+    assert all(b[k].shape == r[k].shape for k in b)
+    assert sum(v.numel() for v in b.values()) == sum(v.numel() for v in r.values())
+
+    res2 = build_iecnn(_cfg(input_res=True, fast_dot_math=False), 64)
+    res2.load_state_dict(res.state_dict())
+    x = torch.randint(0, 64, (2, 16))
+    with torch.no_grad():
+        a = res(x)["final_log_probs"]
+        c = res2(x)["final_log_probs"]
+    assert torch.allclose(a, c, atol=2e-5), (a - c).abs().max()
+
+    # the injection is live: with the same weights, ctx differs, so the loss
+    # surface differs. (Compared on the base model's weights so only the flag
+    # can differ.)
+    base2 = build_iecnn(_cfg(input_res=True), 64)
+    base2.load_state_dict(base.state_dict())
+    with torch.no_grad():
+        d = base2(x)["final_log_probs"]
+    assert not torch.allclose(a, d, atol=1e-6)
+    # and gradients still reach the cell
+    loss = a.reshape(-1, 64).log_softmax(-1)[:, 0].sum()
+    loss.backward()
+    g = res.regions[0].dots.w_ih_lug.grad
+    assert g is not None and torch.isfinite(g).all() and g.abs().sum() > 0

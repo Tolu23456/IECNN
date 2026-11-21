@@ -123,6 +123,7 @@ class DotPopulation(nn.Module):
                  gla: bool = False, global_exact: bool = False,
                  break_scan: bool = False, read_heads: int = 1,
                  global_decay: bool = False, global_decay_k: int = 1,
+                 input_res: bool = False,
                  scan_mode: str = "cumsum"):
         super().__init__()
         self.N = n_dots
@@ -164,6 +165,22 @@ class DotPopulation(nn.Module):
         # gate trajectories = different temporal mixtures), the gate is
         # per-dot d_s->S, the read is per-slot-per-dim weights [N, S, d_w].
         # Writes run under no_grad -> grads reach only the read path.
+        # input_res: give the cell the CURRENT token, not only the read of it.
+        #
+        # The cell's input is x = [ctx, h_pool, err, round] -- ctx is a softmax
+        # average of the window's VALUE vectors, i.e. d_v=32 numbers, and
+        # h_pool/err are ZERO at pass 1. So with n_passes=1 the cell has no
+        # direct path from the row at position t. The population can only get
+        # one by spending a dot on it, and that is exactly what every audit
+        # reports: one dot in three sits at dist_back ~0.0 with frac_end ~0.97
+        # (s900 x5: dot 2, frac_end 0.978; cap runs: frac_end 1.000). That dot
+        # is not a wasted specialist, it is the model's input residual, paid
+        # for with 1/3 of the population.
+        #
+        # input_res adds v(t) -- already computed for the window, index w-1 --
+        # to every dot's ctx: zero parameters, one add, and the dots are free
+        # to be memory readers. Flag off is bit-identical to today.
+        self.input_res = bool(input_res)
         self.S = int(slot_slots)
         self.d_w = int(slot_dim)
         self.slot_decay = float(slot_decay)
@@ -852,6 +869,8 @@ class DotPopulation(nn.Module):
         # lookup and never written back into the cache).
         if ctx_add is not None:
             ctx = ctx + ctx_add.reshape(b, t, n, self.d_v)
+        if self.input_res:
+            ctx = ctx + wind_v[:, :, -1, :].unsqueeze(2)
 
         # ---- GRU step (all dots at once) ----------------------------------
         parts = [ctx, h_pool, err_feat,
@@ -1061,6 +1080,8 @@ class DotPopulation(nn.Module):
         # lookup and never written back into the cache).
         if ctx_add is not None:
             ctx = ctx + ctx_add.reshape(f, n, self.d_v)
+        if self.input_res:
+            ctx = ctx + wv[:, -1, :].unsqueeze(1)
 
         # ---- GRU step (batched GEMM per dot over merged [B*T]) ------------
         parts = [ctx, h_pool.reshape(f, n, self.d_s), err_feat.reshape(f, n, 3),

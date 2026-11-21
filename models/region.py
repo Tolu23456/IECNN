@@ -250,6 +250,7 @@ class Region(nn.Module):
             global_exact=bool(m.get("global_exact", False)),
             break_scan=bool(m.get("break_scan", False)),
             read_heads=int(m.get("read_heads", 1)),
+            input_res=bool(m.get("input_res", False)),
             global_decay=bool(m.get("global_decay", False)),
             global_decay_k=int(m.get("global_decay_k", 1)),
             scan_mode=str(m.get("scan_mode", "cumsum")))
