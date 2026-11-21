@@ -73,7 +73,7 @@ def iecnn(cell="gru", lean=False, n_passes=3, n_dots=8, d_s=128, d=128,
           interleave=False, read_ln=False, head_ln=False, read_heads=1,
           global_decay=False, post_share="none", global_decay_k=1,
           gate_agree=False, reread=0, reread_span=8, reread_spans=(),
-          q_shift=0, k_lag=0, input_res=False,
+          q_shift=0, k_lag=0, input_res=False, no_lag0=False,
           scan_mode="cumsum"):
     m = {
         "kind": "iecnn", "d": d, "d_q": d_q, "d_v": d_v, "d_s": d_s,
@@ -90,6 +90,7 @@ def iecnn(cell="gru", lean=False, n_passes=3, n_dots=8, d_s=128, d=128,
         "pool_first": pool_first,
         "gate_agree": gate_agree,
         "input_res": input_res,
+        "no_lag0": no_lag0,
         "slot_slots": slot_slots,
         "dot_dist_bias": dist_bias,
         "global_read": global_read,
@@ -1565,6 +1566,14 @@ ARMS = {
     # Adding v(t) to every dot's ctx is zero parameters and frees the
     # population to spend all three dots on memory. If the collapse is what
     # it looks like, the third dot should move and bpc should follow.
+    # the pair: input_res supplies the current token, no_lag0 forbids reading
+    # it back out of the window, so all three dots must read the past
+    "iecnn-n3-x5-p1-ln-decay-d128-w512-rr2-c-ires-nolag0": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=512, head_post_layers=5,
+        read_ln=True, head_ln=True, global_decay=True, reread=2,
+        input_res=True, no_lag0=True),
+        {"lr": 2e-3, "swa": 0.99, "compile": True}),
     "iecnn-n3-x5-p1-ln-decay-d128-w512-rr2-c-ires": ("iecnn", lambda: iecnn(
         "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
         global_read=True, spans=(8,), head_post=512, head_post_layers=5,

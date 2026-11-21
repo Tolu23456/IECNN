@@ -123,7 +123,7 @@ class DotPopulation(nn.Module):
                  gla: bool = False, global_exact: bool = False,
                  break_scan: bool = False, read_heads: int = 1,
                  global_decay: bool = False, global_decay_k: int = 1,
-                 input_res: bool = False,
+                 input_res: bool = False, no_lag0: bool = False,
                  scan_mode: str = "cumsum"):
         super().__init__()
         self.N = n_dots
@@ -181,6 +181,18 @@ class DotPopulation(nn.Module):
         # to every dot's ctx: zero parameters, one add, and the dots are free
         # to be memory readers. Flag off is bit-identical to today.
         self.input_res = bool(input_res)
+        # no_lag0: remove the distance-0 slot from the window read.
+        #
+        # input_res alone makes v(t) available but does not stop a dot from
+        # ALSO attending to distance 0, and that read is already a useful
+        # thing to do (it is a second, gated copy of the same vector). So
+        # input_res alone cannot answer "would the population use three dots
+        # as memory?". Masking the distance-0 slot removes the shortcut: the
+        # current token can then enter the cell ONLY through input_res, and
+        # every dot has to spend its read on the past. On its own no_lag0 is
+        # a loss (it deletes the input path); it is meant to be run with
+        # input_res on, as the pair that makes the hypothesis testable.
+        self.no_lag0 = bool(no_lag0)
         self.S = int(slot_slots)
         self.d_w = int(slot_dim)
         self.slot_decay = float(slot_decay)
@@ -846,6 +858,9 @@ class DotPopulation(nn.Module):
             scores = scores + self._sel(round_idx, self.d_bias).view(1, 1, n, w)
         if valid_mask is not None:
             scores = scores.masked_fill(~valid_mask[None, :, None, :], float("-inf"))
+        if self.no_lag0 and w > 1:
+            scores = scores.masked_fill(
+                torch.arange(w, device=scores.device) == w - 1, float("-inf"))
         if self.read_mode == "secluded":
             ctx = self._secluded_ctx(
                 scores.reshape(b * t, self.N, w),
@@ -1039,6 +1054,9 @@ class DotPopulation(nn.Module):
             if valid_mask is not None:
                 vm = valid_mask.unsqueeze(0).expand(b, t, w).reshape(f, 1, w)
                 scores = scores.masked_fill(~vm, float("-inf"))         # [f, N, w]
+            if self.no_lag0 and w > 1:
+                scores = scores.masked_fill(
+                    torch.arange(w, device=scores.device) == w - 1, float("-inf"))
             if self.read_mode == "secluded":
                 ctx = self._secluded_ctx(scores, wv)                    # [f, N, d_v]
             else:

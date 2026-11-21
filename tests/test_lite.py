@@ -1572,3 +1572,26 @@ def test_input_res_is_zero_param_and_path_equivalent():
         cell_w = dots.w_ih
     g = cell_w.grad
     assert g is not None and torch.isfinite(g).all() and g.abs().sum() > 0
+
+def test_no_lag0_masks_the_self_slot_and_stays_finite():
+    """no_lag0 removes the distance-0 window slot, which leaves position 0 with
+    NO valid slot at all (the read is empty, ctx is zero, and only the injected
+    v(0) can reach the cell). That path must not produce nan, and the flag must
+    actually change the forward when everything else is held fixed."""
+    m = build_iecnn(_cfg(input_res=True, no_lag0=True), 64)
+    x = torch.randint(0, 64, (2, 16))
+    with torch.no_grad():
+        a = m(x)["final_log_probs"]
+    assert torch.isfinite(a).all()
+
+    # same weights, flag off: only no_lag0 can differ
+    m2 = build_iecnn(_cfg(input_res=True), 64)
+    m2.load_state_dict(m.state_dict())
+    with torch.no_grad():
+        b = m2(x)["final_log_probs"]
+    assert not torch.allclose(a, b, atol=1e-6)
+
+    # and the read of position 0 is genuinely empty: with input_res the cell
+    # still gets v(0), so the state is finite but not accidentally equal to
+    # the unmasked model at that position
+    assert (a[:, 0] - b[:, 0]).abs().max() > 0
