@@ -1544,19 +1544,6 @@ ARMS = {
         global_read=True, spans=(8,), head_post=512, head_post_layers=5,
         read_ln=True, head_ln=True, global_decay=True, reread=2),
         {"lr": 2e-3, "swa": 0.99, "compile": True}),
-    # --- what do dots 2 and 3 buy at all? ---------------------------------
-    # Every audit has one dot parked on the input path, `input_res` turns all
-    # three into the SAME distance-1 reader, and no population-size arm has
-    # ever paid. So the question is whether the committee is one dot's worth
-    # of function at three dots' cost. Same head, same reread, same everything
-    # except N: the bpc difference is what the extra dots buy, and the step
-    # difference is what they cost. Not launched until probe_population says
-    # dropping dots is cheap at 3 h.
-    "iecnn-n1-x5-p1-ln-decay-d128-w512-rr2-c": ("iecnn", lambda: iecnn(
-        "lug", True, n_passes=1, n_dots=1, d_s=96, d=128, per_dot_logits=False,
-        global_read=True, spans=(8,), head_post=512, head_post_layers=5,
-        read_ln=True, head_ln=True, global_decay=True, reread=2),
-        {"lr": 2e-3, "swa": 0.99, "compile": True}),
     # --- capacity / bandwidth, on top of the arm that finally paid ---------
     # x5+rr2-c (835k) beat rr2-c by 0.046 at equal wall clock and moved TRAIN
     # bpc by the same amount, so the head stack is a live lever. These three

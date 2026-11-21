@@ -1672,8 +1672,8 @@ def test_transformer_window_limits_exact_access_and_default_is_identical():
 def test_single_dot_population_builds_trains_and_is_finite():
     """N=1 is a legal population, not a corner case: consensus has nothing to
     vote over, pooling is the identity on that one dot, and the forward and
-    backward must both be finite. This is the arm that asks whether the extra
-    dots buy anything at all, so it must not fail for a trivial reason."""
+    backward must both be finite. An arm in the registry builds N=1, so the
+    consensus code's n<=1 branches must work through the whole path."""
     m = build_iecnn(_cfg(n_dots=1), 64)
     x = torch.randint(0, 64, (2, 12))
     out = m(x)

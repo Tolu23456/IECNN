@@ -10,11 +10,13 @@ At 900 s on the canonical 90/5 split the transformer anchor is **1.7923** and
 the best dot arm is **1.8383** (`x5+rr2-c`), so the dot model is behind by
 **0.046** at equal wall clock and **0.023** at equal tokens. At 3 h the gap is
 0.1153. Only two mechanisms have paid for their own compute: **`reread`**
-(−0.033, two seeds) and **head capacity** (`x5`, −0.046). The dot population
-itself is now the suspicious part: three dots are doing roughly one dot's work,
-and one of them is parked on the input.
+(−0.033, two seeds) and **head capacity** (`x5`, −0.046). The dot population is
+a genuine **fusion**, not a vote: on the 3 h checkpoint the mixture is 1.22 bpc
+better than the best single dot at every position, and dropping any dot costs
+0.34–4.60 bpc. But one of the three dots is doing a job the architecture should
+not charge a dot for — it is the only route for the current token into the cell.
 
-## 2026-11-21 — capacity in the HEAD pays; the POPULATION is redundant
+## 2026-11-21 — capacity in the HEAD pays; the POPULATION is a fusion
 
 | 900 s, common 272.23M tok, one session | params | s/step | bpc | bpc@eqtok |
 |---|---|---|---|---|
@@ -31,13 +33,20 @@ and one of them is parked on the input.
 - **The collapsed dot is the INPUT PATH.** With `n_passes=1` the cell sees only
   `[ctx, 0, 0, round]` and `ctx` is a softmax average of window *values*, so
   the distance-0 dot is the only route for the current token.
-- **But `input_res` moves the collapse, it does not fix it.** Injecting `v(t)`
-  zero-param removes the distance-0 dot — and all three dots become copies of
-  the same **distance-1** reader (`distinct_per_pos` 2.97 → **1.0**,
-  `all_same` **1.0**). At `n_passes=1` "predict the previous byte" is the only
-  function all three can learn, so the population is redundant rather than
-  specialised. The distance-0 dot was not a dead specialist; it was the only
-  one with a distinct job.
+- **`input_res` moves the collapse rather than fixing it.** Injecting `v(t)`
+  zero-param removes the distance-0 dot, and at 9.23M tokens all three dots
+  then read the same **distance-1** slot (`distinct_per_pos` 2.97 → **1.0**):
+  the freed dot does not re-specialise in that budget.
+- **But the population is NOT redundant — that claim is withdrawn.** On the
+  3 h checkpoint (base 1.8276 reproduced exactly) drop-one costs **+4.60 /
+  +1.62 / +0.34** bpc, any dot alone is 4.0–7.9 bpc, and the per-position best
+  single dot is 3.05 — 1.22 bpc *worse* than the mixture. Controls: uniform
+  weights cost only +0.26 (the head is smooth, so the ablation is not
+  fragility), a soft drop of dot 0 to the training floor still costs +4.29
+  (not the exact zero), permuting dot identity costs +0.89, and time-shuffling
+  the weights +0.36. So dot 0 is the **input path**, dots 1–2 read ~2 and ~2.7
+  back, and the three are complementary. The target is to make the input path
+  free and force the freed dots apart — **not** to delete dots.
 - **Generation, n=8.** Both models peak at T=0.70 for a 0.875-nat target. At
   matched entropy the dot model is **more** varied, not less (d2 0.5900 vs
   0.5204, ~2.2σ), so "its text only looks different because it is sharper" is
