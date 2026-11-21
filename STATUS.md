@@ -56,6 +56,16 @@ not charge a dot for — it is the only route for the current token into the cel
   matched entropy the dot model is **more** varied, not less (d2 0.5900 vs
   0.5204, ~2.2σ), so "its text only looks different because it is sharper" is
   dead — and the blind judge still splits 11-9 for tf. Variety ≠ quality.
+- **Where the gap is, from the data side (no retraining).** Bucketing every val
+  position by the distance back to the previous occurrence of the byte it must
+  predict: the dot model loses **0.090 / 0.083 / 0.087** bpc at d = 1 / 2-3 /
+  4-7, **0.151 / 0.162** at d = 8-15 / 16-63, only **0.048** at 64-255, and is
+  **0.039 BETTER** beyond 256. Weighted, 72% of the 0.115 gap lies beyond the
+  dot model's 8-slot window and **74% of the whole gap is the single 8-63 band**
+  — just outside the window, comfortably inside tf's 256. The window read is
+  0.14% of compute, so `x5-w16` (covers 0.033) and `x5-w32` (0.053) are nearly
+  free. Caveat: that band is also 54% of positions, so a uniform relative
+  deficit would concentrate there too; the `tf-w3` arms are the causal control.
 - **The machine is per-host, not per-hour.** The same T4/torch did 0.0170 s/step
   at 10:38 and 0.3551 s/step at 09:00, both alone. A slow run is a bad host:
   absolute bpc from it is void, and an in-session comparison needs the per-arm
