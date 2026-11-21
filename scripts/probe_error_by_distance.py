@@ -19,11 +19,15 @@ different things:
     not horizon at all -- it is per-token capacity / interaction, and read work
     is the wrong spend.
 
-A second, independent axis: how much context is actually available at that
-position, measured as the length of the longest suffix of the prefix that has
-occurred before (0 = the 1-gram is new, k = the last k bytes were seen earlier).
-Positions with a long available match are exactly where an induction-style read
-pays; bucket drift along this axis says which model exploits repetition better.
+A second axis: INDUCTION SUPPORT. If the last 3 bytes also occurred earlier,
+the byte that followed that earlier occurrence is a copy candidate -- exactly
+what an induction head computes. Positions where that guess is right and FAR
+away are reachable only by exact long-range copying, so the gap there is the
+part of the deficit that read horizon can explain.
+
+(A "longest seen suffix" axis was tried first and thrown away: 95% of enwik8
+positions have some long match, so it put four fifths of the corpus in one
+bucket and separated nothing.)
 
 Usage (CPU is fine, ~20k positions x 2 models):
   PYTHONPATH=. python3 scripts/probe_error_by_distance.py ckpt_a.pt ckpt_b.pt
@@ -54,7 +58,9 @@ VALSTRIDE = int(os.environ.get("ARM_VALSTRIDE", "1"))
 MAXD = 1 << 14                      # clamp the copy-distance search window
 
 DIST_EDGES = [0, 1, 2, 4, 8, 16, 64, 256, MAXD + 1]
-CONT_EDGES = [0, 1, 2, 4, 8, 16, 32, 1 << 30]
+# induction buckets, in reporting order (not a numeric axis)
+IND_BUCKETS = ["no earlier ctx", "wrong guess d<=8", "wrong guess d>8",
+               "right d<=8", "right d 9-64", "right d>64"]
 
 
 def load_model(path: str, device):
@@ -100,39 +106,55 @@ def copy_distance(raw: np.ndarray) -> np.ndarray:
     return out
 
 
-def context_availability(raw: np.ndarray) -> np.ndarray:
-    """Longest k such that the k bytes ending at p-1 occurred as a contiguous
-    block somewhere strictly earlier. 0 = the immediately preceding byte is
-    itself new (nothing at all to copy from).
+def induction_support(raw: np.ndarray, k: int = 3):
+    """The induction test, computed causally: if the last k bytes before the
+    target also occurred earlier, what followed that earlier occurrence is a
+    candidate answer. Returns (bucket, distance, guess_is_right).
 
-    Implemented with an incremental rolling hash per k (h_k = h_{k-1} * 256 +
-    byte) rather than slicing: slicing a numpy array per position allocates
-    ~n*k objects and dominates the runtime otherwise. Hashes are exact integers,
-    and collisions can only make the result pessimistic by a hair (they would
-    claim an earlier occurrence that is not one), so the bucket labels stay
-    honest: this is a bucketing feature, not a model input.
+    This is the computation an induction head performs (match the context, copy
+    what followed), and it is available to any model that can attend exactly to
+    where that context occurred. So the gap on the "right, far" buckets is the
+    part of the deficit that exact long-range access can explain -- which is why
+    this is a better second axis than "longest seen suffix" (which saturates:
+    95% of enwik8 positions have SOME long match, so it separates nothing).
+
+    Buckets: no earlier occurrence of the context / guess wrong (near, far) /
+    guess right at distance <=8, 9-64, >64.
     """
     n = raw.shape[0]
+    nb = len(IND_BUCKETS)
     out = np.zeros(n, dtype=np.int8)
-    kmax = 6
-    seen = [dict() for _ in range(kmax + 1)]
-    prev = [0] * (kmax + 1)
-    get = [d.get for d in seen]
+    dist = np.zeros(n, dtype=np.int32)
+    right = np.zeros(n, dtype=bool)
+    seen = {}
+    get = seen.get
+    h = 0
+    mask = (1 << 64) - 1
+    pow256 = 256 ** (k - 1)
+    # rolling integer hash of the k bytes ending at p-1
     for p in range(1, n):
         b = int(raw[p - 1])
-        best = 0
-        cur = [0] * (kmax + 1)
-        cur[1] = b
-        for k in range(2, kmax + 1):
-            cur[k] = prev[k - 1] * 256 + b
-        for k in range(1, min(kmax, p) + 1):
-            h = cur[k]
-            if get[k](h, -1) >= 0:
-                best = k
-            seen[k][h] = p
-        prev = cur
-        out[p] = best
-    return out
+        if p - 1 >= k:
+            h = ((h * 256 + b) - int(raw[p - 1 - k]) * pow256 * 256) & mask
+        else:
+            h = (h * 256 + b) & mask
+        if p - 1 >= k - 1:                       # a full k-gram exists
+            e = get(h, -1)                       # earlier occurrence END index
+            if e >= 0 and e + 1 < p:             # its continuation is causal
+                c = e + 1                        # the byte that followed it
+                d = p - c
+                ok = int(raw[c]) == int(raw[p])
+                dist[p] = d if d <= MAXD else MAXD
+                right[p] = ok
+                if ok:
+                    out[p] = 3 if d <= 8 else (4 if d <= 64 else 5)
+                else:
+                    out[p] = 1 if d <= 8 else 2
+            # record AFTER the lookup, and only full k-grams: storing the
+            # 1- and 2-byte prefix hashes of the first positions would let a
+            # short gram collide with a full one
+            seen[h] = p - 1
+    return out, dist, right
 
 
 def bucket(values: np.ndarray, edges: list) -> np.ndarray:
@@ -187,10 +209,12 @@ def main() -> None:
     dist = copy_distance(pref)[tgt_idx]
     print(f"copy distance done ({dist.mean():.1f} mean, "
           f"{100 * (dist == 0).mean():.1f}% never-seen)", flush=True)
-    cont = context_availability(pref)[tgt_idx]
-    print(f"context availability done ({cont.mean():.2f} mean k)", flush=True)
+    ind, ind_d, ind_ok = induction_support(pref)
+    ind, ind_d, ind_ok = ind[tgt_idx], ind_d[tgt_idx], ind_ok[tgt_idx]
+    cover = float((ind_ok).mean())
+    print(f"induction done: {100 * cover:.1f}% of positions have a correct "
+          f"copy guess available", flush=True)
     db = bucket(dist, DIST_EDGES)
-    cb = bucket(cont, CONT_EDGES)
 
     rows = {}
     for path in args.ckpts:
@@ -221,18 +245,30 @@ def main() -> None:
             line += f"{(rows[base][m].mean() - rows[names[1]][m].mean()) / math.log(2):>+9.4f}"
         print(line, flush=True)
 
-    print("\n=== by CONTEXT AVAILABILITY (longest k already seen) ===")
-    print(hdr, flush=True)
-    for b in range(len(CONT_EDGES) - 1):
-        m = cb == b
+    print("\n=== by INDUCTION SUPPORT (copy the byte that followed the last "
+          "occurrence of the 3-byte context) ===")
+    print(f"{'bucket':>18}{'n':>8}" + "".join(f"{n[:18]:>20}" for n in names)
+          + (f"{'delta':>9}" if len(names) > 1 else ""), flush=True)
+    for b, name in enumerate(IND_BUCKETS):
+        m = ind == b
         if not m.any():
             continue
-        line = f"{label(CONT_EDGES, b):>10}{int(m.sum()):>8}"
+        line = f"{name:>18}{int(m.sum()):>8}"
         for n in names:
             line += f"{rows[n][m].mean() / math.log(2):>20.4f}"
         if len(names) > 1:
             line += f"{(rows[base][m].mean() - rows[names[1]][m].mean()) / math.log(2):>+9.4f}"
         print(line, flush=True)
+
+    if len(names) > 1:
+        far_ok = ind == 5
+        if far_ok.any():
+            share = far_ok.mean()
+            g = ((rows[base][far_ok].mean() - rows[names[1]][far_ok].mean())
+                 * share)
+            print(f"\n  positions reachable ONLY by exact long-range copying "
+                  f"(right, d>64): {100 * share:.1f}% of positions, "
+                  f"{g / math.log(2):+.4f} bpc of the gap", flush=True)
 
     if len(names) > 1:
         # a single decomposition number: what fraction of the total gap would
@@ -258,9 +294,11 @@ def main() -> None:
             json.dump({"positions": n_pos, "windows": len(starts),
                        "names": names,
                        "bpc": {n: float(rows[n].mean() / math.log(2)) for n in names},
-                       "dist_edges": DIST_EDGES, "cont_edges": CONT_EDGES,
+                       "dist_edges": DIST_EDGES,
                        "dist_hist": np.bincount(db, minlength=len(DIST_EDGES) - 1).tolist(),
-                       "cont_hist": np.bincount(cb, minlength=len(CONT_EDGES) - 1).tolist()},
+                       "ind_buckets": IND_BUCKETS,
+                       "ind_hist": np.bincount(ind, minlength=len(IND_BUCKETS)).tolist(),
+                       "ind_coverage": cover},
                       f, indent=1)
         print("WROTE", out, flush=True)
 
