@@ -164,6 +164,31 @@ def main() -> None:
         line = "  gate:  " + "  ".join(f"{g:.2f}:{b:.3f}" for g, b in rows[::5])
         print(line, flush=True)
 
+        # ---- the IMPLEMENTED channel, not the corpus one --------------------
+        # Run the model's own _suffix_copy on the same windows and evaluate the
+        # same mixture. This must reproduce the window-limited row (valid ~37%,
+        # gain ~+0.087 on x5); if it does not, the arm and the analysis are
+        # measuring different pointers and the ceiling does not apply.
+        if ck["kind"] == "iecnn":
+            r = model.regions[0]
+            if getattr(r, "sc_gate", None) is None:
+                r.suffix_copy = K
+            ip = torch.zeros(len(tgt), dtype=torch.int64)
+            iv = torch.zeros(len(tgt), dtype=torch.bool)
+            at = 0
+            for i in starts:
+                ci, vi = r._suffix_copy(val[i:i + T].unsqueeze(0))
+                ip[at:at + T] = ci[0]
+                iv[at:at + T] = vi[0]
+                at += T
+            iright = (ip == y) & iv
+            rows_i = mixture_bpc(p_true, iright, iv, GRID)
+            gi, bi = min(rows_i, key=lambda r: r[1])
+            print(f"  MODEL channel: valid {100 * iv.float().mean():.1f}%"
+                  f" | correct {100 * iright.sum() / max(int(iv.sum()), 1):.1f}%"
+                  f" | best g {gi:.2f} -> {bi:.4f} ({base - bi:+.4f})",
+                  flush=True)
+
         # ---- what an OBSERVABLE-feature gate could recover: 2-fold CV --------
         # Features a gate can actually see: the match distance and the model's
         # own uncertainty. Fit a constant gate per (distance bucket, entropy
