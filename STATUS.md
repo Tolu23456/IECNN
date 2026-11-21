@@ -100,12 +100,12 @@ transformer only needs a couple of dozen positions, and the dot model's 8-slot
 read is the handicap; if w94 is still behind tf-c, exact access is worth much
 more than 8 and no window arm will match.
 
-**Status of that batch: still unmeasured.** Two pushes were voided by the host
-gate before the first arm finished (`tf-swa-c` at **0.3562** then **0.3663**
-s/step, aborted at step 85 after ~30 s each), against 0.0185 on a healthy host.
-The gate turns a poisoned 75-minute session into a 2-minute one, but it does not
-choose the host, so the horizon question stays open and is re-queued with the
-`suffix_copy` screen (same batch, same anchor).
+**Status of that batch: still unmeasured, but the blocker is now known and
+fixed.** Two pushes were aborted at the gate (`tf-swa-c` at **0.3562** then
+**0.3663** s/step), and the cause was not the host: those kernels were pushed
+with `mark_s=0`, which made the arm run a full validation inside every step (see
+the withdrawn machine caveat above). With the guard in place the ladder is
+re-queued with the `suffix_copy` screen, same batch, same anchor, unchanged.
 
 **The channel's ceiling, measured before the screen finished** (offline, no
 training, `scripts/probe_copy_ceiling.py`): the 3-gram copy is valid at **98.1%**
@@ -252,13 +252,15 @@ adds `v(t)` to every dot's ctx: zero parameters, one add, flag-off
 bit-identical. Running at 900 s against the x5 control — the audit on that arm
 answers "does the third dot come back?" independently of machine speed.
 
-**Machine caveat (superseded by the 2026-11-21 section).** Some GPU hosts are
-throttled: the *same* `tf-swa-c` arm that does 0.0185 s/step and 398M tokens in
-900 s did 0.336 s/step and 22M tokens on the same T4 and torch build, alone.
-It is the host, not the hour — a kernel four hours later did 0.0170 s/step.
-Screens from a slow host cannot resolve anything below ~0.05 bpc and are
-recorded as screening only; `ab_small.py` prints a 30 s heartbeat so this is
-caught in a minute.
+**Machine caveat — WITHDRAWN, the "throttled hosts" were a marker bug.** The
+same `tf-swa-c` arm that does 0.0185 s/step did 0.336 s/step in sessions pushed
+with `mark_s=0`, and `MARK_S=0` made `el >= next_mark` true at **every** step:
+each session ran a 160-window validation inside every training step. Every slow
+log has `len(curve) == steps`; the one healthy log has `len(curve) == 1`, and
+the arithmetic matches exactly (tf 0.3363 − 0.0176 = 0.319 s of validation per
+step; x5 0.7623 − 0.027 = 0.735, ratio 2.3 ≈ 5 head layers vs 1). No host
+throttling is evidenced. Fixed with a `MARK_S > 0` guard; `ARM_SLOW_GATE` is
+kept as a **rate** test whose message points at per-step validation first.
 
 ## History — 2026-11-19 snapshot (numbers superseded by the table above)
 

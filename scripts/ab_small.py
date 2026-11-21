@@ -2004,13 +2004,22 @@ def run(name: str, kind: str, model, lr: float = None,
             # clock), so the host gate is off by design in that mode: it would
             # abort the only sessions that can still answer the question.
             if not TOKENS and SLOW_GATE > 0.0 and rate > SLOW_GATE:
-                print(f"VOID slow host: {rate:.4f}s/step > gate {SLOW_GATE} "
+                print(f"VOID rate: {rate:.4f}s/step > gate {SLOW_GATE} "
                       f"at step {step} -- this session cannot produce a "
-                      f"comparable bpc; stopping before the remaining arms.",
-                      flush=True)
+                      f"comparable bpc; stopping before the remaining arms. "
+                      f"Check first for per-step validation (ARM_MARK_S=0 used "
+                      f"to do this), then for a throttled host.", flush=True)
                 raise SystemExit(0)
             next_hb += 30.0
-        if el >= next_mark:
+        # MARK_S == 0 must mean "no markers", not "a marker every step".
+        # `el >= next_mark` is true at every step when next_mark stays 0, so a
+        # kernel that passed mark_s=0 ran a full 160-window validation inside
+        # every training step: the arm then trained 18-20x fewer tokens in the
+        # same wall clock and looked exactly like a throttled host. Five
+        # sessions were aborted by ARM_SLOW_GATE on that signature before the
+        # cause was found. The guard is the fix; the gate's message now points
+        # at this failure mode instead of blaming the machine.
+        if MARK_S > 0.0 and el >= next_mark:
             marks.append([int(step * nb * T), round(val_bpc(em), 4), step])
             next_mark += MARK_S
     el = time.time() - t0
