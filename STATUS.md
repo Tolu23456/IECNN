@@ -107,6 +107,17 @@ The gate turns a poisoned 75-minute session into a 2-minute one, but it does not
 choose the host, so the horizon question stays open and is re-queued with the
 `suffix_copy` screen (same batch, same anchor).
 
+**The channel's ceiling, measured before the screen finished** (offline, no
+training, `scripts/probe_copy_ceiling.py`): the 3-gram copy is valid at **98.1%**
+of positions and correct at **52.1%** of those, and mixing it into the trained
+model's own distribution at the best constant gate is worth **+0.0984 bpc** on
+x5+rr2-c (1.8383 → 1.7399 at g=0.14), **+0.1100** on rr2-c, and **+0.0664** even
+on the transformer. With a **random earlier pointer** the best gate is 0.00 and
+the gain is **0.0000** on all three, so the margin is induction, not a peaked
+prior. A per-position gate would be worth **+0.519** on x5, i.e. a constant gate
+leaves most of the channel unused — that is the follow-up, not the first test.
+Caveat: p does not adapt here, so this is an upper bound for a trained arm.
+
 **Third pre-registration, for the `suffix_copy` screen** (`tf-swa-c`,
 `tf-swa-w3-c`, `tf-swa-w8-c`, `x5+rr2-c`, `x5+rr2-c-sc3`, 360 s, one session,
 one seed). The mechanism is a single learned gate on an exact 3-gram pointer, so
