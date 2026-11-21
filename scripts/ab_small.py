@@ -134,10 +134,10 @@ def iecnn(cell="gru", lean=False, n_passes=3, n_dots=8, d_s=128, d=128,
             "data": {"seq_len": T}}
 
 
-def tf(d_model=96, n_heads=4, n_layers=3, ngram_bias=0):
+def tf(d_model=96, n_heads=4, n_layers=3, ngram_bias=0, window=0):
     return {"model": {"kind": "transformer", "d_model": d_model,
                       "n_heads": n_heads, "n_layers": n_layers,
-                      "ngram_bias": ngram_bias},
+                      "ngram_bias": ngram_bias, "window": window},
             "data": {"seq_len": T}}
 
 
@@ -988,6 +988,16 @@ ARMS = {
     # which is what made the CUDA Inductor crash disappear.
     "tf-swa-c": ("transformer", lambda: tf(96, 4, 3),
                  {"swa": 0.995, "compile": True}),
+    # --- how much of the gap is the READ HORIZON? -------------------------
+    # The baseline has always had full causal attention over T=256, while the
+    # dot model's exact read is 8 slots (plus a decayed bag). Same params, same
+    # step time (a mask change), so any bpc difference between these arms and
+    # tf-swa-c is the value of exact access beyond k positions. Diagnostic: it
+    # changes the BASELINE, not the model under test.
+    "tf-swa-w8-c": ("transformer", lambda: tf(96, 4, 3, window=8),
+                    {"swa": 0.995, "compile": True}),
+    "tf-swa-w32-c": ("transformer", lambda: tf(96, 4, 3, window=32),
+                     {"swa": 0.995, "compile": True}),
     "iecnn-n3-x5-p1-ln-decay-d128-c": ("iecnn", lambda: iecnn(
         "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
         global_read=True, spans=(8,), head_post=384, head_post_layers=5,

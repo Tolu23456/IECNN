@@ -1595,3 +1595,64 @@ def test_no_lag0_masks_the_self_slot_and_stays_finite():
     # still gets v(0), so the state is finite but not accidentally equal to
     # the unmasked model at that position
     assert (a[:, 0] - b[:, 0]).abs().max() > 0
+
+def test_transformer_window_limits_exact_access_and_default_is_identical():
+    """The baseline's `window` knob is a diagnostic: window=k must restrict
+    every query to the k most recent positions (k includes itself), and
+    window=0 must be bit-identical to the default model.
+
+    Direction of the invariant: position i reads j in [i-k+1, i], so
+    perturbing token t may only move outputs at i in [t, t+k-1]. Everything
+    at i >= t+k is required to be EXACTLY unchanged -- the mask makes the
+    weight on those slots exactly zero, so the only thing that could move a
+    later position is a real leak of the exact-access horizon.
+    """
+    from models.baselines import TransformerLanguageModel
+
+    x = torch.randint(0, 64, (2, 16))
+
+    def logits(m):
+        with torch.no_grad():
+            return m(x)["logits"]
+
+    # 1) default is full causal attention and window=0 is the same object
+    full = TransformerLanguageModel(64, 48, 4, 2)
+    zero = TransformerLanguageModel(64, 48, 4, 2, window=0)
+    zero.load_state_dict(full.state_dict())
+    full.eval(); zero.eval()
+    assert torch.equal(logits(full), logits(zero))
+
+    # 2) window=1 is position-local: perturbing t must not move any other
+    #    position, and must move t itself
+    w1 = TransformerLanguageModel(64, 48, 4, 2, window=1)
+    w1.eval()
+    a = logits(w1)
+    t = 7
+    x2 = x.clone()
+    x2[:, t] = (x2[:, t] + 5) % 64
+    with torch.no_grad():
+        b = w1(x2)["logits"]
+    others = torch.cat([a[:, :t], a[:, t + 1:]], dim=1)
+    others2 = torch.cat([b[:, :t], b[:, t + 1:]], dim=1)
+    assert torch.equal(others, others2), "window=1 leaked across positions"
+    assert (a[:, t] - b[:, t]).abs().max() > 0, "perturbation had no effect at t"
+
+    # 3) window=8: exact access reaches back 8 positions, no further
+    k = 8
+    w8 = TransformerLanguageModel(64, 48, 4, 2, window=k)
+    w8.eval()
+    a = logits(w8)
+    with torch.no_grad():
+        b = w8(x2)["logits"]
+    far = a[:, t + k:] - b[:, t + k:]
+    assert far.abs().max() == 0, f"window={k} leaked past t+k-1: {far.abs().max()}"
+    near = (a[:, t:t + k] - b[:, t:t + k]).abs().max()
+    assert near > 1e-6, "window=8 did not use the perturbed token at all"
+
+    # 4) the knob is carried through the config builder
+    from models.baselines import build_transformer_baseline
+    cfg = {"model": {"kind": "transformer", "d_model": 48, "n_heads": 4,
+                     "n_layers": 2, "window": 8},
+           "data": {"seq_len": 16}}
+    m = build_transformer_baseline(cfg, 64)
+    assert m.window == 8 and all(blk.window == 8 for blk in m.blocks)

@@ -42,7 +42,7 @@ class TransformerLanguageModel(nn.Module):
     context_length = 256
 
     def __init__(self, vocab_size: int, d: int, n_heads: int, n_layers: int,
-                 seq_len: int = 256, ngram_r: int = 0):
+                 seq_len: int = 256, ngram_r: int = 0, window: int = 0):
         super().__init__()
         self.vocab_size = vocab_size
         self.seq_len = seq_len
@@ -53,8 +53,18 @@ class TransformerLanguageModel(nn.Module):
         #  i.e. a confidently-wrong model: init loss 173 nats on the full config.)
         nn.init.normal_(self.embed.weight, mean=0.0, std=0.02)
         nn.init.normal_(self.pos.weight, mean=0.0, std=0.02)
+        # window: DIAGNOSTIC ONLY, default 0 = full causal attention.
+        #
+        # `swa` in the arm registry is stochastic weight averaging, not
+        # sliding-window attention, so the baseline has always had full access
+        # to all T=256 positions. window=k restricts every query to the k most
+        # recent positions (k includes itself). That makes the transformer
+        # read the same 8-slot horizon the dot model's window has, at the same
+        # parameter count, which is the only clean way to ask how much of the
+        # bpc gap is the READ HORIZON rather than the interaction rule.
+        self.window = int(window)
         self.blocks = nn.ModuleList([
-            _CausalBlock(d, n_heads) for _ in range(n_layers)
+            _CausalBlock(d, n_heads, window=self.window) for _ in range(n_layers)
         ])
         self.ln_f = nn.LayerNorm(d)
         self.out = nn.Parameter(torch.zeros(vocab_size, d))
@@ -93,8 +103,9 @@ class TransformerLanguageModel(nn.Module):
 class _CausalBlock(nn.Module):
     """Pre-LN attention + MLP block with a strictly causal mask."""
 
-    def __init__(self, d: int, n_heads: int):
+    def __init__(self, d: int, n_heads: int, window: int = 0):
         super().__init__()
+        self.window = int(window)
         self.ln1 = nn.LayerNorm(d)
         self.qkv = nn.Linear(d, 3 * d, bias=False)
         self.proj = nn.Linear(d, d, bias=False)
@@ -113,6 +124,12 @@ class _CausalBlock(nn.Module):
         v = v.view(B, T, self.n_heads, d // self.n_heads).transpose(1, 2)
         att = (q @ k.transpose(-2, -1)) / math.sqrt(d // self.n_heads)
         causal = torch.tril(torch.ones(T, T, dtype=torch.bool, device=h.device))
+        if 0 < self.window < T:
+            # keep j >= i - window + 1 as well as j <= i (window=1 -> self only)
+            recent = torch.triu(torch.ones(T, T, dtype=torch.bool,
+                                           device=h.device),
+                                diagonal=-(self.window - 1))
+            causal = causal & recent
         att = att.masked_fill(~causal[None, None], float("-inf"))
         att = F.softmax(att, dim=-1)
         h = h + self.proj((att @ v).transpose(1, 2).reshape(B, T, d))
@@ -137,4 +154,5 @@ def build_transformer_baseline(config: dict, vocab_size: int):
         n_layers=int(m.get("n_layers", 4)),
         seq_len=int(config.get("data", {}).get("seq_len", 256)),
         ngram_r=int(m.get("ngram_bias", 0)),
+        window=int(m.get("window", 0)),
     )
