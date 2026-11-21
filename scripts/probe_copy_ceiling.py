@@ -133,6 +133,15 @@ def main() -> None:
         base = float(-torch.log2(p_true).mean())
         rows = mixture_bpc(p_true, right, vv, GRID)
         gbest, bbest = min(rows, key=lambda r: r[1])
+        # the IMPLEMENTATION only sees matches inside its T-token window, while
+        # this probe searches the whole slice. Restrict to d < T and re-fit, or
+        # the ceiling is an over-estimate of what the arm can actually use.
+        dwin = torch.from_numpy(ind_d) < T
+        vw = vv & dwin
+        rows_w = mixture_bpc(p_true, right, vw, GRID)
+        gw, bw = min(rows_w, key=lambda r: r[1])
+        print(f"  window-limited (d < {T}): valid {100 * vw.float().mean():.1f}%"
+              f" | best g {gw:.2f} -> {bw:.4f} ({base - bw:+.4f})", flush=True)
         oracle = float(-torch.log2(torch.where(right, torch.ones_like(p_true),
                                                p_true).clamp_min(1e-12)).mean())
         # the same mixture with a random earlier pointer: the false-positive price
