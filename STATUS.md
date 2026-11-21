@@ -43,8 +43,9 @@ not charge a dot for — it is the only route for the current token into the cel
   single dot is 3.05 — 1.22 bpc *worse* than the mixture. Controls: uniform
   weights cost only +0.26 (the head is smooth, so the ablation is not
   fragility), a soft drop of dot 0 to the training floor still costs +4.29
-  (not the exact zero), permuting dot identity costs +0.89, and time-shuffling
-  the weights +0.36. So dot 0 is the **input path**, dots 1–2 read ~2 and ~2.7
+  (not the exact zero), permuting dot identity costs +1.27 with a fixed
+  permutation (the first pass said +0.89 because it re-drew the permutation
+  every forward, which partly cancels), and time-shuffling the weights +0.36. So dot 0 is the **input path**, dots 1–2 read ~2 and ~2.7
   back, and the three are complementary. The target is to make the input path
   free and force the freed dots apart — **not** to delete dots.
 - **Generation, n=8.** Both models peak at T=0.70 for a 0.875-nat target. At
