@@ -189,6 +189,56 @@ def main() -> None:
                   f" | best g {gi:.2f} -> {bi:.4f} ({base - bi:+.4f})",
                   flush=True)
 
+            # ---- is a distance-conditioned gate worth building at all? ------
+            # The corpus feature-gate number used the corpus pointers and the
+            # whole-slice distance. Price the SAME design against the channel
+            # the arm actually runs: only in-window matches, in-window distance.
+            # If this is within noise of the scalar, the scalar captures the
+            # channel and the follow-up is not worth a build.
+            dist = torch.zeros(len(tgt), dtype=torch.float32)
+            at = 0
+            for i in starts:
+                w = raw[i:i + T]
+                seen = {}
+                for p_ in range(1, T):
+                    if p_ >= K:
+                        key = w[p_ - K:p_].tobytes()
+                        e = seen.get(key, -1)
+                        if e >= 0 and e + 1 < p_:
+                            # recency of the SOURCE byte, in tokens back
+                            dist[at + p_] = p_ - (e + 1)
+                        seen[key] = p_ - 1
+                at += T
+            dbin = torch.bucketize(dist, torch.tensor([4.0, 16.0, 65.0]))
+            H = -(p * p.clamp_min(1e-12).log()).sum(-1)
+            q = torch.quantile(H, torch.tensor([1 / 3, 2 / 3]))
+            ebin = torch.bucketize(H, q)
+            grp_i = dbin * 3 + ebin
+            perm = torch.randperm(len(p_true),
+                                  generator=torch.Generator().manual_seed(0))
+            for name, gg in (("dist only", dbin), ("dist x ent", grp_i)):
+                gate = torch.zeros_like(p_true)
+                for fit_idx, ev_idx in (
+                        (perm[: len(perm) // 2], perm[len(perm) // 2:]),
+                        (perm[len(perm) // 2:], perm[: len(perm) // 2])):
+                    fit = torch.zeros(len(p_true), dtype=torch.bool)
+                    fit[fit_idx] = True
+                    for gidx in torch.unique(gg):
+                        m_f = (gg == gidx) & fit
+                        m_e = (gg == gidx) & ~fit
+                        if not bool(m_f.any()) or not bool(m_e.any()):
+                            continue
+                        gsel, _ = min(mixture_bpc(p_true[m_f], iright[m_f],
+                                                  iv[m_f], GRID),
+                                      key=lambda r: r[1])
+                        gate[m_e] = gsel
+                gv = gate * iv.float()
+                cv = float(-torch.log2(((1 - gv) * p_true
+                                        + gv * iright.float()).clamp_min(1e-12)
+                                       ).mean())
+                print(f"  MODEL channel, 2-fold gate ({name}): {cv:.4f} bpc "
+                      f"({base - cv:+.4f})", flush=True)
+
         # ---- what an OBSERVABLE-feature gate could recover: 2-fold CV --------
         # Features a gate can actually see: the match distance and the model's
         # own uncertainty. Fit a constant gate per (distance bucket, entropy
