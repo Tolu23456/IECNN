@@ -1631,14 +1631,20 @@ ARMS = {
     # post-MLP, each doubling is mostly a doubling of the whole model -- so
     # w1024 must beat x5 by a lot to pay, and the screening evidence (x5 -> x7
     # at w512 = 0.0075) says the curve is already flat.
-    "iecnn-n3-x5w768-p1-ln-decay-d128-w768-rr2-c": ("iecnn", lambda: iecnn(
+    # Both arms keep the head's COMPUTE roughly at x5's (+16%) and buy width by
+    # spending depth, because that is the trade the measurements support:
+    # w256 -> w512 was worth +0.074 while x5 -> x7 at w512 was worth only
+    # 0.0075. At 2*d*width MACs per block, 3 layers at 1024 is 786k and 4 at
+    # 768 is also 786k, against x5's 655k -- i.e. doubling the width for +20%,
+    # where simply keeping 5 layers at 1024 would be 1.31M (+100%).
+    "iecnn-n3-x5w768l4-p1-ln-decay-d128-w768-rr2-c": ("iecnn", lambda: iecnn(
         "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
-        global_read=True, spans=(8,), head_post=768, head_post_layers=5,
+        global_read=True, spans=(8,), head_post=768, head_post_layers=4,
         read_ln=True, head_ln=True, global_decay=True, reread=2),
         {"lr": 2e-3, "swa": 0.99, "compile": True}),
-    "iecnn-n3-x5w1024-p1-ln-decay-d128-w1024-rr2-c": ("iecnn", lambda: iecnn(
+    "iecnn-n3-x5w1024l3-p1-ln-decay-d128-w1024-rr2-c": ("iecnn", lambda: iecnn(
         "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
-        global_read=True, spans=(8,), head_post=1024, head_post_layers=5,
+        global_read=True, spans=(8,), head_post=1024, head_post_layers=3,
         read_ln=True, head_ln=True, global_decay=True, reread=2),
         {"lr": 2e-3, "swa": 0.99, "compile": True}),
     "iecnn-n3-x5-p1-ln-decay-d128-w256-rr2-c": ("iecnn", lambda: iecnn(

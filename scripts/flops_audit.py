@@ -54,15 +54,22 @@ CONFIGS = {
                    V=256, cell="lug", lean=True, nologit=True,
                    reread=2, global_read=True, head_post=512,
                    head_post_layers=5),
-    # the staged width arms, to price the second doubling BEFORE paying for it
-    "x5w768-rr2": dict(kind="ie", d=128, d_s=96, d_q=16, d_v=32, N=3, P=1, w=8,
-                       V=256, cell="lug", lean=True, nologit=True,
-                       reread=2, global_read=True, head_post=768,
-                       head_post_layers=5),
-    "x5w1024-rr2": dict(kind="ie", d=128, d_s=96, d_q=16, d_v=32, N=3, P=1, w=8,
-                        V=256, cell="lug", lean=True, nologit=True,
-                        reread=2, global_read=True, head_post=1024,
-                        head_post_layers=5),
+    # the staged width arms, to price the second doubling BEFORE paying for it.
+    # Both trade depth for width at ~x5's compute: the width result (w256->w512
+    # = 0.074) is much stronger than the depth result (x5->x7 = 0.0075).
+    "x5w768l4-rr2": dict(kind="ie", d=128, d_s=96, d_q=16, d_v=32, N=3, P=1, w=8,
+                         V=256, cell="lug", lean=True, nologit=True,
+                         reread=2, global_read=True, head_post=768,
+                         head_post_layers=4),
+    "x5w1024l3-rr2": dict(kind="ie", d=128, d_s=96, d_q=16, d_v=32, N=3, P=1, w=8,
+                          V=256, cell="lug", lean=True, nologit=True,
+                          reread=2, global_read=True, head_post=1024,
+                          head_post_layers=3),
+    # what NOT to buy: same width, keeping the depth
+    "x5w1024l5-rr2": dict(kind="ie", d=128, d_s=96, d_q=16, d_v=32, N=3, P=1, w=8,
+                          V=256, cell="lug", lean=True, nologit=True,
+                          reread=2, global_read=True, head_post=1024,
+                          head_post_layers=5),
     # the read alternative: a 16-slot window instead of 8, at x5 width
     "x5-w16-rr2": dict(kind="ie", d=128, d_s=96, d_q=16, d_v=32, N=3, P=1, w=16,
                        V=256, cell="lug", lean=True, nologit=True,
