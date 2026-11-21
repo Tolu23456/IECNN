@@ -49,10 +49,19 @@ and one of them is parked on the input.
   for tf = abandon).
 
 **Now:** `tf-swa-w8-c` / `tf-swa-w32-c` vs `tf-swa-c` price the exact-access
-horizon on the healthy pool — if a window-8 transformer lands near the dot
-model, the gap is read horizon; if it barely moves, the gap is the interaction
-rule. That is the last cheap attribution before deciding whether to spend on
-the population or on the read.
+horizon on the healthy pool. Pre-registered reading (written before the run
+finished, so the result cannot be retro-fitted):
+
+| tf-c → tf-w8 change | reading |
+|---|---|
+| −0.00 to −0.02 | horizon is NOT the gap; the dot model's deficit is in the interaction rule / state, and read-horizon work is closed |
+| −0.02 to −0.10 | the gap is partly horizon; compare its size with the dot gap (0.046 at 900 s) |
+| worse than −0.10 | an 8-slot transformer is much worse than the 8-slot dot read, so the dots' read is not the problem either and the deficit is elsewhere |
+
+The same session runs `x5+rr2-c`, so all three tf points and the dot point share
+one machine. The population audit (`scripts/probe_population.py`) then answers
+the other half — whether three dots are one dot's worth of function — on the 3 h
+checkpoint, with no retraining.
 
 ## History — 2026-11-20: the constraint was the HEAD, and the gap halved
 
