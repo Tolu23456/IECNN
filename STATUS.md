@@ -77,6 +77,13 @@ transformer only needs a couple of dozen positions, and the dot model's 8-slot
 read is the handicap; if w94 is still behind tf-c, exact access is worth much
 more than 8 and no window arm will match.
 
+One thing this does **not** measure: the dot model's horizon is not really 8.
+Its window read is 8 exact slots, but the global decayed read is a prefix
+attention with `g_decay` initialised at sigmoid(4.6) ≈ 0.99 and learned, i.e. a
+fuzzy memory of ~100+ positions. So these arms price *exact* access beyond 7
+positions; a large tf-w3 penalty would mean exact long-range access matters,
+not that the dot model can only see 8 tokens.
+
 The same session runs `x5+rr2-c`, so all three tf points and the dot point share
 one machine. The population audit (`scripts/probe_population.py`) then answers
 the other half — whether three dots are one dot's worth of function — on the 3 h
