@@ -107,6 +107,34 @@ with `mark_s=0`, which made the arm run a full validation inside every step (see
 the withdrawn machine caveat above). With the guard in place the ladder is
 re-queued with the `suffix_copy` screen, same batch, same anchor, unchanged.
 
+## suffix_copy pays at 360 s, and the dot family now beats the transformer
+
+One healthy session, 360 s/arm, one seed, `data_fp a23bcd55c7/afc1109404`:
+
+| arm | params | tokens | s/step | bpc | bpc@eqtok |
+|---|---|---|---|---|---|
+| `tf-swa-c` | 408,288 | 154.06M | 0.0192 | **1.8810** | 2.0209 |
+| `tf-swa-w3-c` (horizon 7) | 408,288 | 157.89M | 0.0187 | 2.0787 | 2.1554 |
+| `tf-swa-w8-c` (horizon 22) | 408,288 | 157.28M | 0.0188 | 2.0041 | 2.0859 |
+| `x5+rr2-c` | 835,376 | 107.01M | 0.0276 | 1.8994 | 1.9635 |
+| **`x5+rr2-c-sc3`** | 835,377 | 101.90M | 0.0290 | **1.8339** | **1.8907** |
+
+`suffix_copy` buys **−0.0655** at equal wall clock and **−0.0728** at equal
+tokens for **+5.1%** per-step compute, and puts the dot family **0.047 ahead of
+the transformer** at equal wall clock. The pointer audit of the sc3 arm is
+identical to its control (dots still at `dist_back` [4.0, 1.99, 0.0]), so the
+gain is a new path, not a rescue of the collapsed dot.
+
+Two pre-registered gates still stand between this and a claim: a **900 s
+confirm with seed-1 twins** in one session (`iecnn-sc9-gpu`), and the
+**scrambled-pointer audit** (`iecnn-scramble-check`). If `scrambled ≈ true`, the
+margin is a mixture trick and the mechanism is closed regardless of the bpc.
+
+The horizon ladder also landed: truncating the transformer to a 7- or 22-token
+horizon costs **+0.198 / +0.123**, far more than the dot model's whole gap, so
+exact long-range access is where the value is — the premise the copy channel
+exploits.
+
 **The channel's ceiling, measured before the screen finished** (offline, no
 training, `scripts/probe_copy_ceiling.py`): the 3-gram copy is valid at **98.1%**
 of positions and correct at **52.1%** of those, and mixing it into the trained
