@@ -197,6 +197,7 @@ def main() -> None:
     # like drop-one, the weights are information (a). If it stays at the
     # committee, the weights are only a mixture and the ablation is (b).
     orig_hidden = reg._pass_hidden
+    perm = torch.randperm(n)          # fixed, so the control is reproducible
 
     def patched(mode):
         def fn(gam, trust_term, trust, mask, tau, floor):
@@ -206,7 +207,7 @@ def main() -> None:
             if mode == "shuffle_t":
                 return tr, w.flip(1)
             if mode == "shuffle_n":
-                return tr, w[..., torch.randperm(n, device=w.device)]
+                return tr, w[..., perm.to(w.device)]
             if mode.startswith("floor"):
                 k = int(mode[-1])
                 keep = torch.ones_like(w)

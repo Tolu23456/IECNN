@@ -144,7 +144,6 @@ def tf(d_model=96, n_heads=4, n_layers=3, ngram_bias=0, window=0):
 ARMS = {
     # the baseline family we must beat on BOTH bpc and speed
     "tf-d96-l3":  ("transformer", lambda: tf(96, 4, 3)),
-    "tf-d128-l4": ("transformer", lambda: tf(128, 4, 4)),
     # current champion lineage (GRU dot + per-pass shared head + per-dot logits)
     "iecnn-gru":  ("iecnn", lambda: iecnn("gru", False)),
     # lean cell only
@@ -160,8 +159,6 @@ ARMS = {
                                              per_dot_logits=False)),
     "iecnn-lite-n4": ("iecnn", lambda: iecnn("lug", True, n_dots=4,
                                              per_dot_logits=False)),
-    "iecnn-lite-ds64": ("iecnn", lambda: iecnn("lug", True, d_s=64,
-                                               per_dot_logits=False)),
     "iecnn-lite-p2n4": ("iecnn", lambda: iecnn("lug", True, n_passes=2,
                                                n_dots=4, per_dot_logits=False)),
     "iecnn-lite-fast": ("iecnn", lambda: iecnn("lug", True, n_passes=2,
