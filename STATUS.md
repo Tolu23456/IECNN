@@ -54,8 +54,11 @@ not charge a dot for — it is the only route for the current token into the cel
 - **The machine is per-host, not per-hour.** The same T4/torch did 0.0170 s/step
   at 10:38 and 0.3551 s/step at 09:00, both alone. A slow run is a bad host:
   absolute bpc from it is void, and an in-session comparison needs the per-arm
-  `s/step` to agree within ~10%. The 30 s heartbeat is the gate (>0.05 s/step
-  for tf = abandon).
+  `s/step` to agree within ~10%. The heartbeat prints `s/step` from the first
+  minute with a >0.05 s/step abandon threshold for tf — but on this CLI the log
+  stream appears only after the kernel ends, so it is a **post-hoc** check, not
+  a live abort. A slow host is recognisable in the first line of output once
+  the run is over (or via `kaggle kernels output`), and the run is then void.
 
 **Now:** `tf-swa-w3/w8/w32-c` vs `tf-swa-c` price the exact-access horizon on
 the healthy pool. The window is **per layer**, so at 3 layers the horizons are
