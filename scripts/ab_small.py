@@ -1596,6 +1596,26 @@ ARMS = {
         read_ln=True, head_ln=True, global_decay=True, reread=2,
         input_res=True),
         {"lr": 2e-3, "swa": 0.99, "compile": True}),
+    # --- the READ horizon, which costs almost nothing --------------------
+    # flops_audit (scripts/flops_audit.py) says the window read is 0.14% of
+    # x5+rr2's MACs/token (1.2k of 830k) and the shared key/value projections
+    # 0.7%, while the post-MLP head is 79%. Doubling the exact window 8 -> 16
+    # is +0.14% compute and ZERO parameters; 8 -> 32 is +0.4%. So unlike the
+    # head, the read horizon is not a budget decision -- if the tf-w3 arm says
+    # exact access beyond 7 positions is worth something, these are the cheap
+    # arms that buy it. Staged: launched only if the horizon batch says the
+    # read is the gap, because `spans` also changes what the dots read (the
+    # distance-0 dot's input path may stop being the only route to x(t)).
+    "iecnn-n3-x5-w16-p1-ln-decay-d128-w512-rr2-c": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(16,), head_post=512, head_post_layers=5,
+        read_ln=True, head_ln=True, global_decay=True, reread=2),
+        {"lr": 2e-3, "swa": 0.99, "compile": True}),
+    "iecnn-n3-x5-w32-p1-ln-decay-d128-w512-rr2-c": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(32,), head_post=512, head_post_layers=5,
+        read_ln=True, head_ln=True, global_decay=True, reread=2),
+        {"lr": 2e-3, "swa": 0.99, "compile": True}),
     # --- the second doubling of the one thing that paid ----------------
     # w256 -> w512 cost +0.074 bpc, so width is load-bearing at 512 and the
     # next question is whether it is still load-bearing ABOVE 512. Each arm
@@ -1605,6 +1625,12 @@ ARMS = {
     # The x5 precedent is that +31% step still paid 0.046, so a ~25% step for
     # w768 is inside the range where capacity has won before. Not launched
     # until the horizon arms say the read is not the binding constraint.
+    #
+    # PRICE IT FIRST (flops_audit): x5 is already 1.93x the tf anchor's
+    # MACs/token, w768 is 2.69x and w1024 is 3.45x. Since 79% of that is the
+    # post-MLP, each doubling is mostly a doubling of the whole model -- so
+    # w1024 must beat x5 by a lot to pay, and the screening evidence (x5 -> x7
+    # at w512 = 0.0075) says the curve is already flat.
     "iecnn-n3-x5w768-p1-ln-decay-d128-w768-rr2-c": ("iecnn", lambda: iecnn(
         "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
         global_read=True, spans=(8,), head_post=768, head_post_layers=5,
