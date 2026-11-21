@@ -100,6 +100,22 @@ transformer only needs a couple of dozen positions, and the dot model's 8-slot
 read is the handicap; if w94 is still behind tf-c, exact access is worth much
 more than 8 and no window arm will match.
 
+**Second pre-registration, for the CPU probe now running on the 900 s
+checkpoints** (`iecnn-gap-s900`, dataset `iecnn-ckpt-s900`). The 3 h result was
+measured with a 3-layer head; the 900 s frontier arm has 5, and its gap is four
+times smaller (0.046 vs 0.115). So the induction bucket table can separate
+"capacity buys induction" from "the band is the read":
+
+| what the pairwise table shows | reading |
+|---|---|
+| the 9–64 band still carries most of the **tf − x5** gap, and most of the **rr2 → x5** gain is outside it | head capacity does NOT reach the band. Stop buying width/depth for this; the band needs a different read (and that read is the next mechanism to design, not another arm in this family) |
+| most of **rr2 → x5**'s gain falls in the 9–64 band | capacity does buy induction; further capacity is justified, and the width-by-depth arms are the right purchase |
+| the band's share shrinks with the head for both reasons (band empties AND the rest shrinks) | mixed; report the two shares separately, no single-number claim |
+
+Either way the result is a **causal check on the copy-distance story**, because
+x5 and rr2 differ only in head depth, not in what the dots read. That is the
+cleanest in-family control available without retraining.
+
 The compute map (`scripts/flops_audit.py`) says why this is the right question and
 not another capacity purchase: `x5+rr2-c` is **1.93×** the tf anchor's MACs/token
 and **79% of it is the post-MLP head**, while the window read is **0.14%** and the
