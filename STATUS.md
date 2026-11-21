@@ -114,7 +114,10 @@ model's own distribution at the best constant gate is worth **+0.0874 bpc** on
 x5+rr2-c inside the model's own 256-token window (1.8383 → 1.7499 at g=0.18;
 unwindowed it would be +0.0984, and only **36.7%** of positions have their most
 recent 3-gram match inside 256), **+0.0949** on rr2-c, and **+0.0424** even on
-the transformer. With a **random earlier pointer** the best gate is 0.00 and
+the transformer. The **implemented** channel (the model's own `_suffix_copy` on
+the same windows) is lower: 23.3% valid but 63.0% right where valid, ceiling
+**+0.0515** on x5 / **+0.0575** on rr2-c — the corpus row credits matches that
+sit before the window's start, which the arm cannot see. With a **random earlier pointer** the best gate is 0.00 and
 the gain is **0.0000** on all three, so the margin is induction, not a peaked
 prior. A per-position gate would be worth **+0.519** on x5, i.e. a constant gate
 leaves most of the channel unused — that is the follow-up, not the first test.
