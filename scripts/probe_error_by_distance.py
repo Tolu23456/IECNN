@@ -260,6 +260,29 @@ def main() -> None:
             line += f"{(rows[base][m].mean() - rows[names[1]][m].mean()) / math.log(2):>+9.4f}"
         print(line, flush=True)
 
+    if len(names) > 2:
+        # pairwise decomposition on the induction axis. With three models the
+        # one delta column cannot say whether extra head capacity (rr2 -> x5)
+        # ate the band that separates both of them from tf, which is the
+        # question that decides whether more head is worth buying.
+        print("\n=== PAIRWISE: induction buckets, gap (A - B) and share of it ===",
+              flush=True)
+        for i in range(len(names)):
+            for j in range(i + 1, len(names)):
+                a, bb = names[i], names[j]
+                tot = rows[a].mean() - rows[bb].mean()
+                print(f"\n  {a} - {bb}: total {tot / math.log(2):+.4f} bpc",
+                      flush=True)
+                for b, bname in enumerate(IND_BUCKETS):
+                    m = ind == b
+                    if not m.any():
+                        continue
+                    g = ((rows[a][m].mean() - rows[bb][m].mean()) * m.mean())
+                    print(f"    {bname:<18}{int(m.sum()):>7}"
+                          f"{100 * m.mean():>7.1f}%"
+                          f"{g / math.log(2):>+9.4f}"
+                          f"{100 * g / tot:>7.0f}%", flush=True)
+
     if len(names) > 1:
         far_ok = ind == 5
         if far_ok.any():
