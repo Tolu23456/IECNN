@@ -1621,6 +1621,16 @@ ARMS = {
         global_read=True, spans=(32,), head_post=512, head_post_layers=5,
         read_ln=True, head_ln=True, global_decay=True, reread=2),
         {"lr": 2e-3, "swa": 0.99, "compile": True}),
+    # w64 covers the WHOLE 9-64 band, which is where 55% of the 3 h gap lives
+    # (induction-right at d 9-64: dot 1.118 bpc vs tf 0.509). MAC cost is +1%,
+    # but the gather materialises [B,T,64,48] per forward (~100 MB at B32 T256),
+    # so this is the arm most likely to pay in bpc and cost in step time -- the
+    # only honest way to price it is to run it beside x5 in one session.
+    "iecnn-n3-x5-w64-p1-ln-decay-d128-w512-rr2-c": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(64,), head_post=512, head_post_layers=5,
+        read_ln=True, head_ln=True, global_decay=True, reread=2),
+        {"lr": 2e-3, "swa": 0.99, "compile": True}),
     # --- where is the depth optimum at fixed width? ----------------------
     # rr2-c (head_post 512, 3 layers) and x5+rr2-c (same width, 5 layers) are
     # already a 2-point curve at fixed width: 1.8847 @357.8M tok and 1.8383
