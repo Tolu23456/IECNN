@@ -116,6 +116,10 @@ on the transformer. With a **random earlier pointer** the best gate is 0.00 and
 the gain is **0.0000** on all three, so the margin is induction, not a peaked
 prior. A per-position gate would be worth **+0.519** on x5, i.e. a constant gate
 leaves most of the channel unused — that is the follow-up, not the first test.
+A gate fitted only on **observable** features (match distance × model entropy,
+2-fold out-of-fold) is worth **+0.1235**, already above the constant gate's
+0.098, so the follow-up has a concrete form. The rest of the oracle's 0.52 is
+only reachable by knowing "is this guess right", which is the target itself.
 Caveat: p does not adapt here, so this is an upper bound for a trained arm.
 
 **Third pre-registration, for the `suffix_copy` screen** (`tf-swa-c`,
