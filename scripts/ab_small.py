@@ -1812,6 +1812,11 @@ def run(name: str, kind: str, model, lr: float = None,
     step = 0
     marks = []
     next_mark = MARK_S
+    # heartbeat: a slow machine (contended T4) otherwise looks identical to a
+    # normal one for a full arm, because the s/step only appears in RESULT at
+    # the end. This prints the live rate so a bad machine is caught in a
+    # minute instead of fifteen. Diagnostic only: no effect on training.
+    next_hb = 30.0
     while time.time() - t0 < BUDGET:
         x, y = next(gen)
         warm = min(1.0, (step + 1) / 100.0)
@@ -1847,6 +1852,10 @@ def run(name: str, kind: str, model, lr: float = None,
                     for e, p_ in zip(ema, model.parameters()):
                         e.mul_(swa).add_(p_.detach(), alpha=1.0 - swa)
         el = time.time() - t0
+        if el >= next_hb:
+            print(f"HB {name[:44]} step {step} {el / max(step, 1):.4f}s/step "
+                  f"{step * nb * T / 1e6:.1f}M tok", flush=True)
+            next_hb += 30.0
         if el >= next_mark:
             marks.append([int(step * nb * T), round(val_bpc(em), 4), step])
             next_mark += MARK_S
