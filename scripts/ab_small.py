@@ -2170,7 +2170,10 @@ def main():
             print(f"ARM FAIL {name:<26}{type(e).__name__}: {e}", flush=True)
 
     common_tok = min(r["tokens"] for r in rows)
-    mode = (f"equal tokens {TOKENS/1e6:.1f}M/arm" if TOKENS
+    # "token budget", not "equal tokens": a hard cap can truncate arms, and the
+    # honest comparison point in that case is the COMMON token count, printed
+    # beside it. The wall-clock mode really is equal by construction.
+    mode = (f"token budget {TOKENS/1e6:.1f}M/arm" if TOKENS
             else f"equal wall-clock {BUDGET:.0f}s/arm")
     print(f"\n=== SUMMARY ({mode}, common {common_tok/1e6:.2f}M tokens) ===",
           flush=True)
