@@ -48,15 +48,22 @@ and one of them is parked on the input.
   `s/step` to agree within ~10%. The 30 s heartbeat is the gate (>0.05 s/step
   for tf = abandon).
 
-**Now:** `tf-swa-w8-c` / `tf-swa-w32-c` vs `tf-swa-c` price the exact-access
-horizon on the healthy pool. Pre-registered reading (written before the run
+**Now:** `tf-swa-w3/w8/w32-c` vs `tf-swa-c` price the exact-access horizon on
+the healthy pool. The window is **per layer**, so at 3 layers the horizons are
+**7 / 22 / 94** — `w3` is the arm matched to the dot model's 8-slot read, and
+the other two map the curve. Pre-registered reading (written before the run
 finished, so the result cannot be retro-fitted):
 
-| tf-c → tf-w8 change | reading |
+| tf-c → tf-w3 change (horizon 7 vs 256) | reading |
 |---|---|
 | −0.00 to −0.02 | horizon is NOT the gap; the dot model's deficit is in the interaction rule / state, and read-horizon work is closed |
 | −0.02 to −0.10 | the gap is partly horizon; compare its size with the dot gap (0.046 at 900 s) |
-| worse than −0.10 | an 8-slot transformer is much worse than the 8-slot dot read, so the dots' read is not the problem either and the deficit is elsewhere |
+| worse than −0.10 | a 7-slot transformer is much worse than the 8-slot dot read, so the dots' read is not the problem either and the deficit is elsewhere |
+
+`w8` (22) and `w32` (94) say how fast the horizon saturates: if w22 ≈ tf-c the
+transformer only needs a couple of dozen positions, and the dot model's 8-slot
+read is the handicap; if w94 is still behind tf-c, exact access is worth much
+more than 8 and no window arm will match.
 
 The same session runs `x5+rr2-c`, so all three tf points and the dot point share
 one machine. The population audit (`scripts/probe_population.py`) then answers
