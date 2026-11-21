@@ -1637,21 +1637,28 @@ def test_transformer_window_limits_exact_access_and_default_is_identical():
     assert torch.equal(others, others2), "window=1 leaked across positions"
     assert (a[:, t] - b[:, t]).abs().max() > 0, "perturbation had no effect at t"
 
-    # 3) window=8: exact access reaches back 8 positions, no further.
-    #    Perturb t2=3 so that both a settled "far" region (>= t2+k) and a
-    #    non-empty "near" region exist inside T=16.
+    # 3) the horizon is PER LAYER, so L stacked window-k blocks reach
+    #    1 + L*(k-1) positions, not k. This is the invariant that matters for
+    #    the diagnostic: a 3-layer window-8 transformer sees 22 positions, not
+    #    8, and is therefore NOT the dot model's 8-slot read.
     k, t2 = 8, 3
-    w8 = TransformerLanguageModel(64, 48, 4, 2, window=k)
-    w8.eval()
-    a = logits(w8)
+    w1 = TransformerLanguageModel(64, 48, 4, 1, window=k)   # one layer: k
+    w2 = TransformerLanguageModel(64, 48, 4, 2, window=k)   # two: 1+2(k-1)
+    w1.eval(); w2.eval()
     x3 = x.clone()
     x3[:, t2] = (x3[:, t2] + 5) % 64
-    with torch.no_grad():
-        b = w8(x3)["logits"]
-    far = a[:, t2 + k:] - b[:, t2 + k:]
-    assert far.abs().max() == 0, f"window={k} leaked past t+k-1: {far.abs().max()}"
-    near = (a[:, t2:t2 + k] - b[:, t2:t2 + k]).abs().max()
-    assert near > 1e-6, "window=8 did not use the perturbed token at all"
+    for m, layers in ((w1, 1), (w2, 2)):
+        a = logits(m)
+        with torch.no_grad():
+            b = m(x3)["logits"]
+        horizon = 1 + layers * (k - 1)                 # positions t..t+h-1
+        if t2 + horizon < a.shape[1]:                  # a far region exists
+            far = a[:, t2 + horizon:] - b[:, t2 + horizon:]
+            assert far.abs().max() == 0, (
+                f"L={layers} window={k} leaked past t+{horizon - 1}: "
+                f"{far.abs().max()}")
+        near = (a[:, t2 + 1:t2 + horizon] - b[:, t2 + 1:t2 + horizon]).abs().max()
+        assert near > 1e-6, "the window did not use the perturbed token at all"
 
     # 4) the knob is carried through the config builder
     from models.baselines import build_transformer_baseline

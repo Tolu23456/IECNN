@@ -992,8 +992,17 @@ ARMS = {
     # The baseline has always had full causal attention over T=256, while the
     # dot model's exact read is 8 slots (plus a decayed bag). Same params, same
     # step time (a mask change), so any bpc difference between these arms and
-    # tf-swa-c is the value of exact access beyond k positions. Diagnostic: it
+    # tf-swa-c is the value of exact access beyond a horizon. Diagnostic: it
     # changes the BASELINE, not the model under test.
+    #
+    # CAUTION, and the reason w3 exists: the window is PER LAYER, so a stack
+    # of L window-k blocks reaches 1 + L*(k-1) positions. At n_layers=3 that
+    # is 7 / 22 / 94 for k = 3 / 8 / 32 -- so `w8` is NOT an 8-slot reader,
+    # and `w3` is the arm that matches the dot model's 8-slot window. (The
+    # test pins the 1+L*(k-1) law; an earlier version of this arm block
+    # described w8 as an 8-slot read, which was wrong.)
+    "tf-swa-w3-c": ("transformer", lambda: tf(96, 4, 3, window=3),
+                    {"swa": 0.995, "compile": True}),
     "tf-swa-w8-c": ("transformer", lambda: tf(96, 4, 3, window=8),
                     {"swa": 0.995, "compile": True}),
     "tf-swa-w32-c": ("transformer", lambda: tf(96, 4, 3, window=32),
