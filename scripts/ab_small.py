@@ -1601,11 +1601,16 @@ ARMS = {
     # x5+rr2's MACs/token (1.2k of 830k) and the shared key/value projections
     # 0.7%, while the post-MLP head is 79%. Doubling the exact window 8 -> 16
     # is +0.14% compute and ZERO parameters; 8 -> 32 is +0.4%. So unlike the
-    # head, the read horizon is not a budget decision -- if the tf-w3 arm says
-    # exact access beyond 7 positions is worth something, these are the cheap
-    # arms that buy it. Staged: launched only if the horizon batch says the
-    # read is the gap, because `spans` also changes what the dots read (the
-    # distance-0 dot's input path may stop being the only route to x(t)).
+    # head, the read horizon is not a budget decision.
+    #
+    # And there is evidence for where to point it: probe_error_by_distance on
+    # the 3 h checkpoints puts 74% of the whole 0.115 gap in the band where the
+    # answer byte last occurred 8-63 bytes back -- just outside this window and
+    # well inside tf's 256. Bucketed: w16 covers the 8-15 band (0.033 of the
+    # gap), w32 most of 16-63 (0.053). Staged, not launched blind: `spans` also
+    # changes what the dots read, so the distance-0 input path may stop being
+    # the only route for x(t), which is a behaviour change and needs the same
+    # drop-one audit afterwards.
     "iecnn-n3-x5-w16-p1-ln-decay-d128-w512-rr2-c": ("iecnn", lambda: iecnn(
         "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
         global_read=True, spans=(16,), head_post=512, head_post_layers=5,
