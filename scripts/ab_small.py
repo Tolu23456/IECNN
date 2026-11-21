@@ -1766,10 +1766,16 @@ def pointer_audit(model) -> dict:
     q = r.dots._sel(0, r.dots.q)
     scores = torch.einsum("bfwj,nj->bfnw", wind_k, q) / math.sqrt(r.d_q)
     scores = scores.masked_fill(~valid[None, :, None, :], float("-inf"))
+    w = wind_k.shape[2]
+    # The audit must honour no_lag0, or it reports a distance-0 read the model
+    # is forbidden from making -- i.e. it would "confirm" the collapse in the
+    # very arm designed to remove it.
+    if getattr(r.dots, "no_lag0", False) and w > 1:
+        scores = scores.masked_fill(
+            torch.arange(w, device=scores.device) == w - 1, float("-inf"))
     idx = scores.argmax(-1)                                   # [B,T,N]
     distinct = torch.tensor([len(set(row.tolist()))
                              for row in idx.reshape(-1, idx.shape[-1])])
-    w = wind_k.shape[2]
     # REAL slot -> distance map, from the same offsets the read used. With
     # window_mode quad/bands the slots are not consecutive, so "w-1-idx" would
     # silently report a fictional distance for those arms.

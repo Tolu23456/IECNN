@@ -1,11 +1,60 @@
-# IECNN status — 2026-11-20
+# IECNN status — 2026-11-21
 
 One-page state of the campaign. The evidence ledger is `DECISIONS.md` (every row
 is a measured batch with its in-session transformer anchor); this is the map, not
 the evidence.
 
+## The position in one paragraph
 
-## Today (2026-11-20): the constraint was the HEAD, and the gap halved
+At 900 s on the canonical 90/5 split the transformer anchor is **1.7923** and
+the best dot arm is **1.8383** (`x5+rr2-c`), so the dot model is behind by
+**0.046** at equal wall clock and **0.023** at equal tokens. At 3 h the gap is
+0.1153. Only two mechanisms have paid for their own compute: **`reread`**
+(−0.033, two seeds) and **head capacity** (`x5`, −0.046). The dot population
+itself is now the suspicious part: three dots are doing roughly one dot's work,
+and one of them is parked on the input.
+
+## 2026-11-21 — capacity in the HEAD pays; the POPULATION is redundant
+
+| 900 s, common 272.23M tok, one session | params | s/step | bpc | bpc@eqtok |
+|---|---|---|---|---|
+| tf-swa-c | 408k | 0.0185 | **1.7923** | 1.8666 |
+| rr2-c | 571k | 0.0206 | 1.8847 | 1.9451 |
+| rr3-c | 571k | 0.0224 | 1.8769 | 1.9369 |
+| **x5+rr2-c** | 835k | 0.0271 | **1.8383** | **1.8894** |
+
+- **Head capacity (x5) moves TRAIN fit**, not just val: train 1.8677 → 1.8183,
+  and the gap to tf halves on both clocks. `x5` pays for its 31% step cost.
+  `rr3` is a null (−0.008).
+- **Width, not depth.** At 9.1M tokens, `x5`→`x7` at w512 buys 0.0075 for 131k
+  params and +5.6% step; `w512`→`w256` costs **+0.074**. Screening only.
+- **The collapsed dot is the INPUT PATH.** With `n_passes=1` the cell sees only
+  `[ctx, 0, 0, round]` and `ctx` is a softmax average of window *values*, so
+  the distance-0 dot is the only route for the current token.
+- **But `input_res` moves the collapse, it does not fix it.** Injecting `v(t)`
+  zero-param removes the distance-0 dot — and all three dots become copies of
+  the same **distance-1** reader (`distinct_per_pos` 2.97 → **1.0**,
+  `all_same` **1.0**). At `n_passes=1` "predict the previous byte" is the only
+  function all three can learn, so the population is redundant rather than
+  specialised. The distance-0 dot was not a dead specialist; it was the only
+  one with a distinct job.
+- **Generation, n=8.** Both models peak at T=0.70 for a 0.875-nat target. At
+  matched entropy the dot model is **more** varied, not less (d2 0.5900 vs
+  0.5204, ~2.2σ), so "its text only looks different because it is sharper" is
+  dead — and the blind judge still splits 11-9 for tf. Variety ≠ quality.
+- **The machine is per-host, not per-hour.** The same T4/torch did 0.0170 s/step
+  at 10:38 and 0.3551 s/step at 09:00, both alone. A slow run is a bad host:
+  absolute bpc from it is void, and an in-session comparison needs the per-arm
+  `s/step` to agree within ~10%. The 30 s heartbeat is the gate (>0.05 s/step
+  for tf = abandon).
+
+**Now:** `tf-swa-w8-c` / `tf-swa-w32-c` vs `tf-swa-c` price the exact-access
+horizon on the healthy pool — if a window-8 transformer lands near the dot
+model, the gap is read horizon; if it barely moves, the gap is the interaction
+rule. That is the last cheap attribution before deciding whether to spend on
+the population or on the read.
+
+## History — 2026-11-20: the constraint was the HEAD, and the gap halved
 
 Three results landed, all on the canonical 90/5 split with an in-session
 transformer anchor. They change what the campaign is doing.
@@ -60,11 +109,13 @@ adds `v(t)` to every dot's ctx: zero parameters, one add, flag-off
 bit-identical. Running at 900 s against the x5 control — the audit on that arm
 answers "does the third dot come back?" independently of machine speed.
 
-**Machine caveat.** From ~21:40 the GPU pool went bad: the *same* `tf-swa-c` arm
-that does 0.0185 s/step and 398M tokens in 900 s did 0.336 s/step and 22M tokens
-on the same T4 and torch build, alone and in pairs. Screens run in that window
-cannot resolve anything below ~0.05 bpc, so they are recorded as screening only.
-`ab_small.py` now prints a 30 s heartbeat so this is caught in a minute.
+**Machine caveat (superseded by the 2026-11-21 section).** Some GPU hosts are
+throttled: the *same* `tf-swa-c` arm that does 0.0185 s/step and 398M tokens in
+900 s did 0.336 s/step and 22M tokens on the same T4 and torch build, alone.
+It is the host, not the hour — a kernel four hours later did 0.0170 s/step.
+Screens from a slow host cannot resolve anything below ~0.05 bpc and are
+recorded as screening only; `ab_small.py` prints a 30 s heartbeat so this is
+caught in a minute.
 
 ## History — 2026-11-19 snapshot (numbers superseded by the table above)
 
