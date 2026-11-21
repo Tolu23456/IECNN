@@ -380,6 +380,8 @@ budget.
 contiguous span-8 window; geometric/quad bands; batch size as a throughput lever;
 `pool_first`; **span 16 and span 12 (does not replicate at either budget)**;
 GRU at both budgets; `share_cell`; untied head; cell LayerNorm; d_s 64;
+**N=1** (the cheapest dot is already worth 0.34 bpc on drop, so one dot starts
+far behind -- the population is a fusion, see the 2026-11-21 row);
 `query_from_input`/`gla`; `ngram_bias`; `head_rank48`; `id_lags`; `head_skip`;
 `gate_agree`; **`dist_bias`** (0.0045 < noise); `global_exact` (`gx`);
 **`query_from_input` (re-confirmed: `qi0` +0.0379 vs x3)**; the
