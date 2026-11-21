@@ -1660,3 +1660,21 @@ def test_transformer_window_limits_exact_access_and_default_is_identical():
            "data": {"seq_len": 16}}
     m = build_transformer_baseline(cfg, 64)
     assert m.window == 8 and all(blk.window == 8 for blk in m.blocks)
+
+
+def test_single_dot_population_builds_trains_and_is_finite():
+    """N=1 is a legal population, not a corner case: consensus has nothing to
+    vote over, pooling is the identity on that one dot, and the forward and
+    backward must both be finite. This is the arm that asks whether the extra
+    dots buy anything at all, so it must not fail for a trivial reason."""
+    m = build_iecnn(_cfg(n_dots=1), 64)
+    x = torch.randint(0, 64, (2, 12))
+    out = m(x)
+    lp = out["final_log_probs"]
+    assert lp.shape == (2, 12, 64) and torch.isfinite(lp).all()
+    w = out["per_pass_last_region"][-1]["weights"]
+    assert w.shape[-1] == 1
+    assert torch.allclose(w.sum(-1), torch.ones_like(w.sum(-1))), w
+    lp.reshape(-1, 64).log_softmax(-1)[:, 0].sum().backward()
+    g = m.regions[0].w_k.weight.grad
+    assert g is not None and torch.isfinite(g).all() and g.abs().sum() > 0
