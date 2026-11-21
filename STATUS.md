@@ -8,7 +8,11 @@ the evidence.
 
 At 900 s on the canonical 90/5 split the transformer anchor is **1.7923** and
 the best dot arm is **1.8383** (`x5+rr2-c`), so the dot model is behind by
-**0.046** at equal wall clock and **0.023** at equal tokens. At 3 h the gap is
+**0.046** at equal wall clock and **0.023** at equal tokens — i.e. **exactly
+half of the gap is throughput**: 398M tokens for tf against 272M for the dot
+arm, because `x5` costs 1.93× the anchor's MACs/token and 79% of that is the
+post-MLP head. So "cheaper at equal quality" is now worth as much as "better at
+equal compute", which is new: every previous purchase was capacity. At 3 h the gap is
 0.1153. Only two mechanisms have paid for their own compute: **`reread`**
 (−0.033, two seeds) and **head capacity** (`x5`, −0.046). The dot population is
 a genuine **fusion**, not a vote: on the 3 h checkpoint the mixture is 1.22 bpc
