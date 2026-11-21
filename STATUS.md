@@ -123,8 +123,12 @@ prior. A per-position gate would be worth **+0.519** on x5, i.e. a constant gate
 leaves most of the channel unused — that is the follow-up, not the first test.
 A gate fitted only on **observable** features (match distance × model entropy,
 2-fold out-of-fold) is worth **+0.1235**, already above the constant gate's
-0.098, so the follow-up has a concrete form. The rest of the oracle's 0.52 is
-only reachable by knowing "is this guess right", which is the target itself.
+0.098, so the follow-up has a concrete form — **but only on corpus pointers.** Against
+the channel the arm actually runs (in-window matches only), the same 2-fold
+feature gate adds **+0.007** over the scalar (+0.0582 vs +0.0515 on x5), which is
+inside the screen's noise: the scalar captures the channel, and the feature gate
+is **deprioritized by measurement**. The rest of the oracle's 0.52 is only
+reachable by knowing "is this guess right", which is the target itself.
 Caveat: p does not adapt here, so this is an upper bound for a trained arm.
 
 **Third pre-registration, for the `suffix_copy` screen** (`tf-swa-c`,
