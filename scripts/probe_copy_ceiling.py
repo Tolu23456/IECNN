@@ -33,6 +33,7 @@ import torch.nn.functional as F
 
 from models.iecnn import build_iecnn
 from models.baselines import build_transformer_baseline
+from scripts.probe_error_by_distance import IND_BUCKETS, induction_support
 
 V = 256
 T = int(os.environ.get("ARM_T", "256"))
@@ -107,6 +108,11 @@ def main() -> None:
     starts = window_starts(raw.shape[0], VALW)
     tgt = np.concatenate([np.arange(i + 1, i + 1 + T) for i in starts])
     copy, valid = copy_positions(raw, K)
+    # the same induction buckets the gap was measured in, so "the channel helps"
+    # and "the channel helps where the gap is" stay separate claims
+    pref = raw[: int(tgt[-1]) + 1]
+    ind, ind_d, _ = induction_support(pref)
+    ind, ind_d = ind[tgt], ind_d[tgt]
     cp = torch.from_numpy(copy[tgt])
     vv = torch.from_numpy(valid[tgt])
     y = val[torch.from_numpy(tgt)]
@@ -148,6 +154,25 @@ def main() -> None:
               f"({base - bb_r:+.4f})  <- the false-positive price", flush=True)
         line = "  gate:  " + "  ".join(f"{g:.2f}:{b:.3f}" for g, b in rows[::5])
         print(line, flush=True)
+
+        # per-bucket: the best constant gate *within* the bucket and the oracle.
+        # A bucket where the best gate is large is where a distance-conditioned
+        # gate would spend its weight, i.e. this prices the next design.
+        print(f"  {'bucket':>18}{'n':>7}{'base':>8}{'best':>8}{'gain':>8}"
+              f"{'g*':>6}{'oracle':>8}", flush=True)
+        for bidx, bname in enumerate(IND_BUCKETS):
+            m = torch.from_numpy(ind == bidx)
+            if not bool(m.any()):
+                continue
+            pt, rt, vv_b = p_true[m], right[m], vv[m]
+            br = mixture_bpc(pt, rt, vv_b, GRID)
+            gb, bb = min(br, key=lambda r: r[1])
+            boa = float(-torch.log2(torch.where(rt, torch.ones_like(pt),
+                                                pt).clamp_min(1e-12)).mean())
+            print(f"  {bname:>18}{int(m.sum()):>7}"
+                  f"{float(-torch.log2(pt).mean()):>8.4f}{bb:>8.4f}"
+                  f"{float(-torch.log2(pt).mean()) - bb:>+8.4f}"
+                  f"{gb:>6.2f}{boa:>8.4f}", flush=True)
 
 
 if __name__ == "__main__":
