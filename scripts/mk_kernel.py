@@ -143,6 +143,10 @@ env.update({{
     "ARM_BREAK_SCAN": "1",
     "ARM_SEED": SEED,
     "ARM_SAVE": os.path.join(W, "ckpt"),
+    # abort the session at the first heartbeat if the host is throttled
+    # (healthy tf is 0.0185 s/step, healthy x5 0.027; the bad signature is
+    # 0.33-0.84). Costs ~30 s and saves the remaining arms.
+    "ARM_SLOW_GATE": "0.10",
 }})
 
 names = ARMS.split(",")
@@ -151,6 +155,7 @@ print("=== TAG", TAG, "arms", ARMS, "budget", BUDGET, flush=True)
 # --- pre-flight: every arm builds, trains one step, evals, samples ----------
 dry_env = dict(env)
 dry_env["ARM_DRY"] = "1"
+dry_env["ARM_SLOW_GATE"] = "0"          # the dry pass is 1 s, not a rate test
 d = subprocess.run([sys.executable, "-u", "scripts/ab_small.py", "1", ARMS],
                    env=dry_env, cwd=os.path.join(W, "IECNN"),
                    capture_output=True, text=True)

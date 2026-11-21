@@ -1827,6 +1827,18 @@ def pointer_audit(model) -> dict:
 
 
 SEED = int(os.environ.get("ARM_SEED", "0"))
+# ARM_SLOW_GATE (s/step, 0 = off): abort the whole session if the FIRST
+# heartbeat shows a step rate that no healthy host produces. The pool hands
+# out throttled T4s at random -- the same tf arm has been measured at 0.0185,
+# 0.336 and 0.366 s/step on the same device name and torch build -- and a
+# throttled session is VOID: it sees 20x fewer tokens, so absolute bpc is
+# meaningless and the arms are all undertrained. Checking at the first
+# heartbeat costs ~30 s and saves the remaining arms (up to an hour).
+#
+# The threshold is deliberately loose (0.10 vs 0.0185 healthy tf / 0.027
+# healthy x5): it is there to catch the 18-20x signature, not to police a
+# mildly contended host, where in-session comparisons are still valid.
+SLOW_GATE = float(os.environ.get("ARM_SLOW_GATE", "0") or 0.0)
 # set False the first time a backend rejects torch._foreach_* (XLA does)
 EMA_FOREACH = True
 BASE_LR = float(os.environ.get("ARM_LR", "1e-3"))
@@ -1918,8 +1930,15 @@ def run(name: str, kind: str, model, lr: float = None,
                         e.mul_(swa).add_(p_.detach(), alpha=1.0 - swa)
         el = time.time() - t0
         if el >= next_hb:
-            print(f"HB {name[:44]} step {step} {el / max(step, 1):.4f}s/step "
+            rate = el / max(step, 1)
+            print(f"HB {name[:44]} step {step} {rate:.4f}s/step "
                   f"{step * nb * T / 1e6:.1f}M tok", flush=True)
+            if SLOW_GATE > 0.0 and rate > SLOW_GATE:
+                print(f"VOID slow host: {rate:.4f}s/step > gate {SLOW_GATE} "
+                      f"at step {step} -- this session cannot produce a "
+                      f"comparable bpc; stopping before the remaining arms.",
+                      flush=True)
+                raise SystemExit(0)
             next_hb += 30.0
         if el >= next_mark:
             marks.append([int(step * nb * T), round(val_bpc(em), 4), step])
