@@ -1612,6 +1612,21 @@ ARMS = {
         global_read=True, spans=(8,), head_post=512, head_post_layers=5,
         read_ln=True, head_ln=True, global_decay=True, reread=2, suffix_copy=3),
         {"lr": 2e-3, "swa": 0.99, "compile": True}),
+    # Seed-1 twins for the confirmation run. The 360 s screen put suffix_copy at
+    # -0.0655 bpc for +5% compute, which is well above anything seed noise has
+    # produced here, but a mechanism claim needs a second seed and the twin has
+    # to be the SAME architecture -- so both the control and the channel get one,
+    # in one session, against one anchor.
+    "iecnn-n3-x5-p1-ln-decay-d128-w512-rr2-c-s1": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=512, head_post_layers=5,
+        read_ln=True, head_ln=True, global_decay=True, reread=2),
+        {"lr": 2e-3, "swa": 0.99, "compile": True, "seed": 1}),
+    "iecnn-n3-x5-p1-ln-decay-d128-w512-rr2-c-sc3-s1": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=512, head_post_layers=5,
+        read_ln=True, head_ln=True, global_decay=True, reread=2, suffix_copy=3),
+        {"lr": 2e-3, "swa": 0.99, "compile": True, "seed": 1}),
     # --- where is the depth optimum at fixed width? ----------------------
     # rr2-c (head_post 512, 3 layers) and x5+rr2-c (same width, 5 layers) are
     # already a 2-point curve at fixed width: 1.8847 @357.8M tok and 1.8383
