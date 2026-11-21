@@ -187,6 +187,27 @@ class Region(nn.Module):
         # merit and never because of an init accident.
         self.c_agree = (nn.Parameter(torch.zeros(self.n_dots))
                         if self.gate_agree else None)
+        # suffix_copy: a DISCRETE induction channel. At position t (whose
+        # output predicts x_{t+1}) take the k bytes ending at t, find the most
+        # recent earlier position s < t where the same k-byte context ended,
+        # and mix the byte that followed it, x_{s+1}, into the output
+        # distribution with a learned gate.
+        #
+        # This is the one thing the measured gap asks for. On the 900 s
+        # checkpoints, positions where the answer is exactly the continuation
+        # of the last occurrence of this 3-byte context -- 9 to 64 bytes back
+        # -- are 10.4% of the corpus and carry 115% of the frontier arm's
+        # remaining gap; the band sits just outside an 8-slot window and no
+        # width or depth buys it (rr2 -> x5 puts only 18% of its gain there).
+        #
+        # Deliberately NOT attention: no learned keys, no softmax, no query --
+        # an exact integer match plus a pointer, which is the circuit the
+        # binding probe proved the static-query read cannot express. Gate
+        # starts closed (sigmoid(-8) ~ 3e-4), so the arm is numerically the
+        # baseline until training opens it, and `ids=None` skips it entirely.
+        self.suffix_copy = int(m.get("suffix_copy", 0))
+        self.sc_gate = (nn.Parameter(torch.tensor(-8.0))
+                        if self.suffix_copy > 0 else None)
         self.ngram_r = int(m.get("ngram_bias", 0))
         if self.ngram_r > 0:
             e1 = torch.empty(vocab_size, self.ngram_r)
@@ -1006,6 +1027,41 @@ class Region(nn.Module):
         return torch.stack([p[:, n - k - 1: n - k - 1 + t, k]
                             for k in range(n)], dim=2)   # [B,T,N,id_dim]
 
+    def _suffix_copy(self, ids: torch.Tensor):
+        """(copy_ids [B,T], valid [B,T]) for the induction prior.
+
+        ids[b, t] is the byte AT position t; the output at t predicts t+1, so
+        the context is the k bytes ending at t -- all already observed -- and
+        the copied byte x[s+1] is at most position t-1. Nothing at or after
+        the target is read, so this is causal by construction.
+        """
+        k = self.suffix_copy
+        b, t = ids.shape
+        x = ids.to(torch.int64)
+        zero = torch.zeros(b, 1, dtype=x.dtype, device=x.device)
+        h = torch.zeros_like(x)
+        for j in range(k):                      # exact for k <= 4 (< 2**32)
+            # h[i] = sum_j x[i - j] * 256**j  ->  the k bytes ENDING at i,
+            # i.e. x[i], x[i-1], ... (the context the output at i has seen)
+            h = h + torch.cat((zero.expand(b, j), x), dim=1)[:, :t] \
+                * (256 ** j)
+        idx = torch.arange(t, dtype=torch.long, device=ids.device)
+        full = idx >= (k - 1)                   # both contexts complete
+        cand = (h.unsqueeze(2) == h.unsqueeze(1))
+        cand = cand & full.view(1, 1, t) & full.view(1, t, 1)
+        # s < t (an earlier occurrence) and s + 1 <= t (the copied byte is
+        # observed), so the pointer never reaches the target
+        cand = cand & (idx.view(1, 1, t) < idx.view(1, t, 1))
+        pos = torch.where(cand, idx.view(1, 1, t).expand(b, t, t),
+                          torch.full((), -1, dtype=torch.long,
+                                     device=ids.device))
+        s, _ = pos.max(dim=-1)                  # most recent match wins
+        valid = s >= 0
+        src = (s + 1).clamp_(min=0, max=t - 1)
+        copy_ids = torch.where(valid, x.gather(1, src),
+                               torch.zeros_like(x))
+        return copy_ids, valid
+
     # ------------------------------------------------------------------
     def forward(self, rows: torch.Tensor, emb_table: torch.Tensor,
                 tau0: float = 1.0, hard_mode: bool = False,
@@ -1031,6 +1087,17 @@ class Region(nn.Module):
             # exact order-1 prior on the head logits; a lookup + one GEMM.
             prior = self.ng_e1[ids].matmul(self.ng_e2.t())      # [B,T,V]
             out["log_b"] = F.log_softmax(out["log_b"] + prior, dim=-1)
+        if self.sc_gate is not None and ids is not None:
+            # discrete induction: a probability MIXTURE, not a logit bias,
+            # because the copy is itself a distribution. The gate is a single
+            # learned scalar for now; it starts ~3e-4 so the arm is the
+            # baseline at init and only earns weight on the val loss.
+            copy_ids, valid = self._suffix_copy(ids)
+            p = out["log_b"].exp()
+            q = F.one_hot(copy_ids, p.shape[-1]).to(p.dtype)
+            g = (torch.sigmoid(self.sc_gate)
+                 * valid.unsqueeze(-1).to(p.dtype))
+            out["log_b"] = torch.log(((1 - g) * p + g * q).clamp_min(1e-9))
         return out
 
     def _forward_prob(self, rows: torch.Tensor, emb_table: torch.Tensor,

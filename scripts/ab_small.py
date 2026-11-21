@@ -66,7 +66,7 @@ def iecnn(cell="gru", lean=False, n_passes=3, n_dots=8, d_s=128, d=128,
           slot_slots=0, dist_bias=False, dynamic_query=False,
           global_read=False, read_schedule="mix", head_untied=False,
           cell_ln=False, share_cell=False, query_from_input=False,
-          id_lags=False, ngram_bias=0, head_rank=0,
+          id_lags=False, ngram_bias=0, suffix_copy=0, head_rank=0,
           state_carry=False, carry_chunk=8, gla=False,
           global_exact=False, head_skip=False, break_scan=False,
           d_q=16, d_v=32, head_post=0, head_post_layers=1,
@@ -101,6 +101,7 @@ def iecnn(cell="gru", lean=False, n_passes=3, n_dots=8, d_s=128, d=128,
         "query_from_input": query_from_input,
         "id_lags": id_lags,
         "ngram_bias": ngram_bias,
+        "suffix_copy": suffix_copy,
         "head_rank": head_rank,
         "state_carry": state_carry,
         "carry_chunk": carry_chunk,
@@ -1595,6 +1596,21 @@ ARMS = {
         global_read=True, spans=(8,), head_post=512, head_post_layers=5,
         read_ln=True, head_ln=True, global_decay=True, reread=2,
         input_res=True),
+        {"lr": 2e-3, "swa": 0.99, "compile": True}),
+    # --- the induction channel the measured band asks for ---------------
+    # The 900 s checkpoints say the 9-64 byte induction band is 115% of the
+    # frontier arm's remaining gap and that two extra head layers put only 18%
+    # of their gain there, so capacity has been ruled out by measurement. What
+    # the band needs is a read that ADDRESSES THE PREVIOUS OCCURRENCE OF THE
+    # CONTEXT rather than the last k positions; `suffix_copy` is exactly that,
+    # as an exact integer k-gram match plus a pointer and a closed gate
+    # (sigmoid(-8)), so it starts numerically identical to x5 and has to earn
+    # its weight on the loss. Cost is one [B,T,T] integer compare per step
+    # (~0.06% of x5's MACs), so it either pays or is free to reject.
+    "iecnn-n3-x5-p1-ln-decay-d128-w512-rr2-c-sc3": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=512, head_post_layers=5,
+        read_ln=True, head_ln=True, global_decay=True, reread=2, suffix_copy=3),
         {"lr": 2e-3, "swa": 0.99, "compile": True}),
     # --- where is the depth optimum at fixed width? ----------------------
     # rr2-c (head_post 512, 3 layers) and x5+rr2-c (same width, 5 layers) are

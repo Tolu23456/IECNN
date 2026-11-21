@@ -1685,3 +1685,69 @@ def test_single_dot_population_builds_trains_and_is_finite():
     lp.reshape(-1, 64).log_softmax(-1)[:, 0].sum().backward()
     g = m.regions[0].w_k.weight.grad
     assert g is not None and torch.isfinite(g).all() and g.abs().sum() > 0
+
+
+def test_suffix_copy_points_at_the_previous_context_occurrence():
+    """suffix_copy is an exact k-gram pointer: at position t it must return the
+    byte that followed the most recent EARLIER occurrence of the k bytes ending
+    at t, and nothing at all where no such occurrence exists."""
+    m = build_iecnn(_cfg(suffix_copy=3, n_passes=1,
+                         per_dot_logits=False), 64)
+    r = m.regions[0]
+    ids = torch.tensor([[1, 2, 3, 4, 1, 2, 3, 9]])
+    copy_ids, valid = r._suffix_copy(ids)
+    # positions 0..2 cannot match: no complete 3-byte context has ENDED
+    # (and ended somewhere earlier) yet
+    assert not valid[0, :3].any()
+    # position 2 first sees the context 3,2,1; position 6 sees it again, and
+    # the byte that followed it the first time (position 3) was 4
+    assert bool(valid[0, 6]) and int(copy_ids[0, 6]) == 4
+    # 9,3,2 has never occurred before -> no pointer at the last position
+    assert not bool(valid[0, 7])
+
+
+def test_suffix_copy_is_causal_and_skips_without_ids():
+    """The pointer at t may only depend on ids[:, :t+1], and the whole term
+    must vanish when ids are absent (other callers rely on that path)."""
+    kw = dict(global_read=True, head_last_only=True, per_dot_logits=False,
+              n_passes=2, cell="lug")
+    m = build_iecnn(_cfg(suffix_copy=3, **kw), 64).eval()
+    r = m.regions[0]
+    ids = torch.tensor([[1, 2, 3, 4, 1, 2, 3, 9]])
+    a_c, a_v = r._suffix_copy(ids)
+    ids2 = ids.clone()
+    ids2[0, 7] = 0                              # only a FUTURE position
+    b_c, b_v = r._suffix_copy(ids2)
+    assert torch.equal(a_c[:, :7], b_c[:, :7])
+    assert torch.equal(a_v[:, :7], b_v[:, :7])
+
+    base = build_iecnn(_cfg(**kw), 64).eval()
+    sc = build_iecnn(_cfg(suffix_copy=3, **kw), 64)
+    sc.load_state_dict(base.state_dict(), strict=False)
+    sc.eval()
+    x = torch.randint(0, 64, (2, 12))
+    with torch.no_grad():
+        want = _fwd(base, x)
+        no_ids = sc.regions[0](sc.embed(x), sc.embed.weight,
+                               ids=None)["log_b"]
+        got = _fwd(sc, x)
+    assert torch.allclose(no_ids, want, atol=1e-6), "leaked without ids"
+    assert torch.allclose(got.exp().sum(-1), torch.ones(2, 12), atol=1e-5)
+    # closed gate at init: the mixture is the baseline to within ~1e-3
+    assert (got - want).abs().max().item() < 5e-3
+
+
+def test_suffix_copy_gate_gets_gradient_and_starts_closed():
+    """A zero-gate mechanism that receives no gradient is a silent no-op: the
+    probability mixture must give sc_gate a non-zero gradient on step one."""
+    m = build_iecnn(_cfg(suffix_copy=3, global_read=True,
+                         head_last_only=True, per_dot_logits=False,
+                         n_passes=1, cell="lug"), 64)
+    r = m.regions[0]
+    assert torch.sigmoid(r.sc_gate).item() < 1e-3
+    x = torch.randint(0, 64, (2, 12))
+    lp = m(x)["final_log_probs"]
+    assert torch.isfinite(lp).all()
+    (-lp.mean()).backward()
+    g = r.sc_gate.grad
+    assert g is not None and torch.isfinite(g).all() and g.abs().sum() > 0
