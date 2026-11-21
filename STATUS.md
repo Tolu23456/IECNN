@@ -100,6 +100,13 @@ transformer only needs a couple of dozen positions, and the dot model's 8-slot
 read is the handicap; if w94 is still behind tf-c, exact access is worth much
 more than 8 and no window arm will match.
 
+**Status of that batch: still unmeasured.** Two pushes were voided by the host
+gate before the first arm finished (`tf-swa-c` at **0.3562** then **0.3663**
+s/step, aborted at step 85 after ~30 s each), against 0.0185 on a healthy host.
+The gate turns a poisoned 75-minute session into a 2-minute one, but it does not
+choose the host, so the horizon question stays open and is re-queued with the
+`suffix_copy` screen (same batch, same anchor).
+
 **The pre-registration below was written before the numbers, and the numbers
 came back on the first branch -- so the reading is fixed, not chosen: head
 capacity does not reach the band.** tf − x5 is 0.0460 total and the 9–64 band
