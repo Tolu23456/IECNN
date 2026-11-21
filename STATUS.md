@@ -46,8 +46,25 @@ The extra variety is what higher entropy looks like at fixed temperature
 (rr2 H 1.243 nats vs tf 1.174, both calibrated at ECE ≈ 0.007). bpc stays the
 metric; generation is not an architecture argument.
 
-**What is running:** 900 s capacity/bandwidth screen — `head_post_layers=7`,
-`d_v=64`, `d_s=128`, each against the tf-c anchor and the x5+rr2-c reference.
+**Width, not depth.** A 9.1M-token screen separates the two: halving the head
+block to w256 costs **+0.074 bpc** (x5 2.2436 → 2.3177), while adding two more
+blocks at w512 buys **0.0075** for 131k params and 5.6% step time. `head_post=512`
+stays; more depth is not a lane.
+
+**The collapse is an input path, not a dead specialist.** With `n_passes=1` the
+cell's input is `[ctx, 0, 0, round]`, and `ctx` is a 32-dim softmax average of
+window *values* — so the only route from the current token into the state is a
+dot that attends to distance 0. That is exactly the dot every audit finds
+collapsed (`frac_end` 0.97–1.00), and it costs 1/3 of the population. `input_res`
+adds `v(t)` to every dot's ctx: zero parameters, one add, flag-off
+bit-identical. Running at 900 s against the x5 control — the audit on that arm
+answers "does the third dot come back?" independently of machine speed.
+
+**Machine caveat.** From ~21:40 the GPU pool went bad: the *same* `tf-swa-c` arm
+that does 0.0185 s/step and 398M tokens in 900 s did 0.336 s/step and 22M tokens
+on the same T4 and torch build, alone and in pairs. Screens run in that window
+cannot resolve anything below ~0.05 bpc, so they are recorded as screening only.
+`ab_small.py` now prints a 30 s heartbeat so this is caught in a minute.
 
 ## History — 2026-11-19 snapshot (numbers superseded by the table above)
 
