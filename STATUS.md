@@ -100,8 +100,20 @@ transformer only needs a couple of dozen positions, and the dot model's 8-slot
 read is the handicap; if w94 is still behind tf-c, exact access is worth much
 more than 8 and no window arm will match.
 
-**Second pre-registration, for the CPU probe now running on the 900 s
-checkpoints** (`iecnn-gap-s900`, dataset `iecnn-ckpt-s900`). The 3 h result was
+**The pre-registration below was written before the numbers, and the numbers
+came back on the first branch -- so the reading is fixed, not chosen: head
+capacity does not reach the band.** tf − x5 is 0.0460 total and the 9–64 band
+contributes **−0.0531 (115% of the gap)**, while only **18%** of the rr2 → x5
+gain lands in the band (44% is "wrong guess d>8", where x5 is now **better than
+tf** by 0.0200, and 33% is "right d>64"). So the extra two head layers buy
+mostly positions where induction *fails*, and the band still sits at **1.105
+bpc against tf's 0.593** on 10.4% of positions. Consequences, both recorded:
+**do not buy more width/depth for the band** (that includes the staged
+`x5w768l4`/`x5w1024l3`), and the band is now a *read* problem whose defining
+property is addressing the previous occurrence of the *context* — which no arm
+in the family does directly.
+
+Original pre-registration (`iecnn-gap-s900`, dataset `iecnn-ckpt-s900`): The 3 h result was
 measured with a 3-layer head; the 900 s frontier arm has 5, and its gap is four
 times smaller (0.046 vs 0.115). So the induction bucket table can separate
 "capacity buys induction" from "the band is the read":
