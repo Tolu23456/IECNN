@@ -118,9 +118,9 @@ def main() -> None:
                 x = val[i:i + T].unsqueeze(0).to(device)
                 c, v, e = r._suffix_copy(x, with_extra=True)
                 m_copy.append(c[0]); m_valid.append(v[0]); m_extra.append(e[0])
-        m_copy = torch.cat(m_copy)
-        m_valid = torch.cat(m_valid)
-        m_extra = torch.cat(m_extra)
+        m_copy = torch.cat(m_copy).to(device)
+        m_valid = torch.cat(m_valid).to(device)
+        m_extra = torch.cat(m_extra).to(device)
         with torch.no_grad():
             lp = torch.cat([model(val[i:i + T].unsqueeze(0).to(device))
                             ["final_log_probs"][0] for i in starts])
@@ -150,19 +150,19 @@ def main() -> None:
         # (3) corpus candidates on the same windows, flattened the same way
         cand = [window_candidates(val[i:i + T].numpy()) for i in starts]
         der = [derive(*c[:3]) for c in cand]
-        CVAL = torch.from_numpy(np.concatenate([c[0] for c in cand]))
-        EXT = torch.from_numpy(np.concatenate([c[1] for c in cand]))
-        CN = torch.from_numpy(np.concatenate([c[2] for c in cand])).long()
+        CVAL = torch.from_numpy(np.concatenate([c[0] for c in cand])).to(device)
+        EXT = torch.from_numpy(np.concatenate([c[1] for c in cand])).to(device)
+        CN = torch.from_numpy(np.concatenate([c[2] for c in cand])).long().to(device)
 
         pred_of, valid_of = {}, {}
         for k in ("single", "extpick", "extvote"):
             pred_of[k] = torch.from_numpy(
-                np.concatenate([d[k][0] for d in der])).long()
+                np.concatenate([d[k][0] for d in der])).long().to(device)
             valid_of[k] = torch.from_numpy(
-                np.concatenate([d[k][1] for d in der])).bool()
+                np.concatenate([d[k][1] for d in der])).bool().to(device)
 
         # chosen column per selector, for the "gate on selected extension" row
-        idx = torch.arange(CVAL.shape[1])[None, :]
+        idx = torch.arange(CVAL.shape[1], device=device)[None, :]
         live = idx < CN[:, None]
         ext_live = torch.where(live, EXT, torch.full_like(EXT, -1))
         col = {
@@ -175,6 +175,10 @@ def main() -> None:
         }
         col["extvote"] = col["extpick"]
         ext_of = {k: EXT.gather(1, col[k][:, None]).squeeze(1) for k in col}
+        # the oracle has no pointer of its own, so its gate input is the
+        # model's extension; the row exists to bound the family, not to be
+        # deployed, so this choice cannot flatter it
+        ext_of["oracle"] = m_extra
 
         print(f"\n  {'selector':<9}{'cover':>8}{'acc':>7}{'vs model':>10}"
               f"{'sel-only':>10}{'mod-only':>9}{'bpc(model ext)':>16}"
@@ -182,7 +186,8 @@ def main() -> None:
         for k in SELECTORS:
             if k == "oracle":
                 hit = ((CVAL == y[:, None])
-                       & (torch.arange(M)[None, :] < CN[:, None])).any(1)
+                       & (torch.arange(M, device=device)[None, :]
+                          < CN[:, None])).any(1)
                 pred = torch.where(hit, y, (y + 1) % V)
                 valid = CN >= 1
             else:
