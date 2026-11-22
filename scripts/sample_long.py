@@ -1,0 +1,150 @@
+"""Long continuations from a trained arm, with the structure measured per chunk.
+
+80 bytes cannot show whether a model drifts or self-corrects, and eyeballing one
+sample at a time is how a corpus-idiom generator gets mistaken for a writer. This
+decodes LONG continuations (default 350 bytes, sliding 256-byte context) and
+reports the same statistics in each 100-byte chunk, so "it holds up" and "it
+falls apart after 100 bytes" are different, checkable outcomes.
+
+It is still not a quality argument. The only powered quality comparison in the
+ledger is a 20-pair blind judge at 11-9 (p=0.82), and sample quality has never
+tracked the arm that wins on bpc. These are diagnostics: markup well-formedness,
+sentence-final rate, exact repetition, and within-sample self-bpc drift.
+
+One prompt is deliberately an ECHO: a 48-byte val segment concatenated with
+itself, so a long exact match exists in the context. If the copy channel is a
+real induction circuit it should keep writing that segment; if the channel is
+off it should not. That is the generation-side induction test on natural text.
+
+Usage:
+  PYTHONPATH=. python3 scripts/sample_long.py ckpt.pt [...]
+Reads ARM_VAL / ARM_NVAL / ARM_T. Knobs: SL_PROMPTS, SL_BYTES, SL_CTX,
+SL_TEMP, SL_SEED.
+"""
+from __future__ import annotations
+
+import argparse
+import math
+import os
+from collections import Counter
+
+import torch
+
+from models.generate import generate_bytes
+from scripts.probe_channels import T, load_model
+
+VAL_PATH = os.environ.get("ARM_VAL", "data/toy_val.txt")
+N_VAL = int(os.environ.get("ARM_NVAL", "5_000_000"))
+N_PROMPT = int(os.environ.get("SL_PROMPTS", "4"))
+N_BYTES = int(os.environ.get("SL_BYTES", "350"))
+CTX = int(os.environ.get("SL_CTX", "256"))
+TEMP = float(os.environ.get("SL_TEMP", "0.7"))
+SEED = int(os.environ.get("SL_SEED", "1234"))
+PROMPT_B = 48
+CHUNK = 100
+
+
+def chunks(bs: bytes, n: int = CHUNK) -> list[bytes]:
+    return [bs[i:i + n] for i in range(0, len(bs), n)]
+
+
+def distinct(bs: bytes, n: int) -> float:
+    g = [bs[i:i + n] for i in range(len(bs) - n + 1)]
+    return len(set(g)) / max(len(g), 1)
+
+
+def longest_repeat(bs: bytes, n: int = 4) -> int:
+    g = [bs[i:i + n] for i in range(len(bs) - n + 1)]
+    return max(Counter(g).values()) if g else 0
+
+
+def bpc_range(model, ids, a: int, b: int) -> float:
+    """Teacher-forced bpc of the bytes at positions [a, b) of `ids`.
+
+    lp[t] predicts ids[t+1], so position p is scored by lp[p-1]; slicing
+    [a, b) directly would be off by one and would score the wrong bytes.
+    """
+    if b - a < 1:
+        return float("nan")
+    x = torch.tensor(list(ids), dtype=torch.long)[None]
+    with torch.no_grad():
+        lp = model(x)["final_log_probs"][0]
+    y = x[0, 1:]
+    lo, hi = a - 1, b - 1
+    nll = -lp[lo:hi].gather(1, y[lo:hi, None]).mean().item()
+    return nll / math.log(2)
+
+
+def structural(bs: bytes) -> dict:
+    link = bs.count(b"[[")
+    close = bs.count(b"]]")
+    sent = sum(bs.count(c) for c in (b".", b"!", b"?"))
+    return {"d2": round(distinct(bs, 2), 3),
+            "rep4": longest_repeat(bs, 4),
+            "link": link, "close": close,
+            "sent": round(sent / max(len(bs) / 100, 1e-9), 2)}
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("ckpts", nargs="+")
+    ap.add_argument("--device", default="cpu")
+    args = ap.parse_args()
+    device = torch.device(args.device)
+
+    raw = open(VAL_PATH, "rb").read(N_VAL)
+    val = torch.frombuffer(raw, dtype=torch.uint8).long()
+    offsets = [1200 + i * 3517 for i in range(N_PROMPT)]
+    prompts = [("val", val[o:o + PROMPT_B].tolist()) for o in offsets]
+    echo_at = 3300
+    seg = val[echo_at:echo_at + PROMPT_B].tolist()
+    prompts.append(("echo", seg + seg))
+
+    print(f"val {N_VAL} bytes | {len(prompts)} prompts ({PROMPT_B}B, 1 echo) | "
+          f"{N_BYTES}B each | T{TEMP}/k40 seed {SEED} | ctx {CTX}", flush=True)
+
+    for path in args.ckpts:
+        model, ck = load_model(path, device)
+        name = os.path.basename(path).replace(".pt", "")
+        is_dot = getattr(model, "regions", None) is not None
+        r = model.regions[0] if is_dot else None
+        has_copy = is_dot and getattr(r, "sc_gate", None) is not None
+        print(f"\n===== {name}  (bpc_final "
+              f"{ck.get('row', {}).get('bpc_final')})", flush=True)
+
+        conds = ["full", "off"] if has_copy else ["full"]
+        saved = r.sc_gate.detach().clone() if has_copy else None
+        for cond in conds:
+            print(f"\n--- {name} [{cond}] ---", flush=True)
+            if cond == "off":
+                r.sc_gate.data.fill_(-60.0)
+            for label, pr in prompts:
+                p = torch.tensor(pr, dtype=torch.long)[None]
+                g = generate_bytes(model, p, N_BYTES, mode="sample",
+                                   temp=TEMP, topk=40, ctx=CTX, seed=SEED)
+                text = g.decode("latin-1")
+                st = structural(g)
+                # drift: self-bpc of the first and last chunk of the SAMPLE
+                seq = pr + list(g)
+                b1 = bpc_range(model, seq, PROMPT_B, PROMPT_B + CHUNK)
+                bN = bpc_range(model, seq, PROMPT_B + len(g) - CHUNK,
+                               PROMPT_B + len(g))
+                echo_hit = ""
+                if label == "echo":
+                    echo_hit = (f" echo={sum(a == b for a, b in zip(g, seg))}"
+                                f"/{len(seg)}B")
+                print(f"\n[{label}] prompt: {bytes(pr).decode('latin-1')!r}",
+                      flush=True)
+                for i, ch in enumerate(chunks(g)):
+                    print(f"  {i * CHUNK:>3}: {ch.decode('latin-1')!r}",
+                          flush=True)
+                print(f"  d2 {st['d2']} | max rep4 {st['rep4']} | links "
+                      f"{st['link']}/{st['close']} | sentence/100B "
+                      f"{st['sent']} | self-bpc {b1:.3f} -> {bN:.3f}"
+                      f"{echo_hit}", flush=True)
+            if cond == "off":
+                r.sc_gate.data.copy_(saved)
+
+
+if __name__ == "__main__":
+    main()
