@@ -59,6 +59,16 @@ not the last raw marker.
   winning the argmax. The level term is the other 7.14 bpc.
 - **Induction is orthogonal to the dots**: dropping any single dot leaves
   match 1.000 / run 16.0 / bpc 0.652–0.655.
+- **The k of the k-gram is settled at 3** (`iecnn-copy-k`, frozen weights,
+  s0/s1 agree to 0.0011). Coverage / accuracy / post-hoc ceiling gain:
+  k=2 44.7% / 41.7% / +0.0280, **k=3 23.3% / 63.0% / +0.0563**,
+  k=4 15.8% / 71.2% / **+0.0581**, k=5 11.9% / 73.8% / +0.0517,
+  k=6 9.1% / 77.7% / +0.0471. The ceiling peaks at k=4 but by **+0.0018**, and
+  as *deployed* (learned gate, no retraining) every k≠3 loses: k=2 +0.0308,
+  k=4 +0.0035, k=6 +0.0179. Longer context is a stricter match, so coverage
+  falls faster than precision rises. Compare the levers: slope 0.0120,
+  selection 0.0062–0.0076, k **0.0018 at its ceiling** — context *length* is
+  not the lever; weighting and choosing among existing matches is.
 - **The falsifier holds**: flip one byte of the second copy (no k-gram matches)
   and the behaviour collapses to 0.016 while the teacher-forced gain falls from
   −9.19 to −6.41 bpc. It is exact-match continuation, not pattern completion,
