@@ -154,13 +154,27 @@ def derive(CVAL, EXT, CN):
     # extpick: the occurrence whose match extends furthest back
     ext_pred = np.zeros(n, dtype=np.int64)
     ext_valid = CN >= 1
+    # extvote: vote only among the candidates at the maximum extension. Those
+    # are the trustworthy ones, so this keeps single's coverage while sharpening
+    # the choice -- the natural combination of vote and extension signal.
+    ev_pred = np.zeros(n, dtype=np.int64)
+    ev_valid = CN >= 1
     for i in range(n):
         c = int(CN[i])
         if c < 1:
             continue
-        best = max(range(c), key=lambda j: (int(EXT[i, j]), j))
+        exts = [int(EXT[i, j]) for j in range(c)]
+        top = max(exts)
+        best = max(range(c), key=lambda j: (exts[j], j))
         ext_pred[i] = int(CVAL[i, best])
+        winners = [j for j in range(c) if exts[j] == top]
+        vals = [int(CVAL[i, j]) for j in winners]
+        cnt = collections.Counter(vals)
+        hi = max(cnt.values())
+        tied = [v for v in cnt if cnt[v] == hi]
+        ev_pred[i] = vals[-1] if vals[-1] in tied else tied[-1]
     out["extpick"] = (ext_pred, ext_valid)
+    out["extvote"] = (ev_pred, ev_valid)
     return out
 
 
@@ -177,6 +191,26 @@ def mass_on_truth(channel, CVAL, CN, EXT, y):
     if channel == "extpick":
         pred, valid = derive(CVAL, EXT, CN)["extpick"]
         return (valid & (pred == y)).astype(np.float32)
+    if channel == "extvote":
+        # mass = the share of max-extension candidates that equal the truth
+        n = CVAL.shape[0]
+        out = np.zeros(n, dtype=np.float32)
+        for i in range(n):
+            c = int(CN[i])
+            if c < 1:
+                continue
+            exts = [int(EXT[i, j]) for j in range(c)]
+            top = max(exts)
+            winners = [j for j in range(c) if exts[j] == top]
+            out[i] = sum(1 for j in winners if int(CVAL[i, j]) == int(y[i])) / len(winners)
+        return out
+    if channel == "oracle":
+        # CEILING on any selector over k-gram occurrences: the right byte if
+        # ANY earlier occurrence predicts it. Not deployable; it bounds the
+        # whole "pick a better occurrence" family.
+        idx = np.arange(CVAL.shape[1])[None, :]
+        hit = ((CVAL == y[:, None]) & (idx < CN[:, None])).any(1)
+        return hit.astype(np.float32)
     raise KeyError(channel)
 
 
@@ -286,6 +320,12 @@ def main() -> None:
     print(f"val {len(starts)}x{T} = {N} positions | k={K} M={M}", flush=True)
 
     ch = derive(CVAL, EXT, CN)
+    idx = np.arange(M)[None, :]
+    # the oracle's "prediction" is the truth wherever any occurrence predicts
+    # it, so pred==target exactly on its valid set and the accuracy/fixes
+    # columns read as "how often is the right byte available at all"
+    _orc = ((CVAL == yn[:, None]) & (idx < CN[:, None])).any(1)
+    ch["oracle"] = (np.where(_orc, yn, 0), _orc)
     single_pred, single_valid = ch["single"]
     single_ok = single_valid & (single_pred == yn)
     print(f"\nsingle-pointer coverage {100 * single_valid.mean():.1f}% | "
@@ -294,7 +334,7 @@ def main() -> None:
     print(f"\n{'channel':<10}{'cover':>8}{'acc':>8}{'fixes':>7}{'breaks':>7}"
           f"{'net':>7}{'massT':>8}")
     sw = single_valid & ~single_ok
-    for k in ("single", "strict2", "voteM", "extpick"):
+    for k in ("single", "strict2", "voteM", "extpick", "extvote", "oracle"):
         pred, valid = ch[k]
         ok = valid & (pred == yn)
         m = mass_on_truth(k, CVAL, CN, EXT, yn)
@@ -336,15 +376,21 @@ def main() -> None:
         abin = torch.from_numpy(AGREE).to(torch.int64)
         name = os.path.basename(path).replace(".pt", "")
         print(f"\n{name}\n  base {base:.4f}", flush=True)
-        for k in ("single", "strict2", "voteM", "extpick"):
+        maxext = np.array([max(EXT[i, :max(int(CN[i]), 1)]) if CN[i] else -1
+                           for i in range(N)], dtype=np.int64)
+        xpbin = torch.from_numpy(np.clip(maxext, 0, 4))
+        for k in ("single", "strict2", "voteM", "extpick", "extvote", "oracle"):
             mt = torch.from_numpy(mass_on_truth(k, CVAL, CN, EXT, yn))
             v = torch.from_numpy(ch[k][1])
             if not bool(v.any()):
                 print(f"  {k:<10} (never valid)", flush=True)
                 continue
             g0, b0 = best_const(p_true, mt, v)
-            groups = xbin * 3 + ebin
-            if k != "single":
+            # gate on the extension that SELECTION actually used: the most
+            # recent match for the single pointer, the maximum for pickers
+            xf = xpbin if k in ("extpick", "extvote", "oracle") else xbin
+            groups = xf * 3 + ebin
+            if k in ("strict2", "voteM", "extvote"):
                 groups = groups * 2 + abin
             gate = cv_gate(p_true, mt, v, groups)
             b = bpc_of(p_true, mt, v, gate)
@@ -355,11 +401,11 @@ def main() -> None:
         # gets wrong, which is exactly where the audit found the 0.076 tax
         swt = torch.from_numpy(sw)
         print(f"  {'on single-wrong (n=' + str(int(sw.sum())) + ')':<26}"
-              + "".join(f"{k:>10}" for k in ("single", "strict2", "voteM", "extpick")),
-              flush=True)
+              + "".join(f"{k:>10}" for k in ("single", "strict2", "voteM", "extpick",
+                                            "extvote", "oracle")), flush=True)
         nowok = {}
         massw = {}
-        for k in ("single", "strict2", "voteM", "extpick"):
+        for k in ("single", "strict2", "voteM", "extpick", "extvote", "oracle"):
             pred, valid = ch[k]
             nowok[k] = 100 * int((valid & (pred == yn) & sw).sum()) / max(int(sw.sum()), 1)
             mw = mass_on_truth(k, CVAL, CN, EXT, yn)[sw]
