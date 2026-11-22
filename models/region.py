@@ -208,6 +208,17 @@ class Region(nn.Module):
         self.suffix_copy = int(m.get("suffix_copy", 0))
         self.sc_gate = (nn.Parameter(torch.tensor(-8.0))
                         if self.suffix_copy > 0 else None)
+        # Optional second gate parameter: gate = sigmoid(a + b * extension),
+        # where `extension` is how many bytes agree BEFORE the k-gram. It is an
+        # observable precision signal (49.4% of 3-gram matches with no extension
+        # are right, ~70% with one, 87.4% with eight or more), so a gate can
+        # spend its weight where the match is long. b starts at exactly 0, so
+        # the arm is numerically identical to the scalar gate at init and has to
+        # earn the slope on the val loss.
+        self.sc_slope = (nn.Parameter(torch.zeros(()))
+                         if (self.suffix_copy > 0
+                             and m.get("suffix_copy_slope", False)) else None)
+        self.sc_extra_cap = int(m.get("suffix_copy_extra_cap", 8))
         self.ngram_r = int(m.get("ngram_bias", 0))
         if self.ngram_r > 0:
             e1 = torch.empty(vocab_size, self.ngram_r)
@@ -1027,7 +1038,7 @@ class Region(nn.Module):
         return torch.stack([p[:, n - k - 1: n - k - 1 + t, k]
                             for k in range(n)], dim=2)   # [B,T,N,id_dim]
 
-    def _suffix_copy(self, ids: torch.Tensor):
+    def _suffix_copy(self, ids: torch.Tensor, with_extra: bool = False):
         """(copy_ids [B,T], valid [B,T]) for the induction prior.
 
         ids[b, t] is the byte AT position t; the output at t predicts t+1, so
@@ -1060,7 +1071,22 @@ class Region(nn.Module):
         src = (s + 1).clamp_(min=0, max=t - 1)
         copy_ids = torch.where(valid, x.gather(1, src),
                                torch.zeros_like(x))
-        return copy_ids, valid
+        if not with_extra:
+            return copy_ids, valid
+        # extension: how many bytes agree before the k-gram, capped. The match
+        # is h[s]==h[t], i.e. x[s-j]==x[t-j] for j<k, so the first byte beyond
+        # it compares x[t-k] with x[s-k]. Contiguous by construction: the
+        # running mask requires every earlier byte to have matched.
+        extra = torch.zeros_like(x)
+        cap = self.sc_extra_cap
+        for m in range(cap):
+            ai = idx.view(1, t) - k - m
+            si = s - k - m
+            av = x.gather(1, ai.clamp_min(0).expand(b, t))
+            sv = x.gather(1, si.clamp_min(0))
+            ok = (ai >= 0) & (si >= 0) & (av == sv) & (extra == m)
+            extra = extra + ok.to(extra.dtype)
+        return copy_ids, valid, extra
 
     # ------------------------------------------------------------------
     def forward(self, rows: torch.Tensor, emb_table: torch.Tensor,
@@ -1089,13 +1115,22 @@ class Region(nn.Module):
             out["log_b"] = F.log_softmax(out["log_b"] + prior, dim=-1)
         if self.sc_gate is not None and ids is not None:
             # discrete induction: a probability MIXTURE, not a logit bias,
-            # because the copy is itself a distribution. The gate is a single
-            # learned scalar for now; it starts ~3e-4 so the arm is the
-            # baseline at init and only earns weight on the val loss.
-            copy_ids, valid = self._suffix_copy(ids)
+            # because the copy is itself a distribution. The gate starts ~3e-4
+            # so the arm is the baseline at init and only earns weight on the
+            # val loss. With `sc_slope` the gate is sigmoid(a + b*extension),
+            # i.e. it can ask for more weight on a longer match; b=0 at init.
+            if self.sc_slope is None:
+                copy_ids, valid = self._suffix_copy(ids)
+                logit = self.sc_gate
+            else:
+                copy_ids, valid, extra = self._suffix_copy(ids,
+                                                           with_extra=True)
+                logit = (self.sc_gate + self.sc_slope
+                         * extra.clamp(max=self.sc_extra_cap).to(
+                             self.sc_gate.dtype))
             p = out["log_b"].exp()
             q = F.one_hot(copy_ids, p.shape[-1]).to(p.dtype)
-            g = (torch.sigmoid(self.sc_gate)
+            g = (torch.sigmoid(logit).unsqueeze(-1)
                  * valid.unsqueeze(-1).to(p.dtype))
             out["log_b"] = torch.log(((1 - g) * p + g * q).clamp_min(1e-9))
         return out

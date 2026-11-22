@@ -66,7 +66,8 @@ def iecnn(cell="gru", lean=False, n_passes=3, n_dots=8, d_s=128, d=128,
           slot_slots=0, dist_bias=False, dynamic_query=False,
           global_read=False, read_schedule="mix", head_untied=False,
           cell_ln=False, share_cell=False, query_from_input=False,
-          id_lags=False, ngram_bias=0, suffix_copy=0, head_rank=0,
+          id_lags=False, ngram_bias=0, suffix_copy=0,
+          suffix_copy_slope=False, head_rank=0,
           state_carry=False, carry_chunk=8, gla=False,
           global_exact=False, head_skip=False, break_scan=False,
           d_q=16, d_v=32, head_post=0, head_post_layers=1,
@@ -102,6 +103,7 @@ def iecnn(cell="gru", lean=False, n_passes=3, n_dots=8, d_s=128, d=128,
         "id_lags": id_lags,
         "ngram_bias": ngram_bias,
         "suffix_copy": suffix_copy,
+        "suffix_copy_slope": suffix_copy_slope,
         "head_rank": head_rank,
         "state_carry": state_carry,
         "carry_chunk": carry_chunk,
@@ -1611,6 +1613,35 @@ ARMS = {
         "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
         global_read=True, spans=(8,), head_post=512, head_post_layers=5,
         read_ln=True, head_ln=True, global_decay=True, reread=2, suffix_copy=3),
+        {"lr": 2e-3, "swa": 0.99, "compile": True}),
+    # --- two levers on top of the channel that paid ----------------------
+    # (1) A second gate parameter: gate = sigmoid(a + b*extension), where the
+    # extension is how many bytes agree BEFORE the 3-gram. Observable, and it
+    # predicts correctness (49.4% at zero extension, ~70% at one, 87.4% at
+    # eight or more), so it lets the gate spend weight where the match is long.
+    # Out-of-fold on a model that never saw the channel: +0.0661 against the
+    # scalar's +0.0560. b starts at exactly 0, so at init this IS the scalar.
+    "iecnn-n3-x5-p1-ln-decay-d128-w512-rr2-c-sc3e": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=512, head_post_layers=5,
+        read_ln=True, head_ln=True, global_decay=True, reread=2, suffix_copy=3,
+        suffix_copy_slope=True),
+        {"lr": 2e-3, "swa": 0.99, "compile": True}),
+    # (2) Depth, not width, is the compute lever: the post-MLP is 79% of the
+    # arm's MACs and five layers of it cost 1.93x the transformer. One fewer
+    # layer removes ~16% of the total for an unknown bpc cost; the audit's
+    # measured optimum was never taken at this width, and width already failed
+    # (w256 +0.074, x5->x7 only -0.0075).
+    "iecnn-n3-x4-p1-ln-decay-d128-w512-rr2-c-sc3": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=512, head_post_layers=4,
+        read_ln=True, head_ln=True, global_decay=True, reread=2, suffix_copy=3),
+        {"lr": 2e-3, "swa": 0.99, "compile": True}),
+    "iecnn-n3-x4-p1-ln-decay-d128-w512-rr2-c-sc3e": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=512, head_post_layers=4,
+        read_ln=True, head_ln=True, global_decay=True, reread=2, suffix_copy=3,
+        suffix_copy_slope=True),
         {"lr": 2e-3, "swa": 0.99, "compile": True}),
     # Seed-1 twins for the confirmation run. The 360 s screen put suffix_copy at
     # -0.0655 bpc for +5% compute, which is well above anything seed noise has

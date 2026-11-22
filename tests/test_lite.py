@@ -1757,3 +1757,49 @@ def test_suffix_copy_gate_gets_gradient_and_starts_closed():
     (-lp.mean()).backward()
     g = r.sc_gate.grad
     assert g is not None and torch.isfinite(g).all() and g.abs().sum() > 0
+
+
+def test_suffix_copy_extension_counts_bytes_before_the_gram():
+    """The extension is the precision signal: how many bytes agree BEFORE the
+    k-gram. It must be contiguous (one mismatch stops the count) and must be 0
+    at a fresh match, which is the case the gate has to discount."""
+    m = build_iecnn(_cfg(suffix_copy=3, suffix_copy_slope=True,
+                         global_read=True, head_last_only=True,
+                         per_dot_logits=False, n_passes=1, cell="lug"), 64)
+    r = m.regions[0]
+    # "1,2,3,4" occurs at 2..5 and 8..11: target 11 sees context 4,3,2 and the
+    # previous 4,3,2 is at 5, so the copy is x[6]=7 and one byte (the 1 at 8)
+    # agrees before the context. The byte before THAT (8 vs 6) does not.
+    ids = torch.tensor([[5, 6, 1, 2, 3, 4, 7, 8, 1, 2, 3, 4, 9]])
+    copy_ids, valid, extra = r._suffix_copy(ids, with_extra=True)
+    assert bool(valid[0, 11]) and int(copy_ids[0, 11]) == 7
+    assert int(extra[0, 11]) == 1, extra
+    # a match with nothing before it must report zero extension
+    ids2 = torch.tensor([[5, 6, 1, 2, 3, 4, 9, 1, 2, 3, 7]])
+    c2, v2, e2 = r._suffix_copy(ids2, with_extra=True)
+    assert bool(v2[0, 9]) and int(c2[0, 9]) == 4 and int(e2[0, 9]) == 0
+
+
+def test_suffix_copy_slope_starts_as_the_scalar_and_gets_gradient():
+    """b=0 at init must reproduce the scalar gate bit-closely, and the slope
+    must receive gradient where extensions differ, or it can never leave 0."""
+    kw = dict(global_read=True, head_last_only=True, per_dot_logits=False,
+              n_passes=1, cell="lug")
+    scalar = build_iecnn(_cfg(suffix_copy=3, **kw), 64).eval()
+    slope = build_iecnn(_cfg(suffix_copy=3, suffix_copy_slope=True, **kw), 64)
+    slope.load_state_dict(scalar.state_dict(), strict=False)
+    assert slope.regions[0].sc_slope is not None
+    assert float(slope.regions[0].sc_slope) == 0.0
+    x = torch.tensor([[1, 2, 3, 4, 1, 2, 3, 5, 1, 2, 3, 6],
+                      [7, 8, 9, 4, 7, 8, 9, 5, 7, 8, 9, 6]])
+    with torch.no_grad():
+        a = _fwd(scalar, x)
+        slope.eval()
+        b = _fwd(slope, x)
+    assert torch.allclose(a, b, atol=1e-6), (a - b).abs().max()
+
+    slope.train()
+    lp = slope(x)["final_log_probs"]
+    (-lp.mean()).backward()
+    g = slope.regions[0].sc_slope.grad
+    assert g is not None and torch.isfinite(g).all() and g.abs().sum() > 0
