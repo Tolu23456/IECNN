@@ -236,20 +236,27 @@ def induction_section(model, val, conds, natural_conds, full_grid: bool):
     def d(a, b, k="tf"):
         return q1[a][k] - q1[b][k] if a in q1 and b in q1 else float("nan")
 
-    print("\n  read:", flush=True)
-    print(f"   channel value on matched patterns  full-off   "
-          f"{d('full', 'off'):+8.4f} bpc", flush=True)
-    print(f"   slope share                       off-slope0 "
-          f"{d('off', 'slope0'):+8.4f} bpc", flush=True)
-    print(f"   gate level share                  slope0-off "
-          f"{d('slope0', 'off'):+8.4f} bpc", flush=True)
+    # Each number is the bpc COST of removing that piece, so a positive value
+    # is value delivered. The two are a sequential decomposition: flatten the
+    # slope first, then shut the gate that remains.
+    print("\n  read (bpc cost of removing each piece, so larger = more value):",
+          flush=True)
+    print(f"   whole channel        off - full     "
+          f"{d('off', 'full'):+8.4f}", flush=True)
+    print(f"   slope term           slope0 - full  "
+          f"{d('slope0', 'full'):+8.4f}", flush=True)
+    print(f"   level, given b=0     off - slope0   "
+          f"{d('off', 'slope0'):+8.4f}", flush=True)
+    print(f"   each dot dropped     dropk - full  "
+          + " ".join(f"{d(k, 'full'):+.4f}" for k in q1 if k.startswith("drop")),
+          flush=True)
     if "full" in q1b and "off" in q1b:
-        print(f"   after one flipped byte            full-off   "
-              f"{q1b['full']['tf'] - q1b['off']['tf']:+8.4f} bpc "
-              f"(was {d('full', 'off'):+.4f})", flush=True)
+        print(f"   one byte flipped     full-off       "
+              f"{q1b['full']['tf'] - q1b['off']['tf']:+8.4f} "
+              f"(matched patterns {d('full', 'off'):+.4f})", flush=True)
     if q2:
-        print(f"   natural text                      full-off   "
-              f"{q2['full']['tf'] - q2['off']['tf']:+8.4f} bpc", flush=True)
+        print(f"   natural text         full-off       "
+              f"{q2['full']['tf'] - q2['off']['tf']:+8.4f}", flush=True)
 
 
 def dots(model, val, dot_conds, device) -> None:
