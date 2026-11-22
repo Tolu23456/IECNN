@@ -107,6 +107,31 @@ with `mark_s=0`, which made the arm run a full validation inside every step (see
 the withdrawn machine caveat above). With the guard in place the ladder is
 re-queued with the `suffix_copy` screen, same batch, same anchor, unchanged.
 
+## CONFIRMED AT 900 s, TWO SEEDS: suffix_copy −0.0506, dot model ahead of tf
+
+`iecnn-sc9-gpu`, one healthy session, 900 s/arm, common 254.20M tokens:
+
+| arm | seed | tokens | s/step | bpc | bpc@eqtok |
+|---|---|---|---|---|---|
+| `tf-swa-c` | 0 | 378.19M | 0.0195 | **1.7956** | 1.8726 |
+| `x5+rr2-c` | 0 | 265.85M | 0.0278 | 1.8419 | 1.8909 |
+| `x5+rr2-c-sc3` | 0 | 254.20M | 0.0290 | **1.7868** | 1.8284 |
+| `x5+rr2-c` | 1 | 265.53M | 0.0278 | 1.8372 | 1.8897 |
+| `x5+rr2-c-sc3` | 1 | 254.29M | 0.0290 | **1.7831** | 1.8295 |
+
+Channel effect per seed **−0.0551 / −0.0461** (mean −0.0506) for **+4.3%**
+compute, ~10x the within-pair seed spread; equal-token **−0.0625 / −0.0602**.
+Versus the transformer at equal wall clock: **−0.0088 / −0.0125** (mean
+−0.0107), both seeds negative, with 33% fewer tokens.
+
+**Read it precisely:** this wins at equal **wall clock on a T4**, not at equal
+**MACs** — `x5+rr2-c` costs 1.93x the transformer's MACs/token (829,760 vs
+430,080), so per-MAC the family is still roughly 0.03–0.05 behind. The next
+lever is compute per token (depth, not width), not more bpc.
+
+All three pre-registered conditions are satisfied: 900 s confirm, scrambled
+control (−0.1448), second seed. The mechanism is accepted.
+
 ## suffix_copy pays at 360 s, and the dot family now beats the transformer
 
 One healthy session, 360 s/arm, one seed, `data_fp a23bcd55c7/afc1109404`:
