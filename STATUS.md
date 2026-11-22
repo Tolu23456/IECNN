@@ -25,7 +25,8 @@ copy channel is a **real induction mechanism**, not a mixture trick: replacing
 its pointer with a random earlier position costs −0.1448 and is worse than
 shutting the gate. **Plain voting over duplicate matches is closed** (they are
 the same coincidence, not independent evidence); extension-based *selection* is
-the priced successor and is screening now.
+the priced successor — **−0.0062 to −0.0076 bpc on four trained checkpoints**,
+zero parameters — and is screening on the GPU.
 
 **Honest framing:** this is a small-scale, ≤2.0 bpc, T4 result. The per-MAC
 advantage decays with budget (0.10 at 25T to 0.018 at 150T) and the curves are
@@ -111,7 +112,36 @@ is why the trained gap (0.0085/0.0155) is smaller than the b-ablation (0.0132).
 
 Consequence for the next mechanism: gate tuning is **closed**. Raising the
 average needs more **coverage** — which positions fire, i.e. selection among
-multiple occurrences — which is exactly the in-flight `sc3ev`.
+multiple occurrences — which is `sc3ev`.
+
+### Selection pays, and the family is nearly used up
+
+`iecnn-selection-trained` (frozen weights, frozen gate, `p` from the same
+checkpoint with the gate shut, faithfulness exact on all four):
+
+| checkpoint | single | extpick | **extvote** | oracle | extvote gain |
+|---|---|---|---|---|---|
+| `x5-sc3e` s0 | 1.7745 | 1.7686 | **1.7683** | 1.7607 | −0.0062 |
+| `x5-sc3e` s1 | 1.7732 | 1.7671 | **1.7668** | 1.7592 | −0.0064 |
+| `x4-sc3e` s0 | 1.7910 | 1.7845 | **1.7840** | 1.7761 | −0.0070 |
+| `x5-sc3` s0 | 1.7828 | 1.7758 | **1.7752** | 1.7665 | −0.0076 |
+
+- Copying the follower of the **longest-extension** occurrence instead of the
+  newest is worth **0.0062–0.0076** for **zero parameters** — about half of what
+  the entire slope mechanism delivered, and stable while the checkpoints' levels
+  differ by 0.018. It fixes 263 and breaks 134 of 9,470 covered positions.
+- Gating on the **selected** occurrence's extension adds **+0.0010** (and
+  exactly nothing on the scalar arm, which has no slope).
+- **The "0.184 oracle / 2.8x still on the table" claim is withdrawn for this
+  arm**: that was a *fitted* gate on the checkpoint that never trained the
+  channel. With the trained gate the whole family is worth **0.0138**, so
+  extvote already captures **45%** and only 0.0076 is left for a better
+  selector.
+- Because this is an eval-time substitution it is a **lower bound** — a trained
+  arm also adapts `p` and the gate. Pre-registered reading for the queued 360 s
+  arm (`x5-sc3ev` vs `x5-sc3e`): its ~0.01 floor **cannot resolve a 0.007
+  effect**, so a flat result is a resolution failure, not a rejection; only a
+  loss >0.01 would close the mechanism. The 900 s confirm is the decider.
 
 ### Long continuations: a diagnostic, and one trap
 
