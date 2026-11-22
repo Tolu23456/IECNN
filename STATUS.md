@@ -74,9 +74,35 @@ swaps between seeds** (spare = dot 0 at +0.17 on s0, dot 1 at +0.10 on s1). So:
 division of labour yes, stable per-index meaning no. **Do not build index-based
 routing.**
 
-Consequence for the next mechanism: raising the average needs more **coverage**
-(approximate/partial matching), not a better gate — the learned gate is already
-a good selector (0.146 baseline, 0.84 at long extension).
+### And the gate parameters are already at their optimum
+
+`iecnn-slope-ablation` fixes every weight of the trained `sc3e` and changes only
+the slope at eval (faithfulness exact: analytic == model to 4 dp, 1.7740 /
+1.7728):
+
+| | s0 | s1 |
+|---|---|---|
+| learned a / b | −1.7684 / +0.2884 | −1.7679 / +0.2864 |
+| coverage / copy accuracy | 23.3% / 63.0% | 23.3% / 63.0% |
+| whole channel (gate shut) | **+0.0653** | **+0.0623** |
+| slope only (b=0, a kept) | **+0.0132** | **+0.0129** |
+| sweep optimum | b=0.25 (+0.0005) | b=0.25 (+0.0004) |
+
+The eval-only control reproduces the trained two-seed difference (−0.0120) to
+0.001, so the batch result is the mechanism. And **nothing is left in the
+parameters**: b is within 0.0005 of its sweep optimum on both seeds, a is
+optimal given b (a = −2/−1/0 costs 1.7746/1.7811/1.8184), and no cell of the
+2-D grid beats the learned point by more than 0.0005.
+
+Copy accuracy by extension is what the slope exists to exploit: **49.5% at
+extension 0 → 87.5% at 8+**, with the gate rising 0.146 → 0.632. The 8+ bucket is
+10.8% of all firing positions. The scalar arm is not `sc3e` with b=0 — it runs a
+0.241 flat gate (a=−1.1447), which recovers 0.0047 of the difference, and that
+is why the trained gap (0.0085/0.0155) is smaller than the b-ablation (0.0132).
+
+Consequence for the next mechanism: gate tuning is **closed**. Raising the
+average needs more **coverage** — which positions fire, i.e. selection among
+multiple occurrences — which is exactly the in-flight `sc3ev`.
 
 ## 2026-11-21 — capacity in the HEAD pays; the POPULATION is a fusion
 
