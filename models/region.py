@@ -219,6 +219,19 @@ class Region(nn.Module):
                          if (self.suffix_copy > 0
                              and m.get("suffix_copy_slope", False)) else None)
         self.sc_extra_cap = int(m.get("suffix_copy_extra_cap", 8))
+        # suffix_copy_vote = M: instead of copying from the single most recent
+        # occurrence of the k-gram, take up to M earlier occurrences and put
+        # the copy mass on those whose match extends furthest back (ties share
+        # the mass). Measured over 40,960 val positions: the single pointer is
+        # 62.9% right at 23.1% coverage; max-extension selection is 63.7% and
+        # voting among max-extension ties 64.3% at the SAME coverage, fixing
+        # 7.5% of the single pointer's errors instead of 0%. Plain majority
+        # voting is measured worse (65.5% at 9.0% coverage) because duplicate
+        # k-grams are mostly the same coincidence, not independent evidence, so
+        # only the extension-weighted form is implemented. The gate feature
+        # becomes the MAX extension, which is the one the copy came from.
+        self.suffix_copy_vote = (int(m.get("suffix_copy_vote", 0))
+                                 if self.suffix_copy > 0 else 0)
         self.ngram_r = int(m.get("ngram_bias", 0))
         if self.ngram_r > 0:
             e1 = torch.empty(vocab_size, self.ngram_r)
@@ -1088,6 +1101,60 @@ class Region(nn.Module):
             extra = extra + ok.to(extra.dtype)
         return copy_ids, valid, extra
 
+    def _suffix_vote(self, ids: torch.Tensor, m: int):
+        """Copy distribution over the max-EXTENSION occurrences of the k-gram.
+
+        Returns (copy_ids [B,T,m], weights [B,T,m], valid [B,T], maxext [B,T]).
+        `weights` is uniform over the candidates whose extension equals the
+        maximum (1/k on a k-way tie), so a tie hedges instead of picking
+        arbitrarily. `valid` is False only when the k-gram never occurred
+        earlier, so coverage is identical to the single pointer's and any gain
+        is precision on the same firing set. Causality is unchanged: every
+        pointer s has s < t and copies x[s+1] with s+1 <= t.
+        """
+        k = self.suffix_copy
+        b, t = ids.shape
+        x = ids.to(torch.int64)
+        zero = torch.zeros(b, 1, dtype=x.dtype, device=x.device)
+        h = torch.zeros_like(x)
+        for j in range(k):                      # same hash as _suffix_copy
+            h = h + torch.cat((zero.expand(b, j), x), dim=1)[:, :t] \
+                * (256 ** j)
+        idx = torch.arange(t, dtype=torch.long, device=ids.device)
+        full = idx >= (k - 1)
+        cand = (h.unsqueeze(2) == h.unsqueeze(1))
+        cand = cand & full.view(1, 1, t) & full.view(1, t, 1)
+        cand = cand & (idx.view(1, 1, t) < idx.view(1, t, 1))
+        pos = torch.where(cand, idx.view(1, 1, t).expand(b, t, t),
+                          torch.full((), -1, dtype=torch.long,
+                                     device=ids.device))
+        # the m most recent occurrences, MOST RECENT FIRST: take the max, then
+        # mask it out so the next max is the next most recent.
+        ss = []
+        for _ in range(m):
+            s, _p = pos.max(dim=-1)
+            ss.append(s)
+            pos = pos.masked_fill(pos == s.unsqueeze(-1), -1)
+        s = torch.stack(ss, dim=-1)             # [B,T,m], invalid = -1
+        valid = s >= 0
+        src = (s + 1).clamp_(min=0, max=t - 1)
+        xe = x.unsqueeze(2).expand(b, t, m).contiguous()
+        copy_ids = xe.gather(1, src)            # [B,T,m]
+        # extension of each candidate: bytes agreeing BEFORE the k-gram
+        extra = torch.zeros_like(s)
+        for e in range(self.sc_extra_cap):
+            ai = idx.view(1, t, 1) - k - e
+            si = s - k - e
+            av = xe.gather(1, ai.clamp_min(0).expand(b, t, m))
+            sv = xe.gather(1, si.clamp_min(0))
+            ok = (ai >= 0) & (si >= 0) & (av == sv) & (extra == e)
+            extra = extra + ok.to(extra.dtype)
+        exv = extra.masked_fill(~valid, -1)
+        maxext, _p = exv.max(dim=-1)            # [B,T], -1 if none
+        keep = valid & (exv == maxext.unsqueeze(-1))
+        w = keep.to(extra.dtype) / keep.sum(-1, keepdim=True).clamp_min(1)
+        return copy_ids, w, valid.any(dim=-1), maxext.clamp_min(0)
+
     # ------------------------------------------------------------------
     def forward(self, rows: torch.Tensor, emb_table: torch.Tensor,
                 tau0: float = 1.0, hard_mode: bool = False,
@@ -1119,17 +1186,32 @@ class Region(nn.Module):
             # so the arm is the baseline at init and only earns weight on the
             # val loss. With `sc_slope` the gate is sigmoid(a + b*extension),
             # i.e. it can ask for more weight on a longer match; b=0 at init.
-            if self.sc_slope is None:
-                copy_ids, valid = self._suffix_copy(ids)
-                logit = self.sc_gate
-            else:
-                copy_ids, valid, extra = self._suffix_copy(ids,
-                                                           with_extra=True)
-                logit = (self.sc_gate + self.sc_slope
-                         * extra.clamp(max=self.sc_extra_cap).to(
-                             self.sc_gate.dtype))
             p = out["log_b"].exp()
-            q = F.one_hot(copy_ids, p.shape[-1]).to(p.dtype)
+            if self.suffix_copy_vote > 0:
+                # selection variant: distribute the copy over max-extension
+                # occurrences; the gate sees the MAX extension.
+                cm, wgt, valid, maxext = self._suffix_vote(
+                    ids, self.suffix_copy_vote)
+                q = torch.zeros_like(p)
+                for j in range(cm.shape[-1]):
+                    q = q + (wgt[..., j:j + 1].to(p.dtype)
+                             * F.one_hot(cm[..., j], p.shape[-1]).to(p.dtype))
+                logit = self.sc_gate
+                if self.sc_slope is not None:
+                    logit = (logit + self.sc_slope
+                             * maxext.clamp(max=self.sc_extra_cap).to(
+                                 self.sc_gate.dtype))
+            else:
+                if self.sc_slope is None:
+                    copy_ids, valid = self._suffix_copy(ids)
+                    logit = self.sc_gate
+                else:
+                    copy_ids, valid, extra = self._suffix_copy(ids,
+                                                               with_extra=True)
+                    logit = (self.sc_gate + self.sc_slope
+                             * extra.clamp(max=self.sc_extra_cap).to(
+                                 self.sc_gate.dtype))
+                q = F.one_hot(copy_ids, p.shape[-1]).to(p.dtype)
             g = (torch.sigmoid(logit).unsqueeze(-1)
                  * valid.unsqueeze(-1).to(p.dtype))
             out["log_b"] = torch.log(((1 - g) * p + g * q).clamp_min(1e-9))

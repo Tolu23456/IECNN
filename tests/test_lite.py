@@ -1809,3 +1809,70 @@ def test_suffix_copy_slope_starts_as_the_scalar_and_gets_gradient():
     (-lp.mean()).backward()
     g = slope.regions[0].sc_slope.grad
     assert g is not None and torch.isfinite(g).all() and g.abs().sum() > 0
+
+
+def test_suffix_vote_selects_the_extension_max_over_the_newest():
+    """The selection variant must copy from the occurrence whose match extends
+    furthest back, NOT from the most recent one. The window is built so the
+    newest candidate (9) has extension 0 and the older one (7) has extension 1,
+    with target 7 -- i.e. the channel can only be right by selecting."""
+    m = build_iecnn(_cfg(suffix_copy=3, suffix_copy_vote=2, global_read=True,
+                         head_last_only=True, per_dot_logits=False,
+                         n_passes=1, cell="lug"), 64)
+    r = m.regions[0]
+    ids = torch.tensor([[1, 1, 1, 9, 4, 5, 6, 7, 4, 5, 6, 9, 4, 5, 6, 7]])
+    cm, wgt, valid, maxext = r._suffix_vote(ids, 2)
+    t = 14
+    assert bool(valid[0, t])
+    assert [int(v) for v in cm[0, t]] == [9, 7], cm[0, t]   # newest first
+    assert int(maxext[0, t]) == 1, maxext[0, t]
+    assert torch.allclose(wgt[0, t], torch.tensor([0.0, 1.0])), wgt[0, t]
+    # q must therefore put all copy mass on the older, extended occurrence
+    assert int(ids[0, t + 1]) == 7, "the target byte must be the older copy"
+
+
+def test_suffix_vote_splits_mass_on_an_extension_tie():
+    """Two candidates with equal extension are a genuine tie: the copy mass is
+    shared rather than silently preferring the newest, which is the hedging the
+    measurement pays for."""
+    m = build_iecnn(_cfg(suffix_copy=3, suffix_copy_vote=2, global_read=True,
+                         head_last_only=True, per_dot_logits=False,
+                         n_passes=1, cell="lug"), 64)
+    r = m.regions[0]
+    ids = torch.tensor([[4, 5, 6, 8, 4, 5, 6, 7, 4, 5, 6, 7, 9, 1]])
+    cm, wgt, valid, maxext = r._suffix_vote(ids, 2)
+    t = 10
+    assert bool(valid[0, t])
+    assert [int(v) for v in cm[0, t]] == [7, 8], cm[0, t]
+    assert int(maxext[0, t]) == 0, maxext[0, t]
+    assert torch.allclose(wgt[0, t], torch.tensor([0.5, 0.5])), wgt[0, t]
+
+
+def test_suffix_vote_with_one_occurrence_is_the_scalar_channel():
+    """Where a k-gram has exactly one earlier occurrence there is nothing to
+    select, so the vote path must be numerically identical to the scalar path
+    (including the extension the slope sees). This is the flag-on degeneration
+    guard: a vote arm must not differ from its control for free."""
+    kw = dict(global_read=True, head_last_only=True, per_dot_logits=False,
+              n_passes=1, cell="lug")
+    scalar = build_iecnn(_cfg(suffix_copy=3, suffix_copy_slope=True, **kw), 64)
+    vote = build_iecnn(_cfg(suffix_copy=3, suffix_copy_slope=True,
+                            suffix_copy_vote=3, **kw), 64)
+    vote.load_state_dict(scalar.state_dict(), strict=False)
+    scalar.eval(); vote.eval()
+    # every matched k-gram occurs exactly once, so no position can have a vote.
+    # Row 0 also has one byte of extension before the match (9 at both 2 and 7),
+    # otherwise the slope would see maxext=0 everywhere and its gradient would
+    # be identically zero -- the trap that made an earlier test measure nothing.
+    x = torch.tensor([[1, 9, 4, 5, 6, 7, 8, 9, 4, 5, 6, 10],
+                      [5, 6, 7, 8, 9, 10, 11, 12, 5, 6, 7, 13]])
+    _cm, _w, _v, _me = vote.regions[0]._suffix_vote(x, 3)
+    assert int(_me.max()) >= 1, "test sequence has no extended match"
+    a, b = _fwd(scalar, x), _fwd(vote, x)
+    assert torch.allclose(a, b, atol=1e-6), (a - b).abs().max()
+    # and the gate/slope must both still reach the loss in vote mode
+    vote.train()
+    lp = vote(x)["final_log_probs"]
+    (-lp.mean()).backward()
+    g = vote.regions[0].sc_slope.grad
+    assert g is not None and torch.isfinite(g).all() and g.abs().sum() > 0

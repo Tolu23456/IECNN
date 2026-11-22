@@ -67,7 +67,7 @@ def iecnn(cell="gru", lean=False, n_passes=3, n_dots=8, d_s=128, d=128,
           global_read=False, read_schedule="mix", head_untied=False,
           cell_ln=False, share_cell=False, query_from_input=False,
           id_lags=False, ngram_bias=0, suffix_copy=0,
-          suffix_copy_slope=False, head_rank=0,
+          suffix_copy_slope=False, suffix_copy_vote=0, head_rank=0,
           state_carry=False, carry_chunk=8, gla=False,
           global_exact=False, head_skip=False, break_scan=False,
           d_q=16, d_v=32, head_post=0, head_post_layers=1,
@@ -104,6 +104,7 @@ def iecnn(cell="gru", lean=False, n_passes=3, n_dots=8, d_s=128, d=128,
         "ngram_bias": ngram_bias,
         "suffix_copy": suffix_copy,
         "suffix_copy_slope": suffix_copy_slope,
+        "suffix_copy_vote": suffix_copy_vote,
         "head_rank": head_rank,
         "state_carry": state_carry,
         "carry_chunk": carry_chunk,
@@ -1614,6 +1615,20 @@ ARMS = {
         global_read=True, spans=(8,), head_post=512, head_post_layers=5,
         read_ln=True, head_ln=True, global_decay=True, reread=2, suffix_copy=3),
         {"lr": 2e-3, "swa": 0.99, "compile": True}),
+    # (0) SELECTION instead of the newest pointer: take up to 3 earlier
+    # occurrences of the 3-gram and put the copy mass on the ones whose match
+    # extends furthest back. Measured over 40,960 val positions: 64.3% right at
+    # 23.1% coverage vs 62.9% for the single pointer at the same coverage, and
+    # it fixes 7.5% of the single pointer's errors instead of 0%. Plain voting
+    # was measured worse (65.5% at 9.0%) because duplicate k-grams are the same
+    # coincidence, so only the extension-weighted form is here. No new
+    # parameters; the slope now gates on the MAX extension, the one copied.
+    "iecnn-n3-x5-p1-ln-decay-d128-w512-rr2-c-sc3ev": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=512, head_post_layers=5,
+        read_ln=True, head_ln=True, global_decay=True, reread=2, suffix_copy=3,
+        suffix_copy_slope=True, suffix_copy_vote=3),
+        {"lr": 2e-3, "swa": 0.99, "compile": True}),
     # --- two levers on top of the channel that paid ----------------------
     # (1) A second gate parameter: gate = sigmoid(a + b*extension), where the
     # extension is how many bytes agree BEFORE the 3-gram. Observable, and it
@@ -1658,6 +1673,16 @@ ARMS = {
         global_read=True, spans=(8,), head_post=512, head_post_layers=5,
         read_ln=True, head_ln=True, global_decay=True, reread=2, suffix_copy=3),
         {"lr": 2e-3, "swa": 0.99, "compile": True, "seed": 1}),
+    # Depth 3: x5->x4 was equal-or-better per MAC below ~45T and bought 11% of
+    # the step, which is the direction the objective rewards. If that trend
+    # continues, the post-MLP depth was over-provisioned at this width and x3
+    # is the compute-efficient arm.
+    "iecnn-n3-x3-p1-ln-decay-d128-w512-rr2-c-sc3e": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=512, head_post_layers=3,
+        read_ln=True, head_ln=True, global_decay=True, reread=2, suffix_copy=3,
+        suffix_copy_slope=True),
+        {"lr": 2e-3, "swa": 0.99, "compile": True}),
     # Seed-1 twins for the confirm of the two new levers. Each is the SAME
     # architecture as its seed-0 arm with only the seed changed, so the confirm
     # gives a within-session slope contrast (x5-sc3 vs x5-sc3e) and a
