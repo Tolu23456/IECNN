@@ -125,10 +125,21 @@ the transformer** at equal wall clock. The pointer audit of the sc3 arm is
 identical to its control (dots still at `dist_back` [4.0, 1.99, 0.0]), so the
 gain is a new path, not a rescue of the collapsed dot.
 
-Two pre-registered gates still stand between this and a claim: a **900 s
-confirm with seed-1 twins** in one session (`iecnn-sc9-gpu`), and the
-**scrambled-pointer audit** (`iecnn-scramble-check`). If `scrambled ≈ true`, the
-margin is a mixture trick and the mechanism is closed regardless of the bpc.
+The **scrambled-pointer audit has passed** (`iecnn-scramble-check`): with every
+parameter, the mixture and the learned gate (0.2616) held fixed, replacing the
+pointer with a random earlier position costs **−0.1448 bpc** (1.8339 → 1.9787)
+and is **worse than forcing the gate shut** (1.8930). The gain is in the band:
+right d 9-64 goes 1.2011 → 0.6053, while wrong guesses get *worse* (+0.0760 on
+wrong d>8) — a scalar gate cannot see correctness and pays for its false
+positives. So the margin is the **match**, not a peaked prior.
+
+It also demonstrates the post-hoc caveat: on the model trained with the channel
+the best constant gate is **0.00** (mixing now hurts) even though shutting the
+gate costs 0.059 — the value is in the weights, so offline ceilings
+under-estimate a trained channel (ceiling 0.052, delivered 0.0655).
+
+One pre-registered gate remains: the **900 s confirm with seed-1 twins** in one
+session (`iecnn-sc9-gpu`, running).
 
 The horizon ladder also landed: truncating the transformer to a 7- or 22-token
 horizon costs **+0.198 / +0.123**, far more than the dot model's whole gap, so
