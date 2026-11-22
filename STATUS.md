@@ -152,6 +152,31 @@ compute-limited-regime, closing at the top of the measured range.
 All three pre-registered conditions are satisfied: 900 s confirm, scrambled
 control (−0.1448), second seed. The mechanism is accepted.
 
+## Voting is closed; extension-based SELECTION has headroom
+
+`iecnn-copy-vote` on the unadapted checkpoint (40,960 positions, k=3, up to 3
+earlier occurrences):
+
+| channel | coverage | accuracy | gate gain (OOF) |
+|---|---|---|---|
+| single pointer | 23.1% | 62.9% | +0.0661 |
+| last two must agree | 5.7% | 87.6% | +0.0325 |
+| majority of 3 | 9.0% | 65.5% | +0.0368 |
+| pick longest extension | 23.1% | 63.7% | +0.0743 |
+| vote among max-extension | 23.1% | 64.3% | **+0.0793** |
+| oracle (any occurrence right) | 15.6% | 100% | +0.1841 |
+
+Voting fails for a concrete reason: where >=2 occurrences exist (n=3,689) the
+single pointer is *already* 63.6% right, so duplicate 3-grams are the same
+coincidence rather than independent evidence — majority voting fixes 2.5% of the
+single pointer's errors and halves coverage. Using extension to **choose** the
+occurrence fixes 5.6–7.5% at full coverage.
+
+The oracle gap is the strategic number: 12.5% of single-wrong positions have the
+right byte among their candidates and extvote finds 7.5%, so pointer selection
+has ~1.4x its delivered gain unclaimed and a 2.8x ceiling. Priced post-hoc on an
+unadapted model, which has over-predicted 4.5x before, so it is a screen target.
+
 ## 360 s screen: the extension gate and depth both pay (one seed, superseded)
 
 `iecnn-ext360-gpu`, 360 s/arm, one seed, `data_fp a23bcd55c7/afc1109404`,
