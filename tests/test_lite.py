@@ -1790,8 +1790,14 @@ def test_suffix_copy_slope_starts_as_the_scalar_and_gets_gradient():
     slope.load_state_dict(scalar.state_dict(), strict=False)
     assert slope.regions[0].sc_slope is not None
     assert float(slope.regions[0].sc_slope) == 0.0
-    x = torch.tensor([[1, 2, 3, 4, 1, 2, 3, 5, 1, 2, 3, 6],
-                      [7, 8, 9, 4, 7, 8, 9, 5, 7, 8, 9, 6]])
+    # The sequence must contain a match WITH extension, or d(gate)/d(slope) is
+    # identically zero and the gradient test measures nothing -- the same trap
+    # the scalar gradient test fell into once. Row 1 repeats "1,2,3,4", so the
+    # match at target 11 extends one byte; row 2 repeats "2,3,4,5".
+    x = torch.tensor([[5, 6, 1, 2, 3, 4, 7, 8, 1, 2, 3, 4, 9],
+                      [9, 8, 2, 3, 4, 5, 6, 2, 3, 4, 5, 7, 1]])
+    _c, _v, _e = slope.regions[0]._suffix_copy(x, with_extra=True)
+    assert int(_e.max()) >= 1, "test sequence has no extended match"
     with torch.no_grad():
         a = _fwd(scalar, x)
         slope.eval()
