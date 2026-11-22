@@ -95,6 +95,12 @@ def pair_lcs(a: bytes, b: bytes) -> int:
     return m.find_longest_match(0, len(a), 0, len(b)).size
 
 
+def greedy_hit(gen: bytes, seg: bytes) -> str:
+    """Positional matches and longest common substring vs the induced segment."""
+    pos = sum(a == b for a, b in zip(gen, seg))
+    return f"={pos}/{len(seg)}B lcs{pair_lcs(gen, seg)}B"
+
+
 def structural(bs: bytes) -> dict:
     link = bs.count(b"[[")
     close = bs.count(b"]]")
@@ -154,8 +160,16 @@ def main() -> None:
                                PROMPT_B + len(g))
                 echo_hit = ""
                 if label == "echo":
-                    echo_hit = (f" echo={sum(a == b for a, b in zip(g, seg))}"
-                                f"/{len(seg)}B")
+                    # Two reads, because a positional count is not the question.
+                    # The prompt is seg+seg, so the induced continuation is seg
+                    # itself; a model that merely re-samples similar prose can
+                    # match ~40% of positions by chance, while only real
+                    # retrieval produces a long common SUBSTRING. Greedy is
+                    # also reported: the pattern result (Q1) was greedy, so
+                    # this is the same test on natural text.
+                    gg = generate_bytes(model, p, len(seg), mode="greedy",
+                                        ctx=CTX, temp=TEMP, topk=40, seed=SEED)
+                    echo_hit = (f" echo{greedy_hit(gg, seg)} greedy={gg[:len(seg)]!r}")
                 print(f"\n[{label}] prompt: {bytes(pr).decode('latin-1')!r}",
                       flush=True)
                 for i, ch in enumerate(chunks(g)):
