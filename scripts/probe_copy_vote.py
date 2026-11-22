@@ -122,16 +122,20 @@ def derive(CVAL, EXT, CN):
     """Prediction, validity and mass-on-truth for each channel."""
     n = CVAL.shape[0]
     out = {}
-    cnt_ok = np.zeros(n, dtype=np.float64)
+    rows = np.arange(n)
+    # CVAL is [n, M] with -1 filler, so the most recent candidate is at
+    # column CN-1, NOT column M-1. Indexing [:, -1] reads filler whenever an
+    # occurrence list is shorter than M -- the self-check caught exactly that.
+    last_idx = np.maximum(CN.astype(np.int64) - 1, 0)
+    prev_idx = np.maximum(CN.astype(np.int64) - 2, 0)
+    last = CVAL[rows, last_idx].astype(np.int64)
+    prev = CVAL[rows, prev_idx].astype(np.int64)
 
     # single: the most recent occurrence
-    single_pred = CVAL[:, -1].astype(np.int64)
-    single_valid = CN >= 1
-    out["single"] = (single_pred, single_valid)
+    out["single"] = (last, CN >= 1)
 
     # strict2: requires two occurrences that agree
-    s2_valid = (CN >= 2) & (CVAL[:, -1] == CVAL[:, -2])
-    out["strict2"] = (CVAL[:, -1].astype(np.int64), s2_valid)
+    out["strict2"] = (last, (CN >= 2) & (last == prev))
 
     # voteM: majority of up to M, ties to the most recent
     vote_pred = np.zeros(n, dtype=np.int64)
@@ -164,11 +168,9 @@ def mass_on_truth(channel, CVAL, CN, EXT, y):
     """q[true byte] for each channel: a real distribution for voteM."""
     n = CVAL.shape[0]
     idx = np.arange(M)[None, :]
-    if channel == "single":
-        return ((CVAL[:, -1] == y) & (CN >= 1)).astype(np.float32)
-    if channel == "strict2":
-        v = (CN >= 2) & (CVAL[:, -1] == CVAL[:, -2])
-        return (v & (CVAL[:, -1] == y)).astype(np.float32)
+    if channel in ("single", "strict2"):
+        pred, valid = derive(CVAL, EXT, CN)[channel]
+        return (valid & (pred == y)).astype(np.float32)
     if channel == "voteM":
         hit = ((CVAL == y[:, None]) & (idx < CN[:, None])).sum(1)
         return (hit / np.maximum(CN, 1)).astype(np.float32)
@@ -186,7 +188,10 @@ def self_check() -> None:
     assert (w[8:11] == w[4:7]).all() and (w[8:11] == w[0:3]).all(), "setup"
     assert int(CN[t]) == 2, CN[t]
     assert list(CVAL[t, :2]) == [8, 7], CVAL[t]
-    assert int(CVAL[t, -1]) == 7, "most recent follower must be the single copy"
+    # CN < M here, so this also pins the filler bug: the single copy must be
+    # column CN-1 (=7), not column M-1 (which is -1).
+    pred1, valid1 = derive(CVAL, EXT, CN)["single"]
+    assert bool(valid1[t]) and int(pred1[t]) == 7, pred1[t]
     pred, valid = derive(CVAL, EXT, CN)["strict2"]
     assert not bool(valid[t]), "8 vs 7 must abstain under strict2"
     vp, vv = derive(CVAL, EXT, CN)["voteM"]
