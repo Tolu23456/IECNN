@@ -51,7 +51,9 @@ def bpc_from(p_true, mass_true, valid, a, b, extra, cap):
         logit = a + b * extra.clamp(max=cap).to(torch.float32)
     g = torch.sigmoid(logit) * valid.to(torch.float32)
     mix = (1 - g) * p_true + g * mass_true
-    return float(-torch.log2(mix.clamp_min(1e-12)).mean())
+    # the model logs a mixture clamped at 1e-9; match it exactly so the
+    # faithfulness check below compares the same quantity
+    return float(-torch.log2(mix.clamp_min(1e-9)).mean())
 
 
 def main() -> None:
