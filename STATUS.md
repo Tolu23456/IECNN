@@ -62,6 +62,15 @@ not the last raw marker.
   and the behaviour collapses to 0.016 while the teacher-forced gain falls from
   −9.19 to −6.41 bpc. It is exact-match continuation, not pattern completion,
   and `tf` cannot do it at all (8.11 bpc) — a real capability difference.
+- **And it transfers to natural text, partially** (`iecnn-longtext` v3). A real
+  48-byte val segment repeated twice, decoded **greedily**: the channel
+  reproduces **25 B verbatim** (18/48 positions) with the gate open and **8 B**
+  with it shut, on **both seeds, with byte-identical output** —
+  `now, formed the population, and becanow, formed `. `tf-swa-c` gets 3/48 and
+  its 18-byte substring is just `population of the population`. So induction is
+  graded on prose (52%) rather than all-or-nothing, which is the same statement
+  as 9.19 bpc on the niche vs 0.006 on prose. Sampled position counts are not a
+  usable metric here (~40% match by chance).
 
 **The dots are a two-dot committee plus a spare**, and the shape is the same on
 the model's own generated text as on real text (drop-one +0.168/+1.265/+3.932
