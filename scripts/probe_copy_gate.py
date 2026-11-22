@@ -83,18 +83,24 @@ def window_channel(w: np.ndarray):
             key = w[p - K:p].tobytes()
             e = seen.get(key, -1)
             if e >= 0 and e + 1 < p:
-                copy[p] = w[e + 1]
-                valid[p] = True
-                dist[p] = p - (e + 1)
+                # w[p] is the TARGET byte (window offset p-1, because offset 0
+                # is the context for the first target), so every output array is
+                # indexed by p-1. Getting this wrong shifts the whole channel by
+                # one and reports ~8% correct instead of the verified ~63%.
+                tgt = p - 1
+                copy[tgt] = w[e + 1]
+                valid[tgt] = True
+                dist[tgt] = p - (e + 1)
+                # how many bytes agree BEFORE the k-gram: t = K, K+1, ...
                 x = 0
                 while x < EXTRA_CAP:
-                    j = K + x
-                    if p - 1 - j < 0 or e - j < 0:
+                    t = K + x
+                    if p - 1 - t < 0 or e - t < 0:
                         break
-                    if w[e - j] != w[p - 1 - j]:
+                    if w[e - t] != w[p - 1 - t]:
                         break
                     x += 1
-                extra[p] = x
+                extra[tgt] = x
             seen[key] = p - 1
     return copy, valid, dist, extra
 
@@ -139,6 +145,19 @@ def main() -> None:
     ap.add_argument("--device", default="cpu")
     args = ap.parse_args()
     device = torch.device(args.device)
+
+    # Guard against the off-by-one that this probe shipped with once: the
+    # pointer array is indexed by TARGET offset (p-1), and getting that wrong
+    # shifts the channel by one and reports ~8% correct instead of ~63%.
+    probe = np.array([1, 2, 3, 4, 1, 2, 3, 9], dtype=np.uint8)
+    pc, pv, pd, pe = window_channel(probe)
+    assert not pv[:3].any(), "a target with an incomplete context matched"
+    assert bool(pv[6]) and int(pc[6]) == 4 and abs(float(pd[6]) - 4.0) < 1e-6, \
+        (pc, pv, pd)
+    assert not bool(pv[7]), "9,3,2 never occurred earlier and must not match"
+    assert int(pe[6]) == 0, "the extension past the k-gram is zero here"
+    print("window_channel self-check ok (pointer at target 6 -> byte 4, d=4)",
+          flush=True)
 
     raw = np.frombuffer(open(VAL_PATH, "rb").read(N_VAL), dtype=np.uint8)
     val = torch.from_numpy(raw.astype(np.int64))
