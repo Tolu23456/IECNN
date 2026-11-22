@@ -24,6 +24,7 @@ SL_TEMP, SL_SEED.
 from __future__ import annotations
 
 import argparse
+import difflib
 import math
 import os
 from collections import Counter
@@ -61,18 +62,37 @@ def longest_repeat(bs: bytes, n: int = 4) -> int:
 def bpc_range(model, ids, a: int, b: int) -> float:
     """Teacher-forced bpc of the bytes at positions [a, b) of `ids`.
 
-    lp[t] predicts ids[t+1], so position p is scored by lp[p-1]; slicing
-    [a, b) directly would be off by one and would score the wrong bytes.
+    Two rules, both learned the hard way:
+      * only the last `CTX` tokens are fed, because that is the window the
+        decoder actually conditioned on and because the transformer's position
+        table is exactly T (feeding 398 tokens raised IndexError);
+      * lp[t] predicts ids[t+1], so position p is scored by lp[p-1]; slicing
+        [a, b) directly would score the wrong bytes.
     """
+    ids = list(ids)
+    cut = max(0, len(ids) - CTX)
+    ids, a, b = ids[cut:], a - cut, b - cut
+    a, b = max(a, 1), min(b, len(ids))
     if b - a < 1:
         return float("nan")
-    x = torch.tensor(list(ids), dtype=torch.long)[None]
+    x = torch.tensor(ids, dtype=torch.long)[None]
     with torch.no_grad():
         lp = model(x)["final_log_probs"][0]
     y = x[0, 1:]
-    lo, hi = a - 1, b - 1
-    nll = -lp[lo:hi].gather(1, y[lo:hi, None]).mean().item()
+    nll = -lp[a - 1:b - 1].gather(1, y[a - 1:b - 1, None]).mean().item()
     return nll / math.log(2)
+
+
+def pair_lcs(a: bytes, b: bytes) -> int:
+    """Longest common substring, in bytes, between two generations.
+
+    A model that has collapsed onto an attractor will emit the SAME passage
+    from two different prompts; a model that is still conditional on its prompt
+    will not. Sample-level d2 cannot see this because it is computed within one
+    sample.
+    """
+    m = difflib.SequenceMatcher(None, a, b, autojunk=False)
+    return m.find_longest_match(0, len(a), 0, len(b)).size
 
 
 def structural(bs: bytes) -> dict:
@@ -114,15 +134,18 @@ def main() -> None:
 
         conds = ["full", "off"] if has_copy else ["full"]
         saved = r.sc_gate.detach().clone() if has_copy else None
+        cond_texts = {}
         for cond in conds:
             print(f"\n--- {name} [{cond}] ---", flush=True)
             if cond == "off":
                 r.sc_gate.data.fill_(-60.0)
+            cond_texts[cond] = []
             for label, pr in prompts:
                 p = torch.tensor(pr, dtype=torch.long)[None]
                 g = generate_bytes(model, p, N_BYTES, mode="sample",
                                    temp=TEMP, topk=40, ctx=CTX, seed=SEED)
                 text = g.decode("latin-1")
+                cond_texts[cond].append(g)
                 st = structural(g)
                 # drift: self-bpc of the first and last chunk of the SAMPLE
                 seq = pr + list(g)
@@ -142,6 +165,12 @@ def main() -> None:
                       f"{st['link']}/{st['close']} | sentence/100B "
                       f"{st['sent']} | self-bpc {b1:.3f} -> {bN:.3f}"
                       f"{echo_hit}", flush=True)
+            ts = cond_texts[cond]
+            lcs = [pair_lcs(ts[i], ts[j]) for i in range(len(ts))
+                   for j in range(i + 1, len(ts))]
+            print(f"\n  [{cond}] pairwise longest common substring over "
+                  f"{len(ts)} prompts: mean {sum(lcs) / len(lcs):.1f}B, "
+                  f"max {max(lcs)}B of {N_BYTES}B", flush=True)
             if cond == "off":
                 r.sc_gate.data.copy_(saved)
 
