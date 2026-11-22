@@ -152,6 +152,31 @@ compute-limited-regime, closing at the top of the measured range.
 All three pre-registered conditions are satisfied: 900 s confirm, scrambled
 control (−0.1448), second seed. The mechanism is accepted.
 
+## CONFIRMED AT 900 s, TWO SEEDS: extension slope −0.0120, tf gap −0.0226
+
+`iecnn-c900-gpu`, one session, 900 s/arm, seven arms, common 255.55M tokens:
+
+| arm | seed | tokens | s/step | bpc |
+|---|---|---|---|---|
+| `tf-swa-c` | 0 | 362.04M | 0.0204 | **1.7960** |
+| `x5-sc3` | 0 | 258.66M | 0.0285 | 1.7825 |
+| `x5-sc3` | 1 | 259.11M | 0.0285 | 1.7883 |
+| `x5-sc3e` | 0 | 256.07M | 0.0288 | **1.7740** |
+| `x5-sc3e` | 1 | 255.55M | 0.0289 | **1.7728** |
+| `x4-sc3e` | 0 | 287.53M | 0.0257 | 1.7904 |
+| `x4-sc3e` | 1 | 287.44M | 0.0257 | 1.7894 |
+
+Slope effect −0.0085 / −0.0155 (mean **−0.0120**) for +1.1% step; seed spread
+0.0058 (sc3) vs 0.0012 (sc3e). Versus tf at equal wall clock: **−0.0220 /
+−0.0232**, about double the previous margin.
+
+At matched total MACs `x5-sc3e` is ahead of tf at **every** budget (25T −0.094/
+−0.100 … 150T −0.018/−0.019). `x4-sc3e` is the best arm at **low compute**
+(25T: 1.9987/2.0047 vs 2.0188/2.0126 vs tf 2.1124), crossing sc3e near 100T.
+MACs to 2.00 bpc: tf **48.3T**, x5-sc3e **29.1/27.1T**, x4-sc3e **24.7/26.3T**
+— **1.8–2.0x less compute**. But at the 900 s endpoint x4 is +0.0164/+0.0166
+behind x5-sc3e, so depth is a fixed-budget lever, not the headline.
+
 ## Voting is closed; extension-based SELECTION has headroom
 
 `iecnn-copy-vote` on the unadapted checkpoint (40,960 positions, k=3, up to 3
