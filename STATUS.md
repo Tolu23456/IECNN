@@ -124,13 +124,51 @@ compute, ~10x the within-pair seed spread; equal-token **−0.0625 / −0.0602**
 Versus the transformer at equal wall clock: **−0.0088 / −0.0125** (mean
 −0.0107), both seeds negative, with 33% fewer tokens.
 
-**Read it precisely:** this wins at equal **wall clock on a T4**, not at equal
-**MACs** — `x5+rr2-c` costs 1.93x the transformer's MACs/token (829,760 vs
-430,080), so per-MAC the family is still roughly 0.03–0.05 behind. The next
-lever is compute per token (depth, not width), not more bpc.
+**Read it precisely — and the per-MAC question is now measured, not assumed.**
+The earlier line here ("per-MAC the family is still 0.03–0.05 behind") described
+the *plain* arm and was wrongly applied to the accepted one. Interpolating the
+logged raw eval markers (the SWA endpoint is 0.045–0.061 better than the last
+raw marker on *every* arm, so it is excluded from the comparison) gives bpc at
+matched **total MACs**:
+
+| total MACs | `tf-swa-c` | `x5` plain | `x5-sc3` s0 | `x5-sc3` s1 |
+|---|---|---|---|---|
+| 10T | 2.3561 | 2.2980 (−0.058) | **2.2701 (−0.086)** | 2.2868 (−0.069) |
+| 25T | 2.1070 | 2.1070 (±0.000) | **2.0319 (−0.075)** | 2.0340 (−0.073) |
+| 50T | 1.9840 | 2.0145 (+0.031) | **1.9396 (−0.044)** | 1.9478 (−0.036) |
+| 100T | 1.8816 | 1.9394 (+0.058) | **1.8772 (−0.004)** | 1.8798 (−0.002) |
+| 160T | 1.8436 | 1.9055 (+0.062) | **1.8424 (−0.001)** | 1.8448 (+0.001) |
+
+MACs needed to reach a raw bpc: **2.10** tf 26.1T vs 18.1T/18.8T (1.4x less);
+**2.00** 45.9T vs 31.2T/30.6T (1.47x); **1.95** 63.9T vs 43.5T/49.3T (1.3–1.5x);
+**1.90** 87.6T vs 73.1T/81.9T (1.1–1.2x).
+
+So with the channel the dot model is **ahead at matched compute from 10T to
+~125T**, by 0.086 down to 0.004, and tied within seed noise by 150–160T. Without
+the channel it is tied at 25T and behind 0.03–0.06 above 50T. The mechanism, not
+the architecture family, is what buys the per-MAC win — and the win is
+compute-limited-regime, closing at the top of the measured range.
 
 All three pre-registered conditions are satisfied: 900 s confirm, scrambled
 control (−0.1448), second seed. The mechanism is accepted.
+
+## 360 s screen: the extension gate and depth both pay (one seed, superseded)
+
+`iecnn-ext360-gpu`, 360 s/arm, one seed, `data_fp a23bcd55c7/afc1109404`,
+common 104.08M tokens: tf **1.8880**, `x5-sc3` **1.8354**, `x5-sc3e`
+**1.8208**, `x4-sc3` **1.8451**, `x4-sc3e` **1.8322**.
+
+- **Extension slope** (`sc3e`): −0.0146 at depth 5, −0.0129 at depth 4, for
+  +1.1–1.2% step. Above seed noise, consistent across depths.
+- **Depth 5→4** (`x4`): +0.0097 / +0.0114 bpc at each arm's own endpoint for
+  −11% step and −16% params, i.e. ~13% more tokens in the same clock. Per MAC
+  it is not a loss: at 10T `x4-sc3e` 2.1788 vs `x5-sc3e` 2.2210, at 20T 2.0312
+  vs 2.0486, at 40T 1.9432 vs 1.9531, crossing only at ~50T (1.9320 vs 1.9287).
+- Per-MAC deltas vs tf at 10/20/30/40/50/60T: `x5-sc3e` −0.116/−0.100/−0.090/
+  −0.079/−0.059/−0.048; `x4-sc3e` −0.159/−0.118/−0.099/−0.089/−0.056/−0.043.
+
+Confirm queued: 900 s, two seeds each for `x5-sc3`, `x5-sc3e`, `x4-sc3e`,
+against an in-session `tf-swa-c`.
 
 ## suffix_copy pays at 360 s, and the dot family now beats the transformer
 

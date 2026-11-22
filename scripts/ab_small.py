@@ -1658,6 +1658,22 @@ ARMS = {
         global_read=True, spans=(8,), head_post=512, head_post_layers=5,
         read_ln=True, head_ln=True, global_decay=True, reread=2, suffix_copy=3),
         {"lr": 2e-3, "swa": 0.99, "compile": True, "seed": 1}),
+    # Seed-1 twins for the confirm of the two new levers. Each is the SAME
+    # architecture as its seed-0 arm with only the seed changed, so the confirm
+    # gives a within-session slope contrast (x5-sc3 vs x5-sc3e) and a
+    # within-session depth contrast (x5-sc3e vs x4-sc3e), both on two seeds.
+    "iecnn-n3-x5-p1-ln-decay-d128-w512-rr2-c-sc3e-s1": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=512, head_post_layers=5,
+        read_ln=True, head_ln=True, global_decay=True, reread=2, suffix_copy=3,
+        suffix_copy_slope=True),
+        {"lr": 2e-3, "swa": 0.99, "compile": True, "seed": 1}),
+    "iecnn-n3-x4-p1-ln-decay-d128-w512-rr2-c-sc3e-s1": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=512, head_post_layers=4,
+        read_ln=True, head_ln=True, global_decay=True, reread=2, suffix_copy=3,
+        suffix_copy_slope=True),
+        {"lr": 2e-3, "swa": 0.99, "compile": True, "seed": 1}),
     # --- where is the depth optimum at fixed width? ----------------------
     # rr2-c (head_post 512, 3 layers) and x5+rr2-c (same width, 5 layers) are
     # already a 2-point curve at fixed width: 1.8847 @357.8M tok and 1.8383
