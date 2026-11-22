@@ -1247,7 +1247,12 @@ def test_generation_ablation_condition_patches_one_thing_and_restores():
                          per_dot_logits=False, n_passes=1, cell="lug"), 64)
     m.eval()
     r = m.regions[0]
-    x = torch.randint(0, 64, (2, 16))
+    # The ids must CONTAIN a repeated k-gram, or `valid` is all False and every
+    # patch is a no-op -- the first version of this test used randint, asserted
+    # a difference, and failed for the right reason.
+    x = torch.tensor([[5, 6, 1, 2, 3, 4, 7, 8, 1, 2, 3, 4, 9, 1, 2, 3],
+                      [7, 8, 1, 2, 3, 4, 5, 6, 1, 2, 3, 4, 0, 1, 2, 3]])
+    assert bool(r._suffix_copy(x)[1].any()), "test needs a matched k-gram"
     # a gate near init is 3e-4 and nothing is visible; open it so the probe's
     # patch is measurable, which is what a trained checkpoint looks like
     r.sc_gate.data.fill_(0.5)
