@@ -1,4 +1,4 @@
-# IECNN status — 2026-11-21
+# IECNN status — 2026-11-22
 
 One-page state of the campaign. The evidence ledger is `DECISIONS.md` (every row
 is a measured batch with its in-session transformer anchor); this is the map, not
@@ -6,19 +6,31 @@ the evidence.
 
 ## The position in one paragraph
 
-At 900 s on the canonical 90/5 split the transformer anchor is **1.7923** and
-the best dot arm is **1.8383** (`x5+rr2-c`), so the dot model is behind by
-**0.046** at equal wall clock and **0.023** at equal tokens — i.e. **exactly
-half of the gap is throughput**: 398M tokens for tf against 272M for the dot
-arm, because `x5` costs 1.93× the anchor's MACs/token and 79% of that is the
-post-MLP head. So "cheaper at equal quality" is now worth as much as "better at
-equal compute", which is new: every previous purchase was capacity. At 3 h the gap is
-0.1153. Only two mechanisms have paid for their own compute: **`reread`**
-(−0.033, two seeds) and **head capacity** (`x5`, −0.046). The dot population is
-a genuine **fusion**, not a vote: on the 3 h checkpoint the mixture is 1.22 bpc
-better than the best single dot at every position, and dropping any dot costs
-0.34–4.60 bpc. But one of the three dots is doing a job the architecture should
-not charge a dot for — it is the only route for the current token into the cell.
+**The objective is met in the regime it was set for.** At 900 s on the canonical
+90/5 split, one healthy session, seven arms, common 255.55M tokens: `tf-swa-c`
+**1.7960**, `x5-sc3e` **1.7740 / 1.7728** (seeds 0/1), `x5-sc3` 1.7825 / 1.7883,
+`x4-sc3e` 1.7904 / 1.7894. So the dot model is **ahead of the transformer at
+equal wall clock by 0.0226** (mean of two seeds, both negative) on **29% fewer
+tokens**, ahead at equal tokens by ~0.05, and ahead at **matched total MACs at
+every measured budget** (25T −0.094/−0.100, 50T −0.065/−0.068, 100T −0.022/−0.026,
+150T −0.018/−0.019). To reach **2.00 bpc** it needs **27.1/29.1T MACs against the
+transformer's 48.3T** — 1.8x less compute; `x4-sc3e` does it in **24.7/26.3T**
+(2.0x) and is the best arm per MAC below ~100T, but at the 900 s endpoint it is
++0.016 behind `x5-sc3e`, so it is the compute-capped arm, not the headline.
+
+**What paid for its own compute**, each confirmed on two seeds in-session:
+`reread` (−0.033), head capacity `x5` (−0.046), the exact-match copy channel
+`suffix_copy` (−0.0506), and its match-extension slope `sc3e` (−0.0120). The
+copy channel is a **real induction mechanism**, not a mixture trick: replacing
+its pointer with a random earlier position costs −0.1448 and is worse than
+shutting the gate. **Plain voting over duplicate matches is closed** (they are
+the same coincidence, not independent evidence); extension-based *selection* is
+the priced successor and is screening now.
+
+**Honest framing:** this is a small-scale, ≤2.0 bpc, T4 result. The per-MAC
+advantage decays with budget (0.10 at 25T to 0.018 at 150T) and the curves are
+not shown to cross beyond the measured range, so the claim is
+compute-efficiency at ~2.0 bpc, not eventual superiority.
 
 ## 2026-11-21 — capacity in the HEAD pays; the POPULATION is a fusion
 
