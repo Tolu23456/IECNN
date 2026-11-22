@@ -32,6 +32,52 @@ advantage decays with budget (0.10 at 25T to 0.018 at 150T) and the curves are
 not shown to cross beyond the measured range, so the claim is
 compute-efficiency at ~2.0 bpc, not eventual superiority.
 
+## What the decoder actually uses: a specialist channel, a 2+spare committee
+
+`iecnn-genablate` (CPU, same weights, one inference change at a time, same
+prompt and seed). Faithfulness is exact: recomputed val bpc **1.7740 / 1.7728**
+for `x5-sc3e` s0/s1 vs `bpc_final` 1.774/1.7728, and 1.7972 for `tf-swa-c` vs
+1.796 — the saved weights are the SWA average, so `bpc_final` is the reference,
+not the last raw marker.
+
+| Q1 repeated random pattern, greedy 16B | match | run | tf bpc |
+|---|---|---|---|
+| `full` | **1.000** | 16.0 | **0.654** |
+| `off` (gate shut) | 0.008 | 0.0 | 9.844 |
+| `slope0` (b=0, level kept) | 0.078 | 1.2 | 2.701 |
+| `scram` (random pointer) | 0.008 | 0.0 | 10.537 |
+| `tf-swa-c` control | 0.021 | 0.0 | 8.106 |
+| drop dot 0 / 1 / 2 | 1.000 each | 16.0 | 0.655/0.652/0.653 |
+
+- **The channel is worth 9.19 bpc on its niche and 0.006 on ordinary text**
+  (Q2: 1.7354 full vs 1.7410 off, 192 positions). The 0.012 aggregate is small
+  because the niche is small, not because the mechanism is weak.
+- **The slope is 22% of the niche bpc but 92% of its behaviour**: flattening it
+  costs 2.05 bpc yet drops exact continuation from 1.000 to 0.06–0.08 — the
+  flat 14.6% copy weight leaves the right byte in the mixture but no longer
+  winning the argmax. The level term is the other 7.14 bpc.
+- **Induction is orthogonal to the dots**: dropping any single dot leaves
+  match 1.000 / run 16.0 / bpc 0.652–0.655.
+- **The falsifier holds**: flip one byte of the second copy (no k-gram matches)
+  and the behaviour collapses to 0.016 while the teacher-forced gain falls from
+  −9.19 to −6.41 bpc. It is exact-match continuation, not pattern completion,
+  and `tf` cannot do it at all (8.11 bpc) — a real capability difference.
+
+**The dots are a two-dot committee plus a spare**, and the shape is the same on
+the model's own generated text as on real text (drop-one +0.168/+1.265/+3.932
+self vs +0.138/+1.300/+3.762 real on s0; +1.059/+0.096/+4.316 vs
++0.962/+0.150/+4.171 on s1; mixture beats the best single dot by 1.44/1.23 bpc).
+The distance-0 dot is essential in both seeds (drop +3.9/+4.3) and the best
+solo dot (2.66/3.02 vs 5.57–5.69); one long-range dot carries real independent
+value; the third is nearly redundant — **but which index is the redundant one
+swaps between seeds** (spare = dot 0 at +0.17 on s0, dot 1 at +0.10 on s1). So:
+division of labour yes, stable per-index meaning no. **Do not build index-based
+routing.**
+
+Consequence for the next mechanism: raising the average needs more **coverage**
+(approximate/partial matching), not a better gate — the learned gate is already
+a good selector (0.146 baseline, 0.84 at long extension).
+
 ## 2026-11-21 — capacity in the HEAD pays; the POPULATION is a fusion
 
 | 900 s, common 272.23M tok, one session | params | s/step | bpc | bpc@eqtok |
