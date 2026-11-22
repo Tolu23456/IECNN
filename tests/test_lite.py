@@ -1231,6 +1231,93 @@ def test_generate_bytes_is_deterministic_and_greedy_is_argmax():
         raise AssertionError("expected ValueError for a 1-D prompt")
 
 
+def test_generation_ablation_condition_patches_one_thing_and_restores():
+    """The generation probe's whole claim is "same weights, one change", so the
+    context manager is what the comparison rests on.
+
+    It must (a) actually change the model inside the block, (b) restore the
+    exact state after, including after an exception in the body -- a `return`
+    in the finally block would swallow that exception and let a crashed
+    ablation be reported as a result -- and (c) leave the gate level alone for
+    `slope0`, since the probe's question is b, not a.
+    """
+    from scripts.probe_generation_ablation import condition
+    m = build_iecnn(_cfg(suffix_copy=3, suffix_copy_slope=True,
+                         global_read=True, head_last_only=True,
+                         per_dot_logits=False, n_passes=1, cell="lug"), 64)
+    m.eval()
+    r = m.regions[0]
+    x = torch.randint(0, 64, (2, 16))
+    # a gate near init is 3e-4 and nothing is visible; open it so the probe's
+    # patch is measurable, which is what a trained checkpoint looks like
+    r.sc_gate.data.fill_(0.5)
+    r.sc_slope.data.fill_(1.0)
+    with torch.no_grad():
+        base = m(x)["final_log_probs"].clone()
+    g0 = r.sc_gate.detach().clone()
+    b0 = r.sc_slope.detach().clone()
+
+    with condition(m, "off"):
+        with torch.no_grad():
+            off = m(x)["final_log_probs"].clone()
+    assert not torch.allclose(off, base)
+    assert torch.equal(r.sc_gate.detach(), g0)
+
+    with condition(m, "slope0"):
+        assert float(r.sc_gate) == 0.5          # level is NOT touched
+        with torch.no_grad():
+            s0 = m(x)["final_log_probs"].clone()
+    assert not torch.allclose(s0, base)
+    assert torch.equal(r.sc_slope.detach(), b0)
+
+    with condition(m, "scram", seed=3):
+        with torch.no_grad():
+            scr = m(x)["final_log_probs"].clone()
+    assert not torch.allclose(scr, base)
+    with torch.no_grad():
+        assert torch.allclose(m(x)["final_log_probs"], base)
+
+    # the finally block must not eat the body's exception
+    try:
+        with condition(m, "off"):
+            raise RuntimeError("boom")
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("condition() swallowed the body's exception")
+    assert torch.equal(r.sc_gate.detach(), g0)
+
+
+def test_generate_bytes_forwards_an_inference_ablation():
+    """`model_kwargs` exists so a probe can decode with ONE mechanism changed
+    on identical weights (`ablate_dot=k`, `pool_only_dot=k`).
+
+    Two properties matter and both are cheap to pin: the default is the trained
+    path exactly (no kwargs == the old call), and a real ablation reaches every
+    forward pass rather than being silently dropped -- a decoder that ignored
+    the kwarg would make an ablation report "no difference" for a mechanism it
+    never actually disabled.
+    """
+    from models.generate import generate_bytes
+    m = build_iecnn(_cfg(global_read=True, per_dot_logits=False,
+                         n_passes=1, n_dots=3, head_post=32,
+                         head_post_layers=2), 64).eval()
+    prompt = torch.randint(0, 64, (1, 8))
+    base = generate_bytes(m, prompt, 12, mode="greedy", ctx=12)
+    assert base == generate_bytes(m, prompt, 12, mode="greedy", ctx=12,
+                                  model_kwargs={})
+    assert base == generate_bytes(m, prompt, 12, mode="greedy", ctx=12,
+                                  model_kwargs=None)
+    ablated = generate_bytes(m, prompt, 12, mode="greedy", ctx=12,
+                             model_kwargs={"ablate_dot": 0})
+    assert len(ablated) == 12
+    # the kwarg is the same one the harness scores, so disagreeing bytes are
+    # the mechanism working, not the argument being ignored
+    lp = m(prompt, ablate_dot=0)["final_log_probs"][:, -1]
+    assert ablated[0] == int(lp.argmax(-1))
+    assert ablated != base, "ablate_dot reached the decoder but changed nothing"
+
+
 def test_reread_span_ladder_defaults_identical_and_is_causal():
     """reread_spans gives each reread site its own exact horizon (2/8/32).
 

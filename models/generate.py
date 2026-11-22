@@ -20,7 +20,7 @@ import torch.nn.functional as F
 @torch.no_grad()
 def generate_bytes(model, prompt: torch.Tensor, n: int, mode: str = "sample",
                    temp: float = 0.7, topk: int = 40, ctx: int = 256,
-                   seed: int = 1234) -> bytes:
+                   seed: int = 1234, model_kwargs: dict | None = None) -> bytes:
     """Decode `n` bytes from a [1, p] prompt.
 
     mode="greedy" takes the argmax at every step; anything else samples from
@@ -32,6 +32,11 @@ def generate_bytes(model, prompt: torch.Tensor, n: int, mode: str = "sample",
     The return is `bytes`, so the model's vocab must be <= 256 (the corpus is
     byte-level, V=256); a larger vocab raises from `bytes()` rather than
     silently truncating.
+
+    `model_kwargs` is forwarded to every forward pass and exists so an
+    inference-time ablation (`ablate_dot=k`, `pool_only_dot=k`) can decode with
+    ONE parameter changed on otherwise identical weights. Empty/None is the
+    trained path exactly.
     """
     if prompt.dim() != 2 or prompt.shape[0] != 1:
         raise ValueError(f"prompt must be [1, p], got {tuple(prompt.shape)}")
@@ -46,8 +51,9 @@ def generate_bytes(model, prompt: torch.Tensor, n: int, mode: str = "sample",
     g = torch.Generator().manual_seed(int(seed))
     seq = prompt.clone()
     out = bytearray()
+    kw = dict(model_kwargs or {})
     for _ in range(int(n)):
-        lp = model(seq[:, -int(ctx):])["final_log_probs"][:, -1]   # [1, V]
+        lp = model(seq[:, -int(ctx):], **kw)["final_log_probs"][:, -1]   # [1, V]
         if mode == "greedy":
             nxt = lp.argmax(-1)
         else:
