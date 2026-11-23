@@ -79,6 +79,14 @@ not the last raw marker.
   other, both folds). Fitted weights ≈ (w2, w3, w4) = (0.02, 0.10, 0.25).
   Implemented as the flag-gated `suffix_copy_ks` arm family (`sc3e4`,
   `sc3e42`); gates start shut so each arm is its own control.
+- **The single-pointer copy family is exhausted at 256 bytes**
+  (`probe_pointer_rules.py`, model-free). At the same 23.3% coverage: `recent`
+  63.0%, `maxext` (`sc3ev`) 63.8%, **`fallback` (k=4 pointer else maxext)
+  63.6%**, `ext1` alone 70.9% at 15.6%, and a **hedged two-opinion copy
+  66.4%**. The hedge's +2.6 points is the ~0.005 bpc per token that the
+  additive arms buy — and it needs mass on two opinions, which is the 1.5–2.2%
+  step cost. No single-pointer rule captures it. Family headroom is bounded by
+  the 0.0138 oracle, of which 0.0100 is already taken.
 - **Adding a copy opinion does not pay, in either implementation**
   (`iecnn-ev4-360-gpu`). `sc3ev4` — the k=4 pointer derived from the existing
   scan — costs **+2.2% of step time** (worse than the +1.7% second
