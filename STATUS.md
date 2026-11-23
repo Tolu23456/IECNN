@@ -79,6 +79,14 @@ not the last raw marker.
   other, both folds). Fitted weights ≈ (w2, w3, w4) = (0.02, 0.10, 0.25).
   Implemented as the flag-gated `suffix_copy_ks` arm family (`sc3e4`,
   `sc3e42`); gates start shut so each arm is its own control.
+- **History length, not k, is the binding constraint on the copy channel**
+  (`iecnn-hist-probe`, model-free). A global index lifts k=4 to **96.9%
+  coverage at 55.4% accuracy — 53.7% of all positions copied right, vs 14.7%
+  for the deployed windowed k=3 channel**. k=6: 85.7/60.7; k=8: 67.3/64.7;
+  k=12: 32.0/72.0. One global k=4 channel subsumes the k family because its
+  extension is the longest-match signal, and it is **cheaper per step** — the
+  `[B,T,T]` compare is precomputed, leaving two gathers. Being priced against
+  a trained base `p` by `probe_global_copy.py` before any implementation.
 - **The single-pointer copy family is exhausted at 256 bytes**
   (`probe_pointer_rules.py`, model-free). At the same 23.3% coverage: `recent`
   63.0%, `maxext` (`sc3ev`) 63.8%, **`fallback` (k=4 pointer else maxext)
