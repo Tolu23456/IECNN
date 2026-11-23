@@ -79,6 +79,18 @@ not the last raw marker.
   other, both folds). Fitted weights ≈ (w2, w3, w4) = (0.02, 0.10, 0.25).
   Implemented as the flag-gated `suffix_copy_ks` arm family (`sc3e4`,
   `sc3e42`); gates start shut so each arm is its own control.
+- **The coverage/accuracy wall is real, and the copy channel is not broken**
+  (`iecnn-pf-frontier`, model-free, 40,960 val positions). Premier the estimator
+  is within 1.4 points of its match set's ceiling (k=3: recent 63.0% vs
+  majority-follower 64.4%), and the channel is worth **+0.0677 bpc** on a
+  trained checkpoint. But **no selector on the k=2 set clears 63.0% above 23.3%
+  coverage**: ranked by follower share, 84.4% at 5% coverage, 72.4% at 10%,
+  **53.9% at 23.3%**, 43.9% at 44.7%. So "more parallel k / more opinions" from
+  the same match set is closed by proof. Two live routes remain: **confidence
+  gating** (follower share is a stronger precision signal than match length,
+  and is computable from the vote scan's own candidates) and **extending the
+  match set** rather than the estimator — coverage is capped by the 256-byte
+  window, so a global last-occurrence index is the only way to get both.
 - **The k=4 opinion is CONFIRMED at matched compute, but the second pass does
   not pay at equal wall clock** (`iecnn-ch900-gpu`, 900 s, 2 seeds each, common
   247.80M). `sc3e4` **1.7720/1.7724** (spread 0.0004) vs `sc3e`
