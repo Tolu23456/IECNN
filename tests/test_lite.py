@@ -2178,7 +2178,11 @@ def test_suffix_copy_ext4_is_a_noop_until_open_and_gets_gradient():
     assert torch.allclose(out["final_log_probs"].exp().sum(-1),
                           torch.ones(x.shape), atol=1e-4)
     # gradient at the closed init: if it is exactly zero the channel is a
-    # silent no-op rather than a null result
+    # silent no-op rather than a null result. Reset the gate first -- it is
+    # still at +30 from the check above, where sigmoid' is ~1e-13 and the
+    # gradient would be numerically zero for arithmetic reasons, not
+    # mechanism ones.
+    r.sc_gate4.data.fill_(-8.0)
     wide.train()
     y = torch.roll(x, -1, dims=1)
     lp = wide(x)["final_log_probs"]
