@@ -7,26 +7,33 @@ the evidence.
 ## The position in one paragraph
 
 **The objective is met in the regime it was set for.** At 900 s on the canonical
-90/5 split, one healthy session, seven arms, common 255.55M tokens: `tf-swa-c`
-**1.7960**, `x5-sc3e` **1.7740 / 1.7728** (seeds 0/1), `x5-sc3` 1.7825 / 1.7883,
-`x4-sc3e` 1.7904 / 1.7894. So the dot model is **ahead of the transformer at
-equal wall clock by 0.0226** (mean of two seeds, both negative) on **29% fewer
-tokens**, ahead at equal tokens by ~0.05, and ahead at **matched total MACs at
-every measured budget** (25T −0.094/−0.100, 50T −0.065/−0.068, 100T −0.022/−0.026,
-150T −0.018/−0.019). To reach **2.00 bpc** it needs **27.1/29.1T MACs against the
-transformer's 48.3T** — 1.8x less compute; `x4-sc3e` does it in **24.7/26.3T**
-(2.0x) and is the best arm per MAC below ~100T, but at the 900 s endpoint it is
-+0.016 behind `x5-sc3e`, so it is the compute-capped arm, not the headline.
+90/5 split, one session, common 274.28M tokens: `tf-swa-c` **1.7917**,
+`x5-sc3ev` **1.7630 / 1.7700** (seeds 0/1), `x5-sc3e` **1.7725 / 1.7736**. So the
+dot model is **ahead of the transformer at equal wall clock by 0.0252** (mean of
+two seeds, both negative) on **32% fewer tokens**, ahead at equal tokens by
+~0.06, and ahead at **matched total MACs at every measured budget**
+(25T −0.100, 50T −0.064, 75T −0.038, 100T −0.024, 125T −0.017, 150T −0.013;
+seed means). To reach **2.00 bpc** `sc3ev` needs **25.2/26.5T MACs against the
+transformer's 46.7T** — 1.85x less compute — and **1.90 bpc in 57.4/63.3T vs
+91.5T**. The earlier canonical session (7 arms, 255.55M tokens) gave `tf-swa-c`
+1.7960, `x5-sc3e` 1.7740/1.7728, `x5-sc3` 1.7825/1.7883, `x4-sc3e`
+1.7904/1.7894; `sc3e` reproduced here to within 0.0006, so the arm is session-
+stable while the *anchor* moved 1.7960 → 1.7917 (which is why every claim is
+in-session). `x4-sc3e` remains the compute-capped arm below ~100T (24.7/26.3T to
+2.00 bpc) but is +0.016 behind at the endpoint.
 
 **What paid for its own compute**, each confirmed on two seeds in-session:
 `reread` (−0.033), head capacity `x5` (−0.046), the exact-match copy channel
-`suffix_copy` (−0.0506), and its match-extension slope `sc3e` (−0.0120). The
+`suffix_copy` (−0.0506), its match-extension slope `sc3e` (−0.0120), and
+**extension-based SELECTION `sc3ev` (−0.0095/−0.0036, mean −0.0066 at 900 s;
+−0.010 at matched 50–75T)** — the first mechanism in this list that converts a
+post-hoc price (−0.0062…−0.0076) into a trained win instead of shrinking. The
 copy channel is a **real induction mechanism**, not a mixture trick: replacing
 its pointer with a random earlier position costs −0.1448 and is worse than
 shutting the gate. **Plain voting over duplicate matches is closed** (they are
 the same coincidence, not independent evidence); extension-based *selection* is
-the priced successor — **−0.0062 to −0.0076 bpc on four trained checkpoints**,
-zero parameters — and is screening on the GPU.
+the successor and **now confirmed trained, not just priced** — zero parameters,
+coverage unchanged, **−0.0066 equal wall clock / −0.010 at matched MACs**.
 
 **Depth-down is closed at the endpoint**: `x3-sc3e` trains the most tokens of
 any 360 s arm (140.9M) and still lands 1.8506, +0.028 behind `x5-sc3e` and
