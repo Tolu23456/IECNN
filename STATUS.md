@@ -28,6 +28,11 @@ the same coincidence, not independent evidence); extension-based *selection* is
 the priced successor — **−0.0062 to −0.0076 bpc on four trained checkpoints**,
 zero parameters — and is screening on the GPU.
 
+**Depth-down is closed at the endpoint**: `x3-sc3e` trains the most tokens of
+any 360 s arm (140.9M) and still lands 1.8506, +0.028 behind `x5-sc3e` and
++0.019 behind `x4-sc3e`. x3/x4 remain the compute-capped arms below ~60T
+(x3 is the cheapest to 2.00 bpc, 25.0T) but they are not endpoint candidates.
+
 **Honest framing:** this is a small-scale, ≤2.0 bpc, T4 result. The per-MAC
 advantage decays with budget (0.10 at 25T to 0.018 at 150T) and the curves are
 not shown to cross beyond the measured range, so the claim is
@@ -148,10 +153,14 @@ checkpoint with the gate shut, faithfulness exact on all four):
   extvote already captures **45%** and only 0.0076 is left for a better
   selector.
 - Because this is an eval-time substitution it is a **lower bound** — a trained
-  arm also adapts `p` and the gate. Pre-registered reading for the queued 360 s
-  arm (`x5-sc3ev` vs `x5-sc3e`): its ~0.01 floor **cannot resolve a 0.007
-  effect**, so a flat result is a resolution failure, not a rejection; only a
-  loss >0.01 would close the mechanism. The 900 s confirm is the decider.
+  arm also adapts `p` and the gate. **The 360 s screen confirmed exactly that**
+  (`iecnn-ev360-gpu`): `x5-sc3ev` **1.8124** vs `x5-sc3e` **1.8223**, i.e.
+  **−0.0099 at equal wall clock on slightly fewer tokens**, and −0.005 at
+  matched 25/50/75T — the frozen price (−0.0062..−0.0076) is the matched-MAC
+  truth, and the endpoint gain is larger than predicted. It also reaches
+  **1.90 bpc in 60.0T MACs vs 65.9T** for `sc3e` (−9%). One seed, so this is a
+  screen, not the claim: the **900 s two-seed confirm (`iecnn-ev900-gpu`) is
+  running** with the anchor and both arms, seeds 0/1.
 
 ### Long continuations: a diagnostic, and one trap
 

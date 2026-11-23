@@ -1699,6 +1699,18 @@ ARMS = {
         read_ln=True, head_ln=True, global_decay=True, reread=2, suffix_copy=3,
         suffix_copy_slope=True),
         {"lr": 2e-3, "swa": 0.99, "compile": True, "seed": 1}),
+    # Seed-1 twin for the SELECTION arm (suffix_copy_vote). The 360 s screen put
+    # sc3ev at 1.8124 vs sc3e's 1.8223 -- -0.0099 equal wall clock at slightly
+    # fewer tokens, and -0.005 at matched MACs -- against a pre-registered
+    # prediction of -0.006. That is a win in the right direction but on ONE
+    # seed, so the confirm needs both arms at two seeds in one session, with
+    # the anchor re-run alongside them.
+    "iecnn-n3-x5-p1-ln-decay-d128-w512-rr2-c-sc3ev-s1": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=512, head_post_layers=5,
+        read_ln=True, head_ln=True, global_decay=True, reread=2, suffix_copy=3,
+        suffix_copy_slope=True, suffix_copy_vote=3),
+        {"lr": 2e-3, "swa": 0.99, "compile": True, "seed": 1}),
     # --- where is the depth optimum at fixed width? ----------------------
     # rr2-c (head_post 512, 3 layers) and x5+rr2-c (same width, 5 layers) are
     # already a 2-point curve at fixed width: 1.8847 @357.8M tok and 1.8383
