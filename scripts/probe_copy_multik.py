@@ -151,6 +151,51 @@ def main() -> None:
               f"{tuple(round(w, 2) for w in best_joint[1])} | "
               f"joint over single {own[1][0] - best_joint[0]:+.4f}", flush=True)
 
+        # ---- held-out weight fitting: does the joint optimum GENERALIZE? ---
+        # The weights above were fitted on the same 40,960 positions they are
+        # scored on. That is exactly how the withdrawn "0.184 oracle" claim was
+        # manufactured, so the same grid is refitted on one half of the windows
+        # and scored on the other. Windows start 256*122 bytes apart, so they do
+        # not overlap and the split is a clean holdout for the weights (not for
+        # the mechanism: the model weights are fixed for both halves).
+        pos = torch.arange(y.numel(), device=y.device)
+        halves = [(pos % (2 * T)) < T, (pos % (2 * T)) >= T]
+
+        def fit(msk, grid):
+            best = (math.inf, None)
+            for w in grid:
+                j = joint(p_true[msk], [m[msk] for m in mass],
+                          [v[msk] for v in valid], w)
+                if j < best[0]:
+                    best = (j, w)
+            return best[1]
+
+        g3 = [(0.0, w, 0.0) for w in W3]
+        g34 = [(0.0, w3, w4) for w3 in W3 for w4 in W4 if w3 + w4 <= 0.8]
+        g234 = [(w2, w3, w4) for w2 in W2 for w3 in W3 for w4 in W4
+                if w2 + w3 + w4 <= 0.8]
+        print(f"\n  {'held-out fit':>14}{'on A -> B':>12}{'on B -> A':>12}"
+              f"{'mean':>9}", flush=True)
+        rows = []
+        for label, grid in (("k3 only", g3), ("k3+k4", g34),
+                            ("k2+k3+k4", g234)):
+            got = []
+            for tr in (0, 1):
+                te = 1 - tr
+                w = fit(halves[tr], grid)
+                got.append(joint(p_true[halves[te]],
+                                 [m[halves[te]] for m in mass],
+                                 [v[halves[te]] for v in valid], w))
+            rows.append((label, got))
+            print(f"  {label:>14}{got[0]:>12.4f}{got[1]:>12.4f}"
+                  f"{sum(got) / 2:>9.4f}", flush=True)
+        base = rows[0][1]
+        for label, got in rows[1:]:
+            print(f"  {label:>14}{got[0] - base[0]:>+12.4f}"
+                  f"{got[1] - base[1]:>+12.4f}"
+                  f"{(sum(got) - sum(base)) / 2:>+9.4f}   vs k3 only",
+                  flush=True)
+
 
 if __name__ == "__main__":
     main()
