@@ -72,7 +72,10 @@ SAMPLE_BYTES = int(os.environ.get("GA_SAMPLE_BYTES", "80"))
 def _scrambled(real, seed: int):
     """Same gate, same validity, random earlier byte as the copy."""
 
-    def fn(ids, with_extra: bool = False):
+    def fn(ids, with_extra: bool = False, **_kw):
+        # **_kw so a `suffix_copy_ks` arm (whose extra channels call
+        # _suffix_copy with an explicit k) is scrambled too instead of raising:
+        # one random pointer is the right control for every exact channel.
         out = real(ids, with_extra=True)
         copy_ids, valid, extra = out
         g = torch.Generator().manual_seed(seed)
@@ -94,10 +97,18 @@ def condition(model, name: str, seed: int = 0):
         if name == "off":
             saved["gate"] = r.sc_gate.detach().clone()
             r.sc_gate.data.fill_(-60.0)
+            if getattr(r, "sc_gates2", None) is not None:
+                # every exact channel, not just the primary: an "off" that
+                # leaves the k=4 channel live would not be an off
+                saved["gates2"] = r.sc_gates2.detach().clone()
+                r.sc_gates2.data.fill_(-60.0)
         elif name == "slope0":
             if r.sc_slope is not None:
                 saved["slope"] = r.sc_slope.detach().clone()
                 r.sc_slope.data.zero_()
+            if getattr(r, "sc_slopes2", None) is not None:
+                saved["slopes2"] = r.sc_slopes2.detach().clone()
+                r.sc_slopes2.data.zero_()
         elif name == "scram":
             # the vote path calls _suffix_vote, not _suffix_copy, so a
             # monkeypatch here would silently do nothing
@@ -117,6 +128,10 @@ def condition(model, name: str, seed: int = 0):
             r.sc_gate.data.copy_(saved["gate"])
         if "slope" in saved:
             r.sc_slope.data.copy_(saved["slope"])
+        if "gates2" in saved:
+            r.sc_gates2.data.copy_(saved["gates2"])
+        if "slopes2" in saved:
+            r.sc_slopes2.data.copy_(saved["slopes2"])
         if "fn" in saved:
             r._suffix_copy = saved["fn"]
 
