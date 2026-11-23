@@ -79,6 +79,15 @@ not the last raw marker.
   other, both folds). Fitted weights ≈ (w2, w3, w4) = (0.02, 0.10, 0.25).
   Implemented as the flag-gated `suffix_copy_ks` arm family (`sc3e4`,
   `sc3e42`); gates start shut so each arm is its own control.
+- **Adding a copy opinion does not pay, in either implementation**
+  (`iecnn-ev4-360-gpu`). `sc3ev4` — the k=4 pointer derived from the existing
+  scan — costs **+2.2% of step time** (worse than the +1.7% second
+  `[B,T,T]` pass it was meant to replace) and ties at equal wall clock
+  (1.8115 vs 1.8111) while winning −0.0049 per token. The cost is launch-bound
+  ops on small tensors, not arithmetic. **Additive parallel-k is closed**;
+  the live form is *replacing* the pointer rule (`ext1 if ext1 exists else
+  maxext`), which keeps 23.3% coverage, adds no mixture mass and no parameters,
+  and is what the trained mixture actually chose (k=4 primary, k=3 fallback).
 - **The coverage/accuracy wall is real, and the copy channel is not broken**
   (`iecnn-pf-frontier`, model-free, 40,960 val positions). The estimator
   is within 1.4 points of its match set's ceiling (k=3: recent 63.0% vs
