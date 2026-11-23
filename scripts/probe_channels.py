@@ -62,7 +62,9 @@ def mix_with(p, chans, cap, wts=None):
 
     wts defaults to the gates themselves, i.e. the deployed mixture.
     """
-    gs = [g if wts is None else w * (g > 0).to(g.dtype)
+    # [B,T] -> [B,T,1] so the mass broadcasts against [B,T,V]; the first version
+    # left them 1-D and could not multiply into the distribution at all.
+    gs = [(g if wts is None else w * (g > 0).to(g.dtype)).unsqueeze(-1)
           for g, w in zip([c[0] for c in chans],
                           [None] * len(chans) if wts is None else wts)]
     tot = gs[0]
