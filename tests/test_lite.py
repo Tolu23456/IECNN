@@ -2190,3 +2190,19 @@ def test_suffix_copy_ext4_is_a_noop_until_open_and_gets_gradient():
                                       ).backward()
     g = r.sc_gate4.grad
     assert g is not None and torch.isfinite(g).all() and g.abs().sum() > 0
+
+
+def test_copy_index_matches_brute_force():
+    """The vectorised global index (sort, then previous element in a run of
+    equal hashes) must agree with the O(n^2) definition exactly, including the
+    extension cap and the invalid sentinel."""
+    np = __import__("pytest").importorskip("numpy")
+    from scripts.build_copy_index import _brute, build
+    rng = np.random.default_rng(7)
+    raw = bytes(rng.integers(0, 5, size=300, dtype=np.uint8).tolist())
+    for k in (2, 3, 4, 6):
+        cb, ext = build(raw, k, 6)
+        b_cb, b_ext = _brute(raw, k, 6)
+        assert np.array_equal(cb, b_cb), f"copy_byte mismatch at k={k}"
+        assert np.array_equal(ext, b_ext), f"extension mismatch at k={k}"
+        assert int((ext == 255).sum()) >= k - 1

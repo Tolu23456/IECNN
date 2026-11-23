@@ -168,7 +168,10 @@ def main() -> None:
         ok = src >= 0
         copied = np.where(ok, bn[np.clip(src + 1, 0, len(blob) - 1)], 0)
         valid = torch.from_numpy(ok).to(device)
-        correct = torch.from_numpy(ok & (copied == bn[wn]))
+        # position t predicts t+1 -- comparing to bn[t] is the bug that read
+        # as 5.5% accuracy on the first run
+        correct = torch.from_numpy(ok & (copied == bn[np.clip(wn + 1, 0,
+                                                             len(blob) - 1)]))
         ext_t = torch.from_numpy(ext).to(device).to(torch.float32)
         out = []
         for f in (0, 1):
