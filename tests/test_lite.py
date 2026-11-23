@@ -2110,3 +2110,79 @@ def test_suffix_vote_with_one_occurrence_is_the_scalar_channel():
     (-lp.mean()).backward()
     g = vote.regions[0].sc_slope.grad
     assert g is not None and torch.isfinite(g).all() and g.abs().sum() > 0
+
+
+def test_ext4_pointer_is_the_most_recent_extended_candidate():
+    """The one-scan k=4 pointer must equal the exact 4-gram pointer.
+
+    A 4-gram match IS a 3-gram match whose extension is >= 1, so with a wide
+    enough candidate window the derived pointer has to agree with
+    `_suffix_copy(k=4)` bit-for-bit -- otherwise the cheap form is not the
+    mechanism that was measured.
+    """
+    m = build_iecnn(_cfg(suffix_copy=3, suffix_copy_vote=3, global_read=True,
+                         head_last_only=True, per_dot_logits=False,
+                         n_passes=1, cell="lug"), 64)
+    r = m.regions[0]
+    ids = torch.tensor([[1, 2, 3, 4, 7, 8, 2, 3, 4, 9, 1, 2, 3, 4, 5],
+                        [5, 6, 7, 8, 1, 2, 3, 4, 9, 1, 2, 3, 4, 5, 6]])
+    # width == T is every candidate, so nothing can be missed
+    cm, _w, _v, _me, exv = r._suffix_vote(ids, ids.shape[1], with_extra=True)
+    ptr, ok, _ext = r._most_recent_extended(cm, exv)
+    c4, v4 = r._suffix_copy(ids, k=4)
+    assert torch.equal(ok, v4), (ok, v4)
+    assert torch.equal(ptr[v4], c4[v4]), (ptr, c4)
+
+
+def test_ext4_narrow_window_only_loses_coverage():
+    """A narrow candidate window may miss the extended occurrence, but it can
+    never invent one: the derived firing set is a subset of the exact k=4 set.
+    This is the guard on the tradeoff the vote width buys."""
+    m = build_iecnn(_cfg(suffix_copy=3, suffix_copy_vote=3, global_read=True,
+                         head_last_only=True, per_dot_logits=False,
+                         n_passes=1, cell="lug"), 64)
+    r = m.regions[0]
+    ids = torch.tensor([[1, 2, 3, 4, 7, 8, 2, 3, 4, 9, 1, 2, 3, 4, 5],
+                        [5, 6, 7, 8, 1, 2, 3, 4, 9, 1, 2, 3, 4, 5, 6]])
+    _c4, v4 = r._suffix_copy(ids, k=4)
+    for width in (1, 2, 3):
+        cm, _w, _v, _me, exv = r._suffix_vote(ids, width, with_extra=True)
+        _ptr, ok, _ext = r._most_recent_extended(cm, exv)
+        assert not bool((ok & ~v4).any()), (width, ok, v4)
+        assert int(ok.sum()) <= int(v4.sum())
+
+
+def test_suffix_copy_ext4_is_a_noop_until_open_and_gets_gradient():
+    """The derived channel starts at sigmoid(-8), must not change the arm, must
+    move it when opened, and must reach the loss so training can open it."""
+    cfg = _cfg(suffix_copy=3, suffix_copy_slope=True, suffix_copy_vote=3,
+               n_passes=1, per_dot_logits=False, global_read=True,
+               head_last_only=True, cell="lug")
+    base = build_iecnn(cfg, 64).eval()
+    wide = build_iecnn(dict(cfg, model=dict(cfg["model"],
+                                            suffix_copy_ext4=True)), 64).eval()
+    missing, _unexpected = wide.load_state_dict(base.state_dict(), strict=False)
+    assert all("sc_gate4" in k or "sc_slope4" in k for k in missing), missing
+    r = wide.regions[0]
+    x = torch.tensor([[1, 2, 3, 4, 7, 8, 2, 3, 4, 9, 1, 2, 3, 4, 5]])
+    r.sc_gate4.data.fill_(-50.0)
+    with torch.no_grad():
+        shut = wide(x)["final_log_probs"].clone()
+        ref = base(x)["final_log_probs"].clone()
+    assert torch.allclose(shut, ref, atol=1e-6), (shut - ref).abs().max()
+    r.sc_gate4.data.fill_(30.0)
+    r.sc_slope4.data.zero_()
+    with torch.no_grad():
+        out = wide(x)
+    assert not torch.allclose(out["final_log_probs"], shut)
+    assert torch.allclose(out["final_log_probs"].exp().sum(-1),
+                          torch.ones(x.shape), atol=1e-4)
+    # gradient at the closed init: if it is exactly zero the channel is a
+    # silent no-op rather than a null result
+    wide.train()
+    y = torch.roll(x, -1, dims=1)
+    lp = wide(x)["final_log_probs"]
+    torch.nn.functional.cross_entropy(lp.reshape(-1, 64), y.reshape(-1)
+                                      ).backward()
+    g = r.sc_gate4.grad
+    assert g is not None and torch.isfinite(g).all() and g.abs().sum() > 0

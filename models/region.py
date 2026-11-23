@@ -259,6 +259,25 @@ class Region(nn.Module):
         self.sc_slopes2 = (nn.Parameter(torch.zeros(e_n))
                            if (e_n and m.get("suffix_copy_slope", False))
                            else None)
+        # `suffix_copy_ext4`: derive the k=4 pointer from the SAME scan as the
+        # vote channel, instead of paying a second [B,T,T] compare for it.
+        # A 4-gram match at s IS a 3-gram match at s whose extension is >= 1, so
+        # the most recent 4-gram match is exactly the most recent k=3 candidate
+        # with extension >= 1 -- a selection over tensors `_suffix_vote` has
+        # already computed. The trained `sc3e4` mixture says this is the right
+        # form: with both channels trained the k=3 extension ramp collapsed
+        # (b=+0.0028) and k=4 took the mass (b=+0.2558), i.e. the model treated
+        # them as SUBSTITUTES, so a second full compare pass was buying a better
+        # pointer and nothing else. Needs the vote path to exist.
+        self.suffix_copy_ext4 = (bool(m.get("suffix_copy_ext4", False))
+                                 and self.suffix_copy > 0
+                                 and self.suffix_copy_vote > 0)
+        # closed at init, like every extra channel: the arm is numerically the
+        # single-channel vote arm until the loss opens it.
+        self.sc_gate4 = (nn.Parameter(torch.tensor(-8.0))
+                         if self.suffix_copy_ext4 else None)
+        self.sc_slope4 = (nn.Parameter(torch.zeros(()))
+                          if self.suffix_copy_ext4 else None)
         # total copy mass cap: the gates are independent, so their sum could in
         # principle approach 1 and leave the base distribution no weight.
         # Measured optima sit near 0.37 total, so 0.7 is a guard, not a lever.
@@ -1136,10 +1155,14 @@ class Region(nn.Module):
             extra = extra + ok.to(extra.dtype)
         return copy_ids, valid, extra
 
-    def _suffix_vote(self, ids: torch.Tensor, m: int):
+    def _suffix_vote(self, ids: torch.Tensor, m: int,
+                     with_extra: bool = False):
         """Copy distribution over the max-EXTENSION occurrences of the k-gram.
 
-        Returns (copy_ids [B,T,m], weights [B,T,m], valid [B,T], maxext [B,T]).
+        Returns (copy_ids [B,T,m], weights [B,T,m], valid [B,T], maxext [B,T]),
+        plus the per-candidate extensions [B,T,m] when `with_extra` is set --
+        that is what lets a caller derive a LONGER-match pointer from the same
+        scan instead of running a second compare pass.
         `weights` is uniform over the candidates whose extension equals the
         maximum (1/k on a k-way tie), so a tie hedges instead of picking
         arbitrarily. `valid` is False only when the k-gram never occurred
@@ -1188,7 +1211,31 @@ class Region(nn.Module):
         maxext, _p = exv.max(dim=-1)            # [B,T], -1 if none
         keep = valid & (exv == maxext.unsqueeze(-1))
         w = keep.to(extra.dtype) / keep.sum(-1, keepdim=True).clamp_min(1)
+        if with_extra:
+            return (copy_ids, w, valid.any(dim=-1), maxext.clamp_min(0), exv)
         return copy_ids, w, valid.any(dim=-1), maxext.clamp_min(0)
+
+    @staticmethod
+    def _most_recent_extended(copy_ids: torch.Tensor, exv: torch.Tensor,
+                              min_ext: int = 1):
+        """Pointer to the most recent candidate whose extension >= min_ext.
+
+        `_suffix_vote` returns its candidates MOST RECENT FIRST, so in a window
+        of fixed k this pointer is the most recent (k+min_ext)-gram match:
+        a (k+1)-gram match is exactly a k-gram match with extension >= 1.
+        Returns (pointer [B,T], ok [B,T], extension [B,T]).
+        """
+        width = copy_ids.shape[-1]
+        has = exv >= min_ext
+        ar = torch.arange(width, device=copy_ids.device,
+                          dtype=torch.long).view(1, 1, width)
+        j = torch.where(has, ar.expand_as(copy_ids),
+                        torch.full((), width, dtype=torch.long,
+                                   device=copy_ids.device)).min(-1).values
+        ok = j < width
+        jc = j.clamp_max(width - 1).unsqueeze(-1)
+        return (copy_ids.gather(-1, jc).squeeze(-1), ok,
+                exv.gather(-1, jc).squeeze(-1))
 
     # ------------------------------------------------------------------
     def forward(self, rows: torch.Tensor, emb_table: torch.Tensor,
@@ -1225,8 +1272,9 @@ class Region(nn.Module):
             if self.suffix_copy_vote > 0:
                 # selection variant: distribute the copy over max-extension
                 # occurrences; the gate sees the MAX extension.
-                cm, wgt, valid, maxext = self._suffix_vote(
-                    ids, self.suffix_copy_vote)
+                vote = self._suffix_vote(ids, self.suffix_copy_vote,
+                                         with_extra=self.sc_gate4 is not None)
+                cm, wgt, valid, maxext = vote[:4]
                 q = torch.zeros_like(p)
                 for j in range(cm.shape[-1]):
                     q = q + (wgt[..., j:j + 1].to(p.dtype)
@@ -1236,6 +1284,20 @@ class Region(nn.Module):
                     logit = (logit + self.sc_slope
                              * maxext.clamp(max=self.sc_extra_cap).to(
                                  self.sc_gate.dtype))
+                if self.sc_gate4 is not None:
+                    # k=4 pointer from the same scan: the most recent candidate
+                    # whose extension is >= 1 IS the most recent 4-gram match.
+                    # Recent candidates come first, so this is argmax of a mask
+                    # that decreases with the candidate index.
+                    exv = vote[4]                       # [B,T,m], -1 invalid
+                    src4, ok4, ext4 = self._most_recent_extended(cm, exv)
+                    ext4 = ext4.clamp_min(0)
+                    lg4 = (self.sc_gate4 + self.sc_slope4
+                           * ext4.clamp(max=self.sc_extra_cap).to(
+                               self.sc_gate4.dtype))
+                    m4 = ok4.unsqueeze(-1).to(p.dtype)
+                    g4 = torch.sigmoid(lg4).unsqueeze(-1) * m4
+                    q4 = F.one_hot(src4, p.shape[-1]).to(p.dtype) * m4
             else:
                 if self.sc_slope is None:
                     copy_ids, valid = self._suffix_copy(ids)
@@ -1249,13 +1311,14 @@ class Region(nn.Module):
                 q = F.one_hot(copy_ids, p.shape[-1]).to(p.dtype)
             g = (torch.sigmoid(logit).unsqueeze(-1)
                  * valid.unsqueeze(-1).to(p.dtype))
-            mix = (1 - g) * p + g * q
+            chans = []
+            if self.sc_gate4 is not None:
+                chans.append((g4, q4))
             if self.sc_gates2 is not None:
                 # Extra exact channels at other k, each with its own gate on the
                 # same observable precision signal (its own match extension).
                 # The gates are independent, so the shared mass is capped to
                 # keep the base distribution a real component of the mixture.
-                chans = []
                 for e, kk in enumerate(self.suffix_copy_ks):
                     c2, v2, x2 = self._suffix_copy(ids, with_extra=True, k=kk)
                     lg2 = self.sc_gates2[e]
@@ -1265,14 +1328,17 @@ class Region(nn.Module):
                     g2 = (torch.sigmoid(lg2).unsqueeze(-1)
                           * v2.unsqueeze(-1).to(p.dtype))
                     chans.append((g2, F.one_hot(c2, p.shape[-1]).to(p.dtype)))
+            if chans:
                 tot = g
-                for g2, _q2 in chans:
-                    tot = tot + g2
+                for gc, _qc in chans:
+                    tot = tot + gc
                 scale = (self.sc_mix_cap
                          / tot.clamp_min(1e-9)).clamp(max=1.0)
                 mix = (1 - tot * scale) * p + (g * scale) * q
-                for g2, q2 in chans:
-                    mix = mix + (g2 * scale) * q2
+                for gc, qc in chans:
+                    mix = mix + (gc * scale) * qc
+            else:
+                mix = (1 - g) * p + g * q
             out["log_b"] = torch.log(mix.clamp_min(1e-9))
         return out
 

@@ -96,8 +96,12 @@ def main() -> None:
                 many += 1
                 many_ok += topf == y
                 agree += recent == topf
-                if k == 2:
-                    k2.append((topn / cnt_n, cnt_n, topf == y, recent == y))
+            if k == 2:
+                # confidence must count EVIDENCE, not just agreement: a single
+                # occurrence has share 1.0 but says nothing about consistency,
+                # so smooth it to topn/(n+1) (0.5 at n=1) -- ranking by raw
+                # share would put the least-supported positions first.
+                k2.append((topn / (cnt_n + 1), cnt_n, topf == y, recent == y))
         print(f"{k:>3}{100 * len(hits) / total:>7.1f}%{100 * rec / n:>7.1f}%"
               f"{100 * top / n:>7.1f}%{ns / n:>8.2f}"
               f"{100 * many / total:>7.1f}%"
@@ -107,10 +111,16 @@ def main() -> None:
     # ---- the decisive part: rank k=2 by confidence, sweep coverage ----------
     # Confident first: higher follower share, then more samples behind it.
     k2.sort(key=lambda r: (-r[0], -r[1]))
+    n1 = [r for r in k2 if r[1] == 1]
     print(f"\n  k=2 confidence-ranked selector (n={len(k2)} hits = "
-          f"{100 * len(k2) / total:.1f}% of positions)", flush=True)
+          f"{100 * len(k2) / total:.1f}% of positions; "
+          f"n=1 share {100 * len(n1) / total:.1f}% at "
+          f"{100 * sum(r[2] for r in n1) / max(len(n1), 1):.1f}% right, "
+          f"n>=2 share {100 * (len(k2) - len(n1)) / total:.1f}% at "
+          f"{100 * sum(r[2] for r in k2 if r[1] >= 2) / max(len(k2) - len(n1), 1):.1f}%)",
+          flush=True)
     print(f"  {'cover':>8}{'top':>8}{'recent':>9}{'n>=2':>8}", flush=True)
-    for cov in (0.05, 0.10, 0.15, 0.20, 0.233, 0.25, 0.30, 0.35, 0.447):
+    for cov in (0.05, 0.10, 0.15, 0.20, 0.233, 0.25, 0.30, 0.35, 0.40, 0.447):
         want = min(int(cov * total), len(k2))
         if want <= 0:
             continue

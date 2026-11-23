@@ -68,6 +68,7 @@ def iecnn(cell="gru", lean=False, n_passes=3, n_dots=8, d_s=128, d=128,
           cell_ln=False, share_cell=False, query_from_input=False,
           id_lags=False, ngram_bias=0, suffix_copy=0,
           suffix_copy_slope=False, suffix_copy_vote=0, suffix_copy_ks="",
+          suffix_copy_ext4=False,
           head_rank=0,
           state_carry=False, carry_chunk=8, gla=False,
           global_exact=False, head_skip=False, break_scan=False,
@@ -107,6 +108,7 @@ def iecnn(cell="gru", lean=False, n_passes=3, n_dots=8, d_s=128, d=128,
         "suffix_copy_slope": suffix_copy_slope,
         "suffix_copy_vote": suffix_copy_vote,
         "suffix_copy_ks": suffix_copy_ks,
+        "suffix_copy_ext4": suffix_copy_ext4,
         "head_rank": head_rank,
         "state_carry": state_carry,
         "carry_chunk": carry_chunk,
@@ -1630,6 +1632,21 @@ ARMS = {
         global_read=True, spans=(8,), head_post=512, head_post_layers=5,
         read_ln=True, head_ln=True, global_decay=True, reread=2, suffix_copy=3,
         suffix_copy_slope=True, suffix_copy_vote=3),
+        {"lr": 2e-3, "swa": 0.99, "compile": True}),
+    # (0b) ONE SCAN, TWO OPINIONS: derive the k=4 pointer from the vote scan
+    # already running -- a 4-gram match IS a 3-gram match with extension >= 1,
+    # so the most recent 4-gram match is the most recent vote candidate whose
+    # extension is >= 1. That is the measured `sc3e4` mechanism (matched-MAC
+    # gain on both seeds, 10-15% less compute to 1.90 bpc) without the second
+    # [B,T,T] compare that made it cost 1.7% of step time. Justified directly by
+    # the trained gates: with both channels live, k=3's extension ramp collapsed
+    # to b=+0.0028 while k=4's opened to b=+0.2558 at conserved total mass.
+    "iecnn-n3-x5-p1-ln-decay-d128-w512-rr2-c-sc3ev4": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=512, head_post_layers=5,
+        read_ln=True, head_ln=True, global_decay=True, reread=2, suffix_copy=3,
+        suffix_copy_slope=True, suffix_copy_vote=3,
+        suffix_copy_ext4=True),
         {"lr": 2e-3, "swa": 0.99, "compile": True}),
     # --- two levers on top of the channel that paid ----------------------
     # (1) A second gate parameter: gate = sigmoid(a + b*extension), where the
