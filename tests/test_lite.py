@@ -1798,6 +1798,148 @@ def test_suffix_copy_points_at_the_previous_context_occurrence():
     assert not bool(valid[0, 7])
 
 
+def _brute_suffix(x, k, cap):
+    """Reference implementation of the k-gram pointer, on one sequence.
+
+    Written from the DEFINITION rather than from the model's hash, so a test
+    against it catches a rolling-hash or mask bug instead of re-asserting the
+    same arithmetic. Context ending at i is x[i], x[i-1], ..., x[i-k+1].
+    """
+    t = len(x)
+    copy, valid, extra = [-1] * t, [False] * t, [0] * t
+    for i in range(t):
+        if i < k - 1:
+            continue
+        ctx = [x[i - j] for j in range(k)]
+        best = -1
+        for sp in range(k - 1, i):
+            if [x[sp - j] for j in range(k)] == ctx:
+                best = sp
+        if best >= 0:
+            valid[i] = True
+            copy[i] = x[best + 1] if best + 1 < t else -1
+            e = 0
+            for m in range(cap):
+                ai, si = i - k - m, best - k - m
+                if ai >= 0 and si >= 0 and x[ai] == x[si]:
+                    e += 1
+                else:
+                    break
+            extra[i] = e
+    return copy, valid, extra
+
+
+def test_suffix_copy_hash_matches_the_definition_at_every_k():
+    """The rolling hash, the `s < t` / `s + 1 <= t` masks and the contiguous
+    extension must reproduce a brute-force pointer for k = 2..5 on random data
+    -- and for k != 3 as well, because the extra channels in `suffix_copy_ks`
+    call this same method with another k."""
+    torch.manual_seed(11)
+    cap = 4
+    m = build_iecnn(_cfg(suffix_copy=3, n_passes=1,
+                         per_dot_logits=False), 33)
+    r = m.regions[0]
+    r.sc_extra_cap = cap
+    x = torch.randint(0, 4, (2, 120))       # tiny alphabet -> many repeats
+    for k in (2, 3, 4, 5):
+        got_c, got_v, got_e = r._suffix_copy(x, with_extra=True, k=k)
+        for b in range(x.shape[0]):
+            ref_c, ref_v, ref_e = _brute_suffix(x[b].tolist(), k, cap)
+            for i in range(x.shape[1]):
+                assert bool(got_v[b, i]) == ref_v[i], (k, b, i, "valid")
+                if ref_v[i]:
+                    # the last position has no observed follower
+                    if ref_c[i] >= 0:
+                        assert int(got_c[b, i]) == ref_c[i], (k, b, i, "copy")
+                    assert int(got_e[b, i]) == ref_e[i], (k, b, i, "extra")
+
+
+def test_suffix_copy_extra_channel_is_a_noop_until_its_gate_opens():
+    """A `suffix_copy_ks` arm must be numerically the single-channel arm at
+    init (the added gate is sigmoid(-8) ~ 3e-4), must move the output when the
+    gate is opened, and must keep the mixture a distribution."""
+    cfg = _cfg(suffix_copy=3, suffix_copy_slope=True, n_passes=1,
+               per_dot_logits=False)
+    base = build_iecnn(cfg, 64).eval()
+    wide = build_iecnn(dict(cfg, model=dict(cfg["model"],
+                                           suffix_copy_ks="4")), 64).eval()
+    missing, _unexpected = wide.load_state_dict(base.state_dict(), strict=False)
+    assert all("sc_gates2" in k or "sc_slopes2" in k for k in missing), missing
+    r = wide.regions[0]
+    # ids must contain repeated 3-grams AND 4-grams
+    x = torch.tensor([[1, 2, 3, 4, 7, 8, 2, 3, 4, 9, 1, 2, 3, 4, 5]])
+    r.sc_gates2.data.fill_(-50.0)
+    with torch.no_grad():
+        shut = wide(x)["final_log_probs"].clone()
+        ref = base(x)["final_log_probs"].clone()
+    assert torch.allclose(shut, ref, atol=1e-6), (shut - ref).abs().max()
+    # open it: the output must move, and still be a distribution
+    r.sc_gates2.data.fill_(30.0)
+    r.sc_slopes2.data.fill_(0.0)
+    with torch.no_grad():
+        out = wide(x)
+    assert not torch.allclose(out["final_log_probs"], shut)
+    assert torch.allclose(out["final_log_probs"].exp().sum(-1),
+                          torch.ones(x.shape, dtype=torch.float32), atol=1e-4)
+
+
+def test_suffix_copy_extra_channel_receives_gradient_at_init():
+    """The extra gates start shut, so the only thing that can open them is the
+    loss gradient. If that gradient is exactly zero the arm can never learn the
+    channel, which is a silent no-op rather than a null result."""
+    cfg = _cfg(suffix_copy=3, suffix_copy_slope=True, n_passes=1,
+               per_dot_logits=False, suffix_copy_ks="4,2")
+    m = build_iecnn(cfg, 64)
+    r = m.regions[0]
+    x = torch.tensor([[1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4],
+                      [5, 6, 1, 2, 3, 4, 7, 8, 1, 2, 3, 4]])
+    y = torch.tensor([[2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4, 5],
+                      [6, 1, 2, 3, 4, 7, 8, 1, 2, 3, 4, 5]])
+    lp = m(x)["final_log_probs"]
+    torch.nn.functional.cross_entropy(lp.reshape(-1, 64), y.reshape(-1)
+                                      ).backward()
+    g = r.sc_gates2.grad
+    assert g is not None, "extra gates got no gradient at all"
+    assert torch.isfinite(g).all()
+    assert g.abs().sum() > 0, "extra gates are a silent no-op"
+
+
+def test_suffix_copy_channels_disagree_about_which_occurrence():
+    """The whole point of a second k is that the 3-gram's most recent match and
+    the 4-gram's most recent match can be DIFFERENT occurrences. Build a
+    sequence where the 4-gram repeats at an older place than the 3-gram."""
+    m = build_iecnn(_cfg(suffix_copy=3, n_passes=1, per_dot_logits=False), 64)
+    r = m.regions[0]
+    #            0  1  2  3  4  5  6  7  8  9 10 11 12 13 14
+    ids = torch.tensor([[1, 2, 3, 4, 7, 8, 2, 3, 4, 9, 1, 2, 3, 4, 5]])
+    c3, v3 = r._suffix_copy(ids, k=3)
+    c4, v4 = r._suffix_copy(ids, k=4)
+    assert bool(v3[0, 13]) and bool(v4[0, 13])
+    # 3-gram (2,3,4) most recently ended at 8 -> follower x[9] = 9
+    assert int(c3[0, 13]) == 9
+    # 4-gram (1,2,3,4) most recently ended at 3 -> follower x[4] = 7
+    assert int(c4[0, 13]) == 7
+    # and the 4-gram is strictly less available, as the k sweep found
+    assert float(v4.float().mean()) < float(v3.float().mean())
+
+
+def test_suffix_copy_extra_channels_share_a_cap():
+    """Independent gates could in principle claim all the mass; the mixture
+    must keep the base distribution as a real component."""
+    cfg = _cfg(suffix_copy=3, suffix_copy_slope=False, n_passes=1,
+               per_dot_logits=False, suffix_copy_ks="4,2")
+    m = build_iecnn(cfg, 64).eval()
+    r = m.regions[0]
+    r.sc_gate.data.fill_(40.0)
+    r.sc_gates2.data.fill_(40.0)
+    x = torch.tensor([[1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4]])
+    with torch.no_grad():
+        lp = m(x)["final_log_probs"]
+    assert torch.isfinite(lp).all()
+    assert torch.allclose(lp.exp().sum(-1),
+                          torch.ones(x.shape, dtype=torch.float32), atol=1e-4)
+
+
 def test_suffix_copy_is_causal_and_skips_without_ids():
     """The pointer at t may only depend on ids[:, :t+1], and the whole term
     must vanish when ids are absent (other callers rely on that path)."""

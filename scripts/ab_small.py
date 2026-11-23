@@ -67,7 +67,8 @@ def iecnn(cell="gru", lean=False, n_passes=3, n_dots=8, d_s=128, d=128,
           global_read=False, read_schedule="mix", head_untied=False,
           cell_ln=False, share_cell=False, query_from_input=False,
           id_lags=False, ngram_bias=0, suffix_copy=0,
-          suffix_copy_slope=False, suffix_copy_vote=0, head_rank=0,
+          suffix_copy_slope=False, suffix_copy_vote=0, suffix_copy_ks="",
+          head_rank=0,
           state_carry=False, carry_chunk=8, gla=False,
           global_exact=False, head_skip=False, break_scan=False,
           d_q=16, d_v=32, head_post=0, head_post_layers=1,
@@ -105,6 +106,7 @@ def iecnn(cell="gru", lean=False, n_passes=3, n_dots=8, d_s=128, d=128,
         "suffix_copy": suffix_copy,
         "suffix_copy_slope": suffix_copy_slope,
         "suffix_copy_vote": suffix_copy_vote,
+        "suffix_copy_ks": suffix_copy_ks,
         "head_rank": head_rank,
         "state_carry": state_carry,
         "carry_chunk": carry_chunk,
@@ -1711,6 +1713,32 @@ ARMS = {
         read_ln=True, head_ln=True, global_decay=True, reread=2, suffix_copy=3,
         suffix_copy_slope=True, suffix_copy_vote=3),
         {"lr": 2e-3, "swa": 0.99, "compile": True, "seed": 1}),
+    # --- PARALLEL exact channels at different k --------------------------
+    # `iecnn-copy-multik` on the trained sc3e checkpoints, weights fitted on
+    # one parity half of the 40,960 windows and scored on the other, both seeds
+    # and both folds: the best single k=3 channel is beaten by -0.0079/-0.0080
+    # when a k=4 channel is mixed in, and by -0.0102/-0.0100 when a k=2
+    # channel is added too. The reason is the one the k sweep could not use:
+    # a k=3 and a k=4 channel cover the same positions but usually disagree
+    # about WHICH occurrence to copy, so hedging is worth much more than the
+    # choice of k (which was worth +0.0018 at its ceiling). Fitted weights were
+    # ~(w2, w3, w4) = (0.02, 0.10, 0.25), so the k=4 channel is the bulk of it
+    # and the k=2 channel is a small consistent add-on -- hence two arms, one
+    # to see whether the bulk pays, one to see whether the third channel earns
+    # its extra hash compare. Both are the same architecture plus extra
+    # channels whose gates start shut (sigmoid(-8)), so each is its control.
+    "iecnn-n3-x5-p1-ln-decay-d128-w512-rr2-c-sc3e4": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=512, head_post_layers=5,
+        read_ln=True, head_ln=True, global_decay=True, reread=2, suffix_copy=3,
+        suffix_copy_slope=True, suffix_copy_ks="4"),
+        {"lr": 2e-3, "swa": 0.99, "compile": True}),
+    "iecnn-n3-x5-p1-ln-decay-d128-w512-rr2-c-sc3e42": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=512, head_post_layers=5,
+        read_ln=True, head_ln=True, global_decay=True, reread=2, suffix_copy=3,
+        suffix_copy_slope=True, suffix_copy_ks="4,2"),
+        {"lr": 2e-3, "swa": 0.99, "compile": True}),
     # --- where is the depth optimum at fixed width? ----------------------
     # rr2-c (head_post 512, 3 layers) and x5+rr2-c (same width, 5 layers) are
     # already a 2-point curve at fixed width: 1.8847 @357.8M tok and 1.8383

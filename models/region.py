@@ -232,6 +232,37 @@ class Region(nn.Module):
         # becomes the MAX extension, which is the one the copy came from.
         self.suffix_copy_vote = (int(m.get("suffix_copy_vote", 0))
                                  if self.suffix_copy > 0 else 0)
+        # EXTRA EXACT CHANNELS at other k. Measured on the trained `sc3e`
+        # checkpoints (40,960 val positions, frozen p, weights fitted on one
+        # parity half of the windows and scored on the other, both seeds,
+        # both folds): the most recent 4-gram match and the most recent 3-gram
+        # match are usually DIFFERENT occurrences, and mixing them beats the
+        # best single k=3 channel by -0.0079/-0.0080 held out; adding a k=2
+        # channel takes it to -0.0102/-0.0100. k alone peaks at 4 (+0.0018 over
+        # k=3, below resolution) because a longer match covers fewer positions
+        # -- but a k=3 and a k=4 channel cover the same positions and disagree
+        # about WHO to copy, so hedging is worth far more than the choice of k.
+        # This is not `suffix_copy_vote` (which keeps k=3 and substitutes among
+        # its occurrences) nor the k sweep (which picks one k).
+        # `suffix_copy_ks` is a comma list, e.g. "4" or "4,2". Every extra
+        # channel's gate starts closed, so the arm is numerically the
+        # single-channel arm at init and has to earn each channel on the loss.
+        # Cost is one more [B,T,T] integer compare per channel (~0.06% of
+        # MACs), and one scalar per channel -- no other parameters.
+        self.suffix_copy_ks = ((tuple(int(s) for s in
+                                      str(m.get("suffix_copy_ks", "")).split(",")
+                                      if s.strip())
+                                if self.suffix_copy > 0 else ()))
+        e_n = len(self.suffix_copy_ks)
+        self.sc_gates2 = (nn.Parameter(torch.full((e_n,), -8.0))
+                          if e_n else None)
+        self.sc_slopes2 = (nn.Parameter(torch.zeros(e_n))
+                           if (e_n and m.get("suffix_copy_slope", False))
+                           else None)
+        # total copy mass cap: the gates are independent, so their sum could in
+        # principle approach 1 and leave the base distribution no weight.
+        # Measured optima sit near 0.37 total, so 0.7 is a guard, not a lever.
+        self.sc_mix_cap = float(m.get("suffix_copy_mix_cap", 0.7))
         self.ngram_r = int(m.get("ngram_bias", 0))
         if self.ngram_r > 0:
             e1 = torch.empty(vocab_size, self.ngram_r)
@@ -1051,15 +1082,19 @@ class Region(nn.Module):
         return torch.stack([p[:, n - k - 1: n - k - 1 + t, k]
                             for k in range(n)], dim=2)   # [B,T,N,id_dim]
 
-    def _suffix_copy(self, ids: torch.Tensor, with_extra: bool = False):
+    def _suffix_copy(self, ids: torch.Tensor, with_extra: bool = False,
+                     k: int | None = None):
         """(copy_ids [B,T], valid [B,T]) for the induction prior.
 
         ids[b, t] is the byte AT position t; the output at t predicts t+1, so
         the context is the k bytes ending at t -- all already observed -- and
         the copied byte x[s+1] is at most position t-1. Nothing at or after
         the target is read, so this is causal by construction.
+
+        `k` defaults to the primary channel's length; passing it explicitly is
+        how the extra channels at other lengths reuse this exact code.
         """
-        k = self.suffix_copy
+        k = self.suffix_copy if k is None else int(k)
         b, t = ids.shape
         x = ids.to(torch.int64)
         zero = torch.zeros(b, 1, dtype=x.dtype, device=x.device)
@@ -1214,7 +1249,31 @@ class Region(nn.Module):
                 q = F.one_hot(copy_ids, p.shape[-1]).to(p.dtype)
             g = (torch.sigmoid(logit).unsqueeze(-1)
                  * valid.unsqueeze(-1).to(p.dtype))
-            out["log_b"] = torch.log(((1 - g) * p + g * q).clamp_min(1e-9))
+            mix = (1 - g) * p + g * q
+            if self.sc_gates2 is not None:
+                # Extra exact channels at other k, each with its own gate on the
+                # same observable precision signal (its own match extension).
+                # The gates are independent, so the shared mass is capped to
+                # keep the base distribution a real component of the mixture.
+                chans = []
+                for e, kk in enumerate(self.suffix_copy_ks):
+                    c2, v2, x2 = self._suffix_copy(ids, with_extra=True, k=kk)
+                    lg2 = self.sc_gates2[e]
+                    if self.sc_slopes2 is not None:
+                        lg2 = (lg2 + self.sc_slopes2[e]
+                               * x2.clamp(max=self.sc_extra_cap).to(lg2.dtype))
+                    g2 = (torch.sigmoid(lg2).unsqueeze(-1)
+                          * v2.unsqueeze(-1).to(p.dtype))
+                    chans.append((g2, F.one_hot(c2, p.shape[-1]).to(p.dtype)))
+                tot = g
+                for g2, _q2 in chans:
+                    tot = tot + g2
+                scale = (self.sc_mix_cap
+                         / tot.clamp_min(1e-9)).clamp(max=1.0)
+                mix = (1 - tot * scale) * p + (g * scale) * q
+                for g2, q2 in chans:
+                    mix = mix + (g2 * scale) * q2
+            out["log_b"] = torch.log(mix.clamp_min(1e-9))
         return out
 
     def _forward_prob(self, rows: torch.Tensor, emb_table: torch.Tensor,
