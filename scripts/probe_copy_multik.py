@@ -52,11 +52,19 @@ W3 = [i * 0.05 for i in range(0, 11)]        # 0 .. 0.50
 W4 = [i * 0.05 for i in range(0, 9)]         # 0 .. 0.40
 
 
-def joint(p_true, mass, wts, base) -> float:
-    s = wts[0] + wts[1] + wts[2]
-    mix = (1 - s) * base
-    for w, m in zip(wts, mass):
-        mix = mix + w * m
+def joint(p_true, mass, valid, wts) -> float:
+    """Convex mixture with per-position validity.
+
+    A channel contributes w_i * valid_i, so where an i-gram has no earlier
+    occurrence the channel contributes nothing and the base keeps that mass.
+    The first version forgot the `* valid` and instead zeroed the mass, which
+    made weight 0 look optimal everywhere -- a plausible-looking null produced
+    by a bug, so the validity is now explicit in the formula.
+    """
+    share = wts[0] * valid[0] + wts[1] * valid[1] + wts[2] * valid[2]
+    mix = (1 - share) * p_true
+    for w, m, v in zip(wts, mass, valid):
+        mix = mix + (w * v) * m
     return float(-torch.log2(mix.clamp_min(1e-9)).mean())
 
 
@@ -102,7 +110,7 @@ def main() -> None:
             r.sc_slope.data.copy_(saved_b)
         p_true = p.gather(1, y.unsqueeze(1)).squeeze(1)
 
-        mass, cov = [], {}
+        mass, valid, cov = [], [], {}
         for k in KS:
             cp, va = [], []
             with torch.no_grad():
@@ -111,25 +119,26 @@ def main() -> None:
                                         k, CAP)
                     cp.append(c[0]); va.append(v[0])
             c, v = torch.cat(cp), torch.cat(va)
-            mass.append(((c == y) & v).to(torch.float32))
+            mass.append((c == y).to(torch.float32))
+            valid.append(v.to(torch.float32))
             cov[k] = (float(v.float().mean()), float((c == y)[v].float().mean()))
 
         print(f"  {'k':>3}{'cover':>8}{'acc':>7}{'own best w':>12}"
               f"{'vs k3':>10}{'joint w':>10}", flush=True)
         own = []
-        for k, m in zip(KS, mass):
-            best = min(((bpc(p_true, m, g * torch.ones_like(m)), g)
+        for k, m, v in zip(KS, mass, valid):
+            best = min(((bpc(p_true, m, g * v), g)
                         for g in [i / 40 for i in range(0, 33)]))
             own.append(best)
         best_joint = (math.inf, (0.0, 0.0, 0.0))
         for w2 in W2:
             for w3 in W3:
-                if w2 + w3 > 0.7:
+                if w2 + w3 > 0.8:
                     continue
                 for w4 in W4:
-                    if w2 + w3 + w4 > 0.7:
+                    if w2 + w3 + w4 > 0.8:
                         continue
-                    j = joint(p_true, mass, (w2, w3, w4), p_true)
+                    j = joint(p_true, mass, valid, (w2, w3, w4))
                     if j < best_joint[0]:
                         best_joint = (j, (w2, w3, w4))
         for k, (b, g) in zip(KS, own):
