@@ -79,6 +79,19 @@ not the last raw marker.
   other, both folds). Fitted weights ≈ (w2, w3, w4) = (0.02, 0.10, 0.25).
   Implemented as the flag-gated `suffix_copy_ks` arm family (`sc3e4`,
   `sc3e42`); gates start shut so each arm is its own control.
+- **The k=4 opinion is CONFIRMED at matched compute, but the second pass does
+  not pay at equal wall clock** (`iecnn-ch900-gpu`, 900 s, 2 seeds each, common
+  247.80M). `sc3e4` **1.7720/1.7724** (spread 0.0004) vs `sc3e`
+  **1.7831/1.7714** (spread 0.0117): paired −0.0111/+0.0010, mean −0.0051, and
+  `sc3e` seed 0 is a 0.011 outlier, so the wall-clock contrast cannot resolve
+  0.003. At matched MACs the same arm is ahead on **both seeds at 7–8 of 8
+  checkpoints** (mean −0.006 at 50–100T) and reaches 1.90 bpc in **65.5/59.9T
+  vs 72.7/70.4T** (10–15% less compute). The gate diagnostic says why the gain
+  is small: with both channels trained, the **k=3 extension ramp collapses**
+  (b=+0.0028, gate 0.0276) while **k=4 takes the mass** (b=+0.2558, gate
+  0.0407) — the model treats them as **substitutes, not additions**. So the
+  value is the *longer-match pointer*, and the correct form is a **one-scan
+  `ext≥1` pointer at `sc3ev` cost (+0.4%), not a second `[B,T,T]` pass (+1.7%)**.
 - **A second exact channel is priced by STEP TIME, not MACs** (`iecnn-ks360-gpu`).
   At 360 s `sc3e4` (k=3 + k=4) is −0.0041/−0.0059 at matched 50–75T MACs but
   only −0.0025 at equal wall clock, while its `bpc@eqtok` 1.8658 is the best of
