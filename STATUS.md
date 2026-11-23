@@ -64,6 +64,14 @@ not the last raw marker.
   winning the argmax. The level term is the other 7.14 bpc.
 - **Induction is orthogonal to the dots**: dropping any single dot leaves
   match 1.000 / run 16.0 / bpc 0.652–0.655.
+- **PARALLEL channels at different k pay, and not for the reason k selection
+  failed** (`iecnn-copy-multik`, held-out weights). k=3 and k=4 fire on the
+  same positions but usually disagree about *which occurrence* to copy, so
+  running both hedges: **k3+k4 −0.0079/−0.0080**, adding k=2 **−0.0102/−0.0100**
+  on s0/s1 (weights fitted on one parity half of the windows, scored on the
+  other, both folds). Fitted weights ≈ (w2, w3, w4) = (0.02, 0.10, 0.25).
+  Implemented as the flag-gated `suffix_copy_ks` arm family (`sc3e4`,
+  `sc3e42`); gates start shut so each arm is its own control.
 - **The k of the k-gram is settled at 3** (`iecnn-copy-k`, frozen weights,
   s0/s1 agree to 0.0011). Coverage / accuracy / post-hoc ceiling gain:
   k=2 44.7% / 41.7% / +0.0280, **k=3 23.3% / 63.0% / +0.0563**,
