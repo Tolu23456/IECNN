@@ -1739,6 +1739,19 @@ ARMS = {
         read_ln=True, head_ln=True, global_decay=True, reread=2, suffix_copy=3,
         suffix_copy_slope=True, suffix_copy_ks="4,2"),
         {"lr": 2e-3, "swa": 0.99, "compile": True}),
+    # `iecnn-ks360-gpu` screen (single seed, 360 s, common 108.12M tokens):
+    # sc3ev -0.0068, sc3e4 -0.0025, sc3e42 -0.0020 at equal wall clock, but at
+    # MATCHED MACs sc3e4 is -0.0041 (75T) / -0.0059 (50T), so the channel works
+    # and its cost is step time, not compute. The k=2 channel is closed: it adds
+    # ~1% of step time on top of k=4 and lands WORSE (1.8178 vs 1.8173), which
+    # matches its 0.02 fitted weight. The confirm therefore carries only sc3e4,
+    # as a pair against sc3e on two seeds in one session.
+    "iecnn-n3-x5-p1-ln-decay-d128-w512-rr2-c-sc3e4-s1": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=512, head_post_layers=5,
+        read_ln=True, head_ln=True, global_decay=True, reread=2, suffix_copy=3,
+        suffix_copy_slope=True, suffix_copy_ks="4"),
+        {"lr": 2e-3, "swa": 0.99, "compile": True, "seed": 1}),
     # --- where is the depth optimum at fixed width? ----------------------
     # rr2-c (head_post 512, 3 layers) and x5+rr2-c (same width, 5 layers) are
     # already a 2-point curve at fixed width: 1.8847 @357.8M tok and 1.8383
