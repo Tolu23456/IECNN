@@ -80,7 +80,7 @@ not the last raw marker.
   Implemented as the flag-gated `suffix_copy_ks` arm family (`sc3e4`,
   `sc3e42`); gates start shut so each arm is its own control.
 - **The coverage/accuracy wall is real, and the copy channel is not broken**
-  (`iecnn-pf-frontier`, model-free, 40,960 val positions). Premier the estimator
+  (`iecnn-pf-frontier`, model-free, 40,960 val positions). The estimator
   is within 1.4 points of its match set's ceiling (k=3: recent 63.0% vs
   majority-follower 64.4%), and the channel is worth **+0.0677 bpc** on a
   trained checkpoint. But **no selector on the k=2 set clears 63.0% above 23.3%
