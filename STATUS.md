@@ -173,9 +173,11 @@ checkpoint with the gate shut, faithfulness exact on all four):
   **−0.0099 at equal wall clock on slightly fewer tokens**, and −0.005 at
   matched 25/50/75T — the frozen price (−0.0062..−0.0076) is the matched-MAC
   truth, and the endpoint gain is larger than predicted. It also reaches
-  **1.90 bpc in 60.0T MACs vs 65.9T** for `sc3e` (−9%). One seed, so this is a
-  screen, not the claim: the **900 s two-seed confirm (`iecnn-ev900-gpu`) is
-  running** with the anchor and both arms, seeds 0/1.
+  **1.90 bpc in 60.0T MACs vs 65.9T** for `sc3e` (−9%). One seed, so that was a
+  screen. **The 900 s two-seed confirm (`iecnn-ev900-gpu`) then settled it:
+  −0.0095 / −0.0036, mean −0.0066, both seeds negative** — the pre-registered
+  ≈−0.006, and at matched 50–75T the trained gain (−0.013) is *larger* than the
+  frozen price, so the frozen number was a floor rather than a ceiling.
 
 ### Long continuations: a diagnostic, and one trap
 
