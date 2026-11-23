@@ -79,6 +79,13 @@ not the last raw marker.
   other, both folds). Fitted weights ≈ (w2, w3, w4) = (0.02, 0.10, 0.25).
   Implemented as the flag-gated `suffix_copy_ks` arm family (`sc3e4`,
   `sc3e42`); gates start shut so each arm is its own control.
+- **A second exact channel is priced by STEP TIME, not MACs** (`iecnn-ks360-gpu`).
+  At 360 s `sc3e4` (k=3 + k=4) is −0.0041/−0.0059 at matched 50–75T MACs but
+  only −0.0025 at equal wall clock, while its `bpc@eqtok` 1.8658 is the best of
+  any arm: each extra channel costs ~1.5% of step time (the `[B,T,T]` int64
+  temporaries), and that is the price that decides. **The k=2 channel is
+  closed** — `sc3e42` is slower *and* worse than `sc3e4`, matching its 0.02
+  fitted weight. `sc3e4` goes to a 900 s two-seed pair contrast.
 - **The k of the k-gram is settled at 3** (`iecnn-copy-k`, frozen weights,
   s0/s1 agree to 0.0011). Coverage / accuracy / post-hoc ceiling gain:
   k=2 44.7% / 41.7% / +0.0280, **k=3 23.3% / 63.0% / +0.0563**,
