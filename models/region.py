@@ -219,6 +219,23 @@ class Region(nn.Module):
                          if (self.suffix_copy > 0
                              and m.get("suffix_copy_slope", False)) else None)
         self.sc_extra_cap = int(m.get("suffix_copy_extra_cap", 8))
+        # GLOBAL index instead of the window. `suffix_copy_global` replaces the
+        # [B,T,T] compare against the last 256 bytes with a precomputed per
+        # position index over the whole corpus: the most recent earlier
+        # occurrence of the k-gram ANYWHERE, plus its extension. Measured on a
+        # trained `sc3e` base at 40,960 val positions, the same 2-parameter gate
+        # form is worth -0.077/-0.096 held out (both folds) vs the deployed
+        # windowed channel, because coverage stops being the constraint:
+        # global k=4 fires on 96.9% of positions at 55.4% accuracy, while the
+        # 256-byte window fires on 23.3% at 63.0%. Accuracy rises monotonically
+        # with extension (46% at 0, 55% at 1, 63% at 2-3, 71% at 4-7, 84% at
+        # >=8), which is exactly what the gate consumes. The caller supplies
+        # `copy=(byte, ext)` per position; ext==255 means "no earlier
+        # occurrence". With `copy=None` the channel is OFF (generation and
+        # model-free probes do not have an index); training asserts it is
+        # present, so the timed path cannot silently train the baseline.
+        self.suffix_copy_global = (bool(m.get("suffix_copy_global", False))
+                                   and self.suffix_copy > 0)
         # suffix_copy_vote = M: instead of copying from the single most recent
         # occurrence of the k-gram, take up to M earlier occurrences and put
         # the copy mass on those whose match extends furthest back (ties share
@@ -1242,12 +1259,15 @@ class Region(nn.Module):
                 tau0: float = 1.0, hard_mode: bool = False,
                 floor: float = 0.0, training: bool | None = None,
                 ids: torch.Tensor | None = None,
-                ablate_dot: int = -1, pool_only_dot: int = -1) -> dict:
+                ablate_dot: int = -1, pool_only_dot: int = -1,
+                copy: tuple | None = None) -> dict:
         """rows [B, T, d] -> the region's consensus and diagnostics.
 
         floor: the per-dot weight floor eps (spec 04 section 3); callers hand
         0.1/N during training and 0 for the final phase / inference.
         ids: input token ids [B, T], only consumed by the ngram_bias term.
+        copy: (byte [B,T], ext [B,T]) for the GLOBAL copy channel, ext==255
+        meaning "no earlier occurrence". Ignored by every other arm.
         """
         if training is None:
             training = self.training
@@ -1269,6 +1289,27 @@ class Region(nn.Module):
             # val loss. With `sc_slope` the gate is sigmoid(a + b*extension),
             # i.e. it can ask for more weight on a longer match; b=0 at init.
             p = out["log_b"].exp()
+            if self.suffix_copy_global:
+                # index channel: the pointer and its extension arrive from a
+                # precomputed global last-occurrence table, so there is no
+                # [B,T,T] compare here -- one one-hot and one broadcast mix.
+                # ext==255 is the invalid sentinel; masking the extension to 0
+                # keeps the gate's input finite for those rows as well.
+                if copy is not None:
+                    cb, ce = copy
+                    valid = ce != 255
+                    ext = (ce.to(p.dtype).clamp(max=self.sc_extra_cap)
+                           * valid.to(p.dtype))
+                    logit = self.sc_gate
+                    if self.sc_slope is not None:
+                        logit = logit + self.sc_slope * ext
+                    g = (torch.sigmoid(logit).unsqueeze(-1)
+                         * valid.unsqueeze(-1).to(p.dtype))
+                    q = F.one_hot(cb.long().clamp_min(0),
+                                  p.shape[-1]).to(p.dtype)
+                    out["log_b"] = torch.log(
+                        ((1 - g) * p + g * q).clamp_min(1e-9))
+                return out
             if self.suffix_copy_vote > 0:
                 # selection variant: distribute the copy over max-extension
                 # occurrences; the gate sees the MAX extension.

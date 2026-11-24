@@ -44,15 +44,16 @@ def _hashes(b: np.ndarray, k: int) -> np.ndarray:
     return h
 
 
-def build(raw: bytes, k: int, cap: int = CAP):
-    b = np.frombuffer(raw, dtype=np.uint8)
+def build(raw, k: int, cap: int = CAP):
+    b = (raw if isinstance(raw, np.ndarray)
+         else np.frombuffer(raw, dtype=np.uint8))
     n = b.size
     h = _hashes(b, k)
     # positions before k-1 have no full context: sort only the rest, so they
     # stay invalid instead of joining a run of the real hash above
-    order = np.argsort(h[k - 1:], kind="stable") + (k - 1)
+    order = np.argsort(h[k - 1:], kind="stable").astype(np.int32) + (k - 1)
     hs = h[order]
-    src = np.full(n, -1, dtype=np.int64)
+    src = np.full(n, -1, dtype=np.int32)
     if order.size > 1:
         same = hs[1:] == hs[:-1]
         src[order[1:]] = np.where(same, order[:-1], -1)
@@ -60,20 +61,27 @@ def build(raw: bytes, k: int, cap: int = CAP):
 
     valid = src >= 0
     copy_byte = np.zeros(n, dtype=np.uint8)
-    copy_byte[valid] = b[np.clip(src[valid] + 1, 0, n - 1)]
+    copy_byte[valid] = b[np.clip(src[valid].astype(np.int64) + 1, 0, n - 1)]
 
+    # extension: walk back one byte at a time over the still-live positions.
+    # Indexing only the live set keeps peak memory at a few n-sized uint8/bool
+    # arrays instead of cap full int64 temporaries (90 MB corpus, cap 8).
     ext = np.full(n, 255, dtype=np.uint8)
-    idx = np.arange(n, dtype=np.int64)
-    e = np.zeros(n, dtype=np.int64)
+    e = np.zeros(n, dtype=np.uint8)
     live = valid.copy()
     for m in range(cap):
-        ai = idx - k - m
-        si = src - k - m
-        ok = (live & (ai >= 0) & (si >= 0)
-              & (b[np.clip(ai, 0, n - 1)] == b[np.clip(si, 0, n - 1)]))
-        e += ok
-        live &= ok
-    ext[valid] = e[valid].astype(np.uint8)
+        lo = k + m
+        can = live & (src >= lo)
+        can[:lo] = False
+        tt = np.nonzero(can)[0]
+        if tt.size == 0:
+            break
+        keep = b[tt - lo] == b[src[tt].astype(np.int64) - lo]
+        e[tt[keep]] += 1
+        nxt = np.zeros(n, dtype=bool)
+        nxt[tt[keep]] = True
+        live = nxt
+    ext[valid] = e[valid]
     return copy_byte, ext
 
 

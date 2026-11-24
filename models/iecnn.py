@@ -58,11 +58,14 @@ class IECNN(nn.Module):
     # ------------------------------------------------------------------
     def forward(self, input_ids: torch.Tensor, tau0: float = 1.0,
                 hard_mode: bool = False, floor: float = 0.0,
-                ablate_dot: int = -1, pool_only_dot: int = -1):
+                ablate_dot: int = -1, pool_only_dot: int = -1,
+                copy: tuple | None = None):
         """input_ids [B, T] -> dict with final_log_probs [B, T, V] and details.
 
         `floor` is the per-dot weight floor eps (0.1/N in training; 0 late).
         Region temperature floor is 0.5, higher than the dot floor (spec 03).
+        `copy` is the (byte, ext) pair for the global copy channel; every other
+        arm ignores it.
         """
         tau_region = max(tau0, 0.5)
         emb_table = self.embed.weight
@@ -72,7 +75,7 @@ class IECNN(nn.Module):
         for r, region in enumerate(self.regions):
             out = region(rows, emb_table, tau0=tau0, hard_mode=hard_mode,
                          floor=floor, ids=input_ids, ablate_dot=ablate_dot,
-                         pool_only_dot=pool_only_dot)
+                         pool_only_dot=pool_only_dot, copy=copy)
             region_outputs.append(out)
             if r + 1 < self.R:
                 rows = next_region_rows(

@@ -2206,3 +2206,77 @@ def test_copy_index_matches_brute_force():
         assert np.array_equal(cb, b_cb), f"copy_byte mismatch at k={k}"
         assert np.array_equal(ext, b_ext), f"extension mismatch at k={k}"
         assert int((ext == 255).sum()) >= k - 1
+
+
+def test_global_copy_mixture_matches_manual_and_is_off_at_init():
+    """The index channel must be exactly (1-g)p + g*q with q the copied byte
+    and g = sigmoid(a + b*ext) on valid rows, zero on the ext==255 sentinel.
+    At gate=-8 it must be numerically the channel-off model."""
+    cfg = _cfg(suffix_copy=3, suffix_copy_slope=True, suffix_copy_global=True,
+               per_dot_logits=False)
+    m = build_iecnn(cfg, 64).eval()
+    r = m.regions[0]
+    x = torch.tensor([[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+                      [12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1]])
+    cb = torch.tensor([[7, 8, 9, 10, 11, 12, 1, 2, 3, 4, 5, 6],
+                       [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]])
+    ce = torch.tensor([[0, 1, 2, 3, 4, 8, 0, 1, 255, 2, 3, 4],
+                       [255] * 12])
+    with torch.no_grad():
+        r.sc_gate.fill_(-50.0)                            # provably off
+        p = m(x)["final_log_probs"].exp()                 # no index
+        init = m(x, copy=(cb, ce))["final_log_probs"].exp()
+    assert torch.allclose(init, p, atol=1e-6), (init - p).abs().max()
+
+    with torch.no_grad():
+        r.sc_gate.fill_(-0.5)
+        r.sc_slope.fill_(0.25)
+        got = m(x, copy=(cb, ce))["final_log_probs"].exp()
+    valid = (ce != 255).to(p.dtype)
+    ext = ce.to(p.dtype).clamp(max=r.sc_extra_cap) * valid
+    g = (torch.sigmoid(r.sc_gate + r.sc_slope * ext).unsqueeze(-1)
+         * valid.unsqueeze(-1))
+    q = torch.nn.functional.one_hot(cb, 64).to(p.dtype)
+    want = (1 - g) * p + g * q
+    assert torch.allclose(got, want, atol=1e-6), (got - want).abs().max()
+    assert torch.allclose(got.exp().sum(-1), torch.ones(2, 12), atol=1e-4)
+    # the all-sentinel row must be untouched
+    assert torch.allclose(got[1], p[1], atol=1e-6)
+
+
+def test_global_copy_reaches_the_loss_and_earns_gradient():
+    """A global arm whose gate gradient is identically zero would be a silent
+    no-op, not a null result."""
+    cfg = _cfg(suffix_copy=3, suffix_copy_slope=True, suffix_copy_global=True,
+               per_dot_logits=False)
+    m = build_iecnn(cfg, 64)
+    r = m.regions[0]
+    x = torch.randint(0, 16, (2, 12))
+    cb = torch.randint(0, 16, (2, 12))
+    ce = torch.randint(0, 9, (2, 12))
+    y = torch.randint(0, 16, (2, 12))
+    lp = m(x, copy=(cb, ce))["final_log_probs"]
+    torch.nn.functional.cross_entropy(lp.reshape(-1, 64), y.reshape(-1)
+                                      ).backward()
+    for name in ("sc_gate", "sc_slope"):
+        g = getattr(r, name).grad
+        assert g is not None and torch.isfinite(g).all(), name
+        assert g.abs().sum() > 0, f"{name} got no gradient"
+
+
+def test_global_copy_is_skipped_without_an_index():
+    """Generation and model-free probes call the model without an index. For a
+    global arm that must be exactly the channel-off model -- not a silent
+    fallback to the windowed scan, which would be a different mechanism."""
+    cfg = _cfg(suffix_copy=3, suffix_copy_slope=True, suffix_copy_global=True,
+               per_dot_logits=False)
+    g = build_iecnn(cfg, 64).eval()
+    win = build_iecnn(_cfg(suffix_copy=3, suffix_copy_slope=True,
+                           per_dot_logits=False), 64).eval()
+    win.load_state_dict(g.state_dict(), strict=False)
+    win.regions[0].sc_gate.data.fill_(-50.0)   # the windowed arm, shut
+    x = torch.randint(0, 32, (2, 12))
+    with torch.no_grad():
+        a = g(x)["final_log_probs"]
+        b = win(x)["final_log_probs"]
+    assert torch.allclose(a, b, atol=1e-6), (a - b).abs().max()

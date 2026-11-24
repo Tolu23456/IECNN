@@ -68,7 +68,7 @@ def iecnn(cell="gru", lean=False, n_passes=3, n_dots=8, d_s=128, d=128,
           cell_ln=False, share_cell=False, query_from_input=False,
           id_lags=False, ngram_bias=0, suffix_copy=0,
           suffix_copy_slope=False, suffix_copy_vote=0, suffix_copy_ks="",
-          suffix_copy_ext4=False,
+          suffix_copy_ext4=False, suffix_copy_global=False,
           head_rank=0,
           state_carry=False, carry_chunk=8, gla=False,
           global_exact=False, head_skip=False, break_scan=False,
@@ -109,6 +109,7 @@ def iecnn(cell="gru", lean=False, n_passes=3, n_dots=8, d_s=128, d=128,
         "suffix_copy_vote": suffix_copy_vote,
         "suffix_copy_ks": suffix_copy_ks,
         "suffix_copy_ext4": suffix_copy_ext4,
+        "suffix_copy_global": suffix_copy_global,
         "head_rank": head_rank,
         "state_carry": state_carry,
         "carry_chunk": carry_chunk,
@@ -1648,6 +1649,21 @@ ARMS = {
         suffix_copy_slope=True, suffix_copy_vote=3,
         suffix_copy_ext4=True),
         {"lr": 2e-3, "swa": 0.99, "compile": True}),
+    # (0c) GLOBAL index: the same exact-copy circuit, but the pointer comes
+    # from the most recent earlier occurrence of the k-gram ANYWHERE in the
+    # corpus instead of the last 256 bytes. Priced model-free against a trained
+    # `sc3e` base (40,960 val positions, gate fitted on one parity half of the
+    # windows, scored on the other, both folds): global k=4 -0.077/-0.096 vs the
+    # deployed windowed channel, with accuracy by extension 46% at 0, 55% at 1,
+    # 63% at 2-3, 71% at 4-7, 84% at >=8 -- i.e. the gate's input separates
+    # cleanly. Coverage stops binding: 96.9% vs 23.3%. Per-step cost FALLS:
+    # the [B,T,T] compare is precomputed, so training gathers two uint8 rows.
+    "iecnn-n3-x5-p1-ln-decay-d128-w512-rr2-c-sc3g4": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=512, head_post_layers=5,
+        read_ln=True, head_ln=True, global_decay=True, reread=2, suffix_copy=4,
+        suffix_copy_slope=True, suffix_copy_global=True),
+        {"lr": 2e-3, "swa": 0.99, "compile": True}),
     # --- two levers on top of the channel that paid ----------------------
     # (1) A second gate parameter: gate = sigmoid(a + b*extension), where the
     # extension is how many bytes agree BEFORE the 3-gram. Observable, and it
@@ -1899,10 +1915,77 @@ print(f"train={TRAIN_PATH} val={VAL_PATH} | tokens train={train.numel()} "
 _NT = None
 
 
+# --------------------------------------------------------------------------
+# global copy index (suffix_copy_global arms only)
+# --------------------------------------------------------------------------
+# The windowed channel compares each position against the last 256 bytes. The
+# global arm instead consumes a precomputed per-position pointer to the most
+# recent EARLIER occurrence of the k-gram anywhere in the corpus, with the
+# extension that the gate needs. Building it is a one-off sort over the corpus
+# (see scripts/build_copy_index.py); it is NOT paid per step and it is NOT
+# inside the timed budget when the DRY pass builds it.
+#
+# The val index is built over `train[-HIST:] + val`, so a val window can point
+# at train history -- exactly the state a streaming model would have -- and the
+# loader offsets every val position by HIST. HIST defaults to 4 MB.
+GC = None                 # per-arm bundle, set in run()
+GCOPY_HIST = int(os.environ.get("ARM_GCOPY_HIST", "0") or 0)
+GCOPY_CAP = int(os.environ.get("ARM_GCOPY_CAP", "8"))
+GCOPY_DIR = os.environ.get("ARM_GCOPY_DIR", "")
+_gcopy_cache: dict = {}
+
+
+def _gcopy_for(cfg):
+    """Load (or build once, then load) the index bundle for a global arm."""
+    m = cfg.get("model", {})
+    if not m.get("suffix_copy_global"):
+        return None
+    if GCOPY_HIST <= 0:
+        raise RuntimeError("suffix_copy_global needs ARM_GCOPY_HIST > 0")
+    k = int(m.get("suffix_copy", 4))
+    if k in _gcopy_cache:
+        return _gcopy_cache[k]
+    import numpy as np
+    from scripts.build_copy_index import build
+    out_dir = GCOPY_DIR or os.path.join(os.path.dirname(TRAIN_PATH) or ".",
+                                        "gcopy")
+    os.makedirs(out_dir, exist_ok=True)
+    hist = min(GCOPY_HIST, N_TRAIN)
+    tag = f"k{k}_cap{GCOPY_CAP}_h{hist}"
+    need = [os.path.join(out_dir, f"{p}_{tag}.npy")
+            for p in ("train_byte", "train_ext", "val_byte", "val_ext")]
+    if not all(os.path.exists(p) for p in need):
+        print(f"GCOPY build k={k} cap={GCOPY_CAP} train={N_TRAIN} "
+              f"hist={hist} -> {out_dir}", flush=True)
+        tr = np.fromfile(TRAIN_PATH, dtype=np.uint8, count=N_TRAIN)
+        tb, te = build(tr, k, GCOPY_CAP)
+        np.save(need[0], tb)
+        np.save(need[1], te)
+        del tb, te
+        va = np.fromfile(VAL_PATH, dtype=np.uint8, count=N_VAL)
+        blob = np.concatenate([tr[N_TRAIN - hist:N_TRAIN], va])
+        del tr, va
+        vb, ve = build(blob, k, GCOPY_CAP)
+        np.save(need[2], vb)
+        np.save(need[3], ve)
+    bundle = {"k": k, "hist": hist,
+              "tr_byte": torch.from_numpy(np.load(need[0])),
+              "tr_ext": torch.from_numpy(np.load(need[1])),
+              "va_byte": torch.from_numpy(np.load(need[2])),
+              "va_ext": torch.from_numpy(np.load(need[3]))}
+    _gcopy_cache[k] = bundle
+    return bundle
+
+
+def _copy_batch(arr: torch.Tensor, idx: torch.Tensor):
+    return torch.stack([arr[j:j + T] for j in idx]).to(DEV, non_blocking=True)
+
+
 def batches(seed: int = 0, n: int = None):
     n = B if n is None else int(n)
     g = torch.Generator().manual_seed(seed)
     span = train.numel() - T - 1
+    gc = GC
     while True:
         # torch.randint over a 4M range measured at 1.19 ms/step — 3.4% of a
         # whole 150 s toy step, paid identically by both arms and buying
@@ -1910,7 +1993,12 @@ def batches(seed: int = 0, n: int = None):
         i = (torch.rand(n, generator=g) * span).long()
         x = torch.stack([train[j:j + T] for j in i]).to(DEV, non_blocking=True)
         y = torch.stack([train[j + 1:j + 1 + T] for j in i]).to(DEV, non_blocking=True)
-        yield x, y
+        if gc is None:
+            yield x, y
+        else:
+            yield x, y, (_copy_batch(gc["tr_byte"], i),
+                         _copy_batch(gc["tr_ext"], i))
+
 
 
 @torch.no_grad()
@@ -1924,7 +2012,12 @@ def val_bpc(model, windows: int = None) -> float:
         y = val[i + 1:i + 1 + T].unsqueeze(0).to(DEV)
         if x.shape[1] < T:
             break
-        lp = model(x)["final_log_probs"]
+        cp = None
+        if GC is not None:
+            o = GC["hist"] + i
+            cp = (GC["va_byte"][o:o + T].unsqueeze(0).to(DEV),
+                  GC["va_ext"][o:o + T].unsqueeze(0).to(DEV))
+        lp = model(x, copy=cp)["final_log_probs"]
         tot += F.nll_loss(lp.reshape(-1, V), y.reshape(-1),
                           reduction="sum").item()
         n += y.numel()
@@ -1947,8 +2040,9 @@ def train_bpc(model, n_batches: int = 48) -> float:
     gen = batches(seed=1234)
     tot, n = 0.0, 0
     for _ in range(n_batches):
-        x, y = next(gen)
-        lp = model(x)["final_log_probs"]
+        b = next(gen)
+        x, y = b[0], b[1]
+        lp = model(x, copy=(b[2] if len(b) > 2 else None))["final_log_probs"]
         tot += F.nll_loss(lp.reshape(-1, V), y.reshape(-1),
                           reduction="sum").item()
         n += y.numel()
@@ -2089,8 +2183,9 @@ def run(name: str, kind: str, model, lr: float = None,
     warm_steps = (int(os.environ.get("ARM_WARM", "10")) if warm is None else int(warm)) \
         if (warm is not None or os.environ.get("ARM_COMPILE") == "1") else 0
     for _ in range(warm_steps):
-        x, y = next(gen)
-        out = model(x)
+        b = next(gen)
+        x, y = b[0], b[1]
+        out = model(x, copy=(b[2] if len(b) > 2 else None))
         loss = F.cross_entropy(out["final_log_probs"].reshape(-1, V),
                                y.reshape(-1))
         opt.zero_grad(set_to_none=True)
@@ -2118,7 +2213,8 @@ def run(name: str, kind: str, model, lr: float = None,
                 break
         elif el >= BUDGET:
             break
-        x, y = next(gen)
+        b = next(gen)
+        x, y = b[0], b[1]
         # progress: token fraction when token-budgeted (host-independent),
         # wall clock otherwise. Both drive the same schedules.
         frac = min(1.0, tok / TOKENS) if TOKENS else min(1.0, el / BUDGET)
@@ -2128,7 +2224,7 @@ def run(name: str, kind: str, model, lr: float = None,
         cur_lr = lr0 * warm
         for grp in opt.param_groups:
             grp["lr"] = cur_lr
-        out = model(x)
+        out = model(x, copy=(b[2] if len(b) > 2 else None))
         loss = F.cross_entropy(out["final_log_probs"].reshape(-1, V),
                                y.reshape(-1))
         opt.zero_grad(set_to_none=True)
@@ -2236,10 +2332,13 @@ def main():
                 # .to(DEV) matters: without it the dry pass builds a CPU model,
                 # feeds it a CUDA batch and "fails" on the GPU machine, which
                 # is the opposite of what a pre-flight check is for.
-                model = (build_transformer_baseline(mk(), V) if kind == "transformer"
-                         else build_iecnn(mk(), V)).to(DEV)
-                x, y = next(batches(0))
-                out = model(x)
+                cfg = mk()
+                globals()["GC"] = _gcopy_for(cfg)
+                model = (build_transformer_baseline(cfg, V) if kind == "transformer"
+                         else build_iecnn(cfg, V)).to(DEV)
+                b = next(batches(0))
+                x, y = b[0], b[1]
+                out = model(x, copy=(b[2] if len(b) > 2 else None))
                 loss = F.cross_entropy(out["final_log_probs"].reshape(-1, V),
                                        y.reshape(-1))
                 loss.backward()
@@ -2267,6 +2366,7 @@ def main():
         opts = entry[2] if len(entry) > 2 else {}
         torch.manual_seed(opts.get("seed", SEED))
         cfg = mk()
+        globals()["GC"] = _gcopy_for(cfg)
         # Harness-level knob (never an arm knob): when torch.compile is on but
         # Inductor's CUDA SplitScan lowering cannot handle the prefix scan,
         # every IECNN arm gets the eager graph boundary around that one
