@@ -2239,7 +2239,7 @@ def test_global_copy_mixture_matches_manual_and_is_off_at_init():
     q = torch.nn.functional.one_hot(cb, 64).to(p.dtype)
     want = (1 - g) * p + g * q
     assert torch.allclose(got, want, atol=1e-6), (got - want).abs().max()
-    assert torch.allclose(got.exp().sum(-1), torch.ones(2, 12), atol=1e-4)
+    assert torch.allclose(got.sum(-1), torch.ones(2, 12), atol=1e-4)
     # the all-sentinel row must be untouched
     assert torch.allclose(got[1], p[1], atol=1e-6)
 
