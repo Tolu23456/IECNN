@@ -1664,6 +1664,20 @@ ARMS = {
         read_ln=True, head_ln=True, global_decay=True, reread=2, suffix_copy=4,
         suffix_copy_slope=True, suffix_copy_global=True),
         {"lr": 2e-3, "swa": 0.99, "compile": True}),
+    # Seed-1 twin of the global arm. The 360 s screen (`iecnn-g4-360-gpu`) put
+    # sc3g4 at 1.7200 against the in-session sc3ev at 1.8045 -- -0.0845 at
+    # EQUAL wall clock on MORE tokens (119.06M vs 116.81M) and a LOWER step
+    # time (0.0248 vs 0.0253, i.e. the precomputed pointer really does replace
+    # the [B,T,T] compare). That is 8x the 360 s resolution floor, so the arm
+    # goes straight to a 900 s two-seed confirm against one anchor rather than
+    # being screened again. Same architecture as its seed-0 twin, only the seed
+    # changes, so the pair isolates seed noise.
+    "iecnn-n3-x5-p1-ln-decay-d128-w512-rr2-c-sc3g4-s1": ("iecnn", lambda: iecnn(
+        "lug", True, n_passes=1, n_dots=3, d_s=96, d=128, per_dot_logits=False,
+        global_read=True, spans=(8,), head_post=512, head_post_layers=5,
+        read_ln=True, head_ln=True, global_decay=True, reread=2, suffix_copy=4,
+        suffix_copy_slope=True, suffix_copy_global=True),
+        {"lr": 2e-3, "swa": 0.99, "compile": True, "seed": 1}),
     # --- two levers on top of the channel that paid ----------------------
     # (1) A second gate parameter: gate = sigmoid(a + b*extension), where the
     # extension is how many bytes agree BEFORE the 3-gram. Observable, and it
